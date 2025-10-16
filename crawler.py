@@ -1,14 +1,18 @@
 from __future__ import annotations
 
 import collections
+import re
+import threading
 import time
 from dataclasses import dataclass
+from datetime import date
 from typing import Callable, Iterable, List, Optional, Set, Tuple
 from urllib.parse import urljoin, urldefrag, urlparse
 from urllib.robotparser import RobotFileParser
 
 import requests
 from bs4 import BeautifulSoup
+from dateutil import parser as date_parser
 
 USER_AGENT = "LocalSchoolCrawler/1.0 (+https://example.com/contact)"
 REQUEST_TIMEOUT = 10  # seconds
@@ -44,14 +48,78 @@ def normalize_url(url: str) -> str:
     return cleaned
 
 
-def extract_links(base_url: str, html: str) -> Iterable[str]:
-    soup = BeautifulSoup(html, "html.parser")
+def extract_links(base_url: str, html: str, *, soup: Optional[BeautifulSoup] = None) -> Iterable[str]:
+    if soup is None:
+        soup = BeautifulSoup(html, "html.parser")
     for anchor in soup.find_all("a", href=True):
         href = anchor.get("href")
         if not href:
             continue
         absolute = urljoin(base_url, href)
         yield normalize_url(absolute)
+
+
+def parse_date_string(value: str) -> Optional[date]:
+    if not value:
+        return None
+    try:
+        parsed = date_parser.parse(value, dayfirst=True, fuzzy=True)
+    except (ValueError, OverflowError, TypeError):
+        return None
+    if not parsed:
+        return None
+    return parsed.date()
+
+
+def extract_publication_date(soup: BeautifulSoup) -> Optional[date]:
+    meta_fields = (
+        ("property", "article:published_time"),
+        ("property", "article:modified_time"),
+        ("property", "og:published_time"),
+        ("property", "og:updated_time"),
+        ("name", "pubdate"),
+        ("name", "publishdate"),
+        ("name", "publish_date"),
+        ("name", "date"),
+        ("name", "dc.date"),
+        ("name", "dc.date.issued"),
+        ("itemprop", "datePublished"),
+        ("itemprop", "dateCreated"),
+        ("itemprop", "dateModified"),
+    )
+
+    for attr, value in meta_fields:
+        tag = soup.find("meta", attrs={attr: value})
+        if tag and tag.get("content"):
+            parsed = parse_date_string(tag.get("content"))
+            if parsed:
+                return parsed
+
+    time_tag = soup.find("time", attrs={"datetime": True})
+    if time_tag:
+        parsed = parse_date_string(time_tag.get("datetime"))
+        if parsed:
+            return parsed
+
+    date_like = soup.find(
+        lambda tag: tag.name in {"time", "span", "div", "p"}
+        and any(
+            cls in (tag.get("class") or []) for cls in ["date", "datum", "time", "published"]
+        )
+    )
+    if date_like and date_like.get_text(strip=True):
+        parsed = parse_date_string(date_like.get_text(strip=True))
+        if parsed:
+            return parsed
+
+    text = soup.get_text(" ", strip=True)
+    match = re.search(r"(20\d{2}|19\d{2})[-/.](0?[1-9]|1[0-2])[-/.](0?[1-9]|[12]\d|3[01])", text)
+    if match:
+        parsed = parse_date_string(match.group(0))
+        if parsed:
+            return parsed
+
+    return None
 
 
 def keyword_matches(text: str, keywords: Iterable[str]) -> Tuple[str, ...]:
@@ -93,6 +161,9 @@ def crawl_site(
     max_pages: int = MAX_PAGES_DEFAULT,
     same_domain_only: bool = True,
     progress_callback: Optional[Callable[[CrawlProgress], None]] = None,
+    start_date: Optional[date] = None,
+    end_date: Optional[date] = None,
+    cancel_event: Optional[threading.Event] = None,
 ) -> List[CrawlResult]:
     """Crawl pages starting from start_url and return URLs containing keywords."""
 
@@ -124,6 +195,8 @@ def crawl_site(
         )
 
     while queue and len(visited) < max_pages:
+        if cancel_event and cancel_event.is_set():
+            break
         current_url = queue.popleft()
         if current_url in visited:
             continue
@@ -172,27 +245,45 @@ def crawl_site(
             continue
 
         page_text = response.text
-        matches = keyword_matches(page_text, keywords)
-        if matches:
-            crawl_result = CrawlResult(
-                source_url=normalized_start,
-                target_url=current_url,
-                matched_keywords=matches,
-            )
-            results.append(crawl_result)
-            if progress_callback:
-                progress_callback(
-                    CrawlProgress(
-                        event="match",
-                        current_url=current_url,
-                        visited=len(visited),
-                        queue_length=len(queue),
-                        result=crawl_result,
-                    )
+        soup = BeautifulSoup(page_text, "html.parser")
+
+        should_filter = (
+            current_url != normalized_start and (start_date is not None or end_date is not None)
+        )
+        within_range = True
+        publication_date: Optional[date] = None
+        if should_filter:
+            publication_date = extract_publication_date(soup)
+            if publication_date is None:
+                within_range = False
+            else:
+                if start_date and publication_date < start_date:
+                    within_range = False
+                if end_date and publication_date > end_date:
+                    within_range = False
+
+        if not should_filter or within_range:
+            matches = keyword_matches(page_text, keywords)
+            if matches:
+                crawl_result = CrawlResult(
+                    source_url=normalized_start,
+                    target_url=current_url,
+                    matched_keywords=matches,
                 )
+                results.append(crawl_result)
+                if progress_callback:
+                    progress_callback(
+                        CrawlProgress(
+                            event="match",
+                            current_url=current_url,
+                            visited=len(visited),
+                            queue_length=len(queue),
+                            result=crawl_result,
+                        )
+                    )
 
         if current_url == normalized_start:
-            for link in extract_links(response.url, page_text):
+            for link in extract_links(response.url, page_text, soup=soup):
                 parsed_link = urlparse(link)
                 if same_domain_only and parsed_link.netloc != parsed_start.netloc:
                     continue
