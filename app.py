@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import json
+import math
 import threading
 import time
+import unicodedata
 import uuid
 from dataclasses import dataclass, field
 from datetime import date, datetime
@@ -10,6 +12,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
 
 from flask import Flask, jsonify, render_template, request
+from openpyxl import load_workbook
 
 from crawler import (
     CrawlProgress,
@@ -24,6 +27,18 @@ SAVED_SEARCHES_PATH = Path("saved_searches.json")
 saved_search_lock = threading.Lock()
 DEFAULT_CONCURRENCY = 5
 MAX_CONCURRENCY = 150
+STAMMDATEN_PATH = Path("stammdaten.json")
+stammdaten_lock = threading.Lock()
+
+STAMMDATEN_FIELDS = [
+    {"key": "schul_id", "label": "Schul ID"},
+    {"key": "traeger", "label": "Träger"},
+    {"key": "name", "label": "Name"},
+    {"key": "ort", "label": "Ort"},
+    {"key": "anzahl_schueler", "label": "Anzahl Schüler"},
+    {"key": "anzahl_klassen", "label": "Anzahl Klassen"},
+    {"key": "homepage", "label": "Homepage"},
+]
 
 
 def _read_saved_searches_unlocked() -> List[Dict[str, object]]:
@@ -54,6 +69,144 @@ def append_saved_search(entry: Dict[str, object]) -> None:
         except OSError:
             # If persisting fails we silently ignore to avoid breaking the crawl UI.
             pass
+
+
+def _normalize_header(value: str) -> str:
+    normalized = unicodedata.normalize("NFKD", value or "")
+    normalized = "".join(ch for ch in normalized if not unicodedata.combining(ch))
+    normalized = normalized.lower().replace("-", " ").replace("_", " ")
+    return " ".join(normalized.split())
+
+
+def _coerce_str(value: object) -> str:
+    if value is None:
+        return ""
+    text = str(value).strip()
+    return text
+
+
+def _coerce_int(value: object) -> Optional[int]:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, (int,)):
+        return int(value)
+    if isinstance(value, float):
+        if math.isnan(value):
+            return None
+        return int(value)
+    text = str(value).strip()
+    if not text:
+        return None
+    cleaned = text.replace(".", "").replace(" ", "")
+    try:
+        return int(cleaned)
+    except ValueError:
+        try:
+            return int(float(cleaned.replace(",", ".")))
+        except ValueError:
+            return None
+
+
+def load_stammdaten() -> List[Dict[str, object]]:
+    with stammdaten_lock:
+        if not STAMMDATEN_PATH.exists():
+            return []
+        try:
+            with STAMMDATEN_PATH.open("r", encoding="utf-8") as handle:
+                raw_data = json.load(handle)
+        except (json.JSONDecodeError, OSError):
+            return []
+
+        records: List[Dict[str, object]] = []
+        if isinstance(raw_data, list):
+            for entry in raw_data:
+                if not isinstance(entry, dict):
+                    continue
+                record = {
+                    "schul_id": _coerce_str(entry.get("schul_id")),
+                    "traeger": _coerce_str(entry.get("traeger")),
+                    "name": _coerce_str(entry.get("name")),
+                    "ort": _coerce_str(entry.get("ort")),
+                    "anzahl_schueler": _coerce_int(entry.get("anzahl_schueler")),
+                    "anzahl_klassen": _coerce_int(entry.get("anzahl_klassen")),
+                    "homepage": _coerce_str(entry.get("homepage")),
+                }
+                if record["homepage"]:
+                    records.append(record)
+        return records
+
+
+def save_stammdaten(records: List[Dict[str, object]]) -> None:
+    with stammdaten_lock:
+        try:
+            with STAMMDATEN_PATH.open("w", encoding="utf-8") as handle:
+                json.dump(records, handle, ensure_ascii=False, indent=2)
+        except OSError:
+            pass
+
+
+def parse_stammdaten_excel(file_storage) -> List[Dict[str, object]]:
+    try:
+        file_storage.stream.seek(0)
+    except (AttributeError, OSError):  # pragma: no cover - defensive
+        pass
+
+    try:
+        workbook = load_workbook(file_storage, data_only=True)
+    except Exception as exc:  # pragma: no cover - convert to user-facing message
+        raise ValueError("Die Excel-Datei konnte nicht gelesen werden.") from exc
+
+    worksheet = workbook.active
+    rows = list(worksheet.iter_rows(values_only=True))
+    if not rows:
+        raise ValueError("Die Excel-Datei enthält keine Daten.")
+
+    header_row = rows[0]
+    header_map = {
+        _normalize_header(str(cell) if cell is not None else ""): index
+        for index, cell in enumerate(header_row)
+    }
+
+    expected_headers = {
+        field["key"]: _normalize_header(field["label"])
+        for field in STAMMDATEN_FIELDS
+    }
+
+    column_map: Dict[str, int] = {}
+    for key, normalized in expected_headers.items():
+        if normalized in header_map:
+            column_map[key] = header_map[normalized]
+
+    if len(column_map) < len(STAMMDATEN_FIELDS):
+        for idx, field in enumerate(STAMMDATEN_FIELDS):
+            column_map.setdefault(field["key"], idx)
+
+    records: List[Dict[str, object]] = []
+    for raw_row in rows[1:]:
+        if raw_row is None:
+            continue
+        values = list(raw_row)
+        if not any(cell not in (None, "") for cell in values):
+            continue
+
+        record = {}
+        for field in STAMMDATEN_FIELDS:
+            column_index = column_map.get(field["key"])
+            cell_value = values[column_index] if column_index is not None and column_index < len(values) else None
+            if field["key"] in {"anzahl_schueler", "anzahl_klassen"}:
+                record[field["key"]] = _coerce_int(cell_value)
+            else:
+                record[field["key"]] = _coerce_str(cell_value)
+
+        if record.get("homepage"):
+            records.append(record)
+
+    if not records:
+        raise ValueError("Es konnten keine gültigen Stammdaten gefunden werden.")
+
+    return records
 
 
 @dataclass
@@ -222,34 +375,55 @@ def run_crawl_job(job: CrawlJob) -> None:
 
 @app.route("/", methods=["GET", "POST"])
 def index():
-    if request.method == "POST":
-        raw_start_urls = request.form.get("start_urls", "")
-        raw_keywords = request.form.get("keywords", "")
-        max_pages = request.form.get("max_pages", type=int, default=MAX_PAGES_DEFAULT)
-        raw_start_date = request.form.get("start_date", "").strip()
-        raw_end_date = request.form.get("end_date", "").strip()
-        concurrency = request.form.get("concurrency", type=int, default=DEFAULT_CONCURRENCY)
+    stammdaten_records = load_stammdaten()
+    keywords_input = ""
+    selected_homepages: List[str] = []
+    max_pages = MAX_PAGES_DEFAULT
+    concurrency = DEFAULT_CONCURRENCY
+    start_date_input = ""
+    end_date_input = ""
+    error: Optional[str] = None
+    job_id: Optional[str] = None
+    submitted = False
 
-        start_urls = [url.strip() for url in raw_start_urls.splitlines() if url.strip()]
+    if request.method == "POST":
+        submitted = True
+        raw_keywords = request.form.get("keywords", "")
+        keywords_input = raw_keywords
+        max_pages = request.form.get("max_pages", type=int, default=MAX_PAGES_DEFAULT)
+        concurrency = request.form.get("concurrency", type=int, default=DEFAULT_CONCURRENCY)
+        start_date_input = request.form.get("start_date", "").strip()
+        end_date_input = request.form.get("end_date", "").strip()
+
+        selected_values = request.form.getlist("start_urls")
+        allowed_homepages = {record["homepage"] for record in stammdaten_records if record.get("homepage")}
+        selected_set = {value for value in selected_values if value in allowed_homepages}
+        ordered_selection: List[str] = []
+        for record in stammdaten_records:
+            homepage = record.get("homepage")
+            if homepage in selected_set:
+                ordered_selection.append(homepage)
+        selected_homepages = ordered_selection
+
         keywords = [kw.strip() for kw in raw_keywords.splitlines() if kw.strip()]
-        error = None
-        job_id = None
         start_date_value: Optional[date] = None
         end_date_value: Optional[date] = None
 
-        if not start_urls:
-            error = "Bitte geben Sie mindestens eine Start-URL ein."
+        if not stammdaten_records:
+            error = "Es sind keine Stammdaten vorhanden. Bitte importieren Sie zuerst Schulen."
+        elif not selected_homepages:
+            error = "Bitte wählen Sie mindestens eine Schule aus den Stammdaten aus."
         elif not keywords:
             error = "Bitte geben Sie mindestens ein Suchstichwort ein."
         else:
-            if raw_start_date:
+            if start_date_input:
                 try:
-                    start_date_value = datetime.strptime(raw_start_date, "%Y-%m-%d").date()
+                    start_date_value = datetime.strptime(start_date_input, "%Y-%m-%d").date()
                 except ValueError:
                     error = "Das Startdatum ist ungültig."
-            if not error and raw_end_date:
+            if not error and end_date_input:
                 try:
-                    end_date_value = datetime.strptime(raw_end_date, "%Y-%m-%d").date()
+                    end_date_value = datetime.strptime(end_date_input, "%Y-%m-%d").date()
                 except ValueError:
                     error = "Das Enddatum ist ungültig."
             if (
@@ -268,11 +442,11 @@ def index():
             job_id = uuid.uuid4().hex
             job = CrawlJob(
                 id=job_id,
-                start_urls=start_urls,
+                start_urls=selected_homepages,
                 keywords=keywords,
                 max_pages=max_pages,
                 concurrency=concurrency,
-                total_start_urls=len(start_urls),
+                total_start_urls=len(selected_homepages),
                 start_date=start_date_value,
                 end_date=end_date_value,
             )
@@ -280,32 +454,52 @@ def index():
             thread = threading.Thread(target=run_crawl_job, args=(job,), daemon=True)
             thread.start()
 
-        return render_template(
-            "index.html",
-            start_urls_input=raw_start_urls,
-            keywords_input=raw_keywords,
-            max_pages=max_pages,
-            concurrency=concurrency,
-            start_date_input=raw_start_date,
-            end_date_input=raw_end_date,
-            error=error,
-            submitted=True,
-            job_id=job_id,
-            max_concurrency=MAX_CONCURRENCY,
-        )
-
     return render_template(
         "index.html",
-        start_urls_input="",
-        keywords_input="",
-        max_pages=MAX_PAGES_DEFAULT,
-        concurrency=DEFAULT_CONCURRENCY,
-        start_date_input="",
-        end_date_input="",
-        error=None,
-        submitted=False,
-        job_id=None,
+        stammdaten_records=stammdaten_records,
+        stammdaten_fields=STAMMDATEN_FIELDS,
+        selected_homepages=selected_homepages,
+        keywords_input=keywords_input,
+        max_pages=max_pages,
+        concurrency=concurrency,
+        start_date_input=start_date_input,
+        end_date_input=end_date_input,
+        error=error,
+        submitted=submitted,
+        job_id=job_id,
         max_concurrency=MAX_CONCURRENCY,
+    )
+
+
+@app.route("/stammdaten", methods=["GET", "POST"])
+def stammdaten():
+    message: Optional[str] = None
+    message_category: Optional[str] = None
+
+    if request.method == "POST":
+        uploaded = request.files.get("excel_file")
+        if uploaded is None or not uploaded.filename:
+            message = "Bitte wählen Sie eine Excel-Datei aus."
+            message_category = "danger"
+        else:
+            try:
+                records = parse_stammdaten_excel(uploaded)
+            except ValueError as exc:
+                message = str(exc)
+                message_category = "danger"
+            else:
+                save_stammdaten(records)
+                message = f"{len(records)} Stammdatensätze wurden übernommen."
+                message_category = "success"
+
+    records = load_stammdaten()
+    return render_template(
+        "stammdaten.html",
+        records=records,
+        message=message,
+        message_category=message_category,
+        stammdaten_fields=STAMMDATEN_FIELDS,
+        storage_file=STAMMDATEN_PATH.name,
     )
 
 

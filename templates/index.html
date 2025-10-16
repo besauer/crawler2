@@ -22,11 +22,87 @@
         <div class="alert alert-danger" role="alert">{{ error }}</div>
     {% endif %}
 
+    <div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
+        <a href="{{ url_for('stammdaten') }}" class="btn btn-link px-0">Stammdaten verwalten</a>
+        <span class="text-muted small">
+            {% if stammdaten_records %}
+                {{ stammdaten_records|length }} Schulen in den Stammdaten
+            {% else %}
+                Keine Stammdaten importiert
+            {% endif %}
+        </span>
+    </div>
+
     <form method="post" class="mb-4">
         <div class="mb-3">
-            <label for="start_urls" class="form-label">Start-URLs (eine URL pro Zeile)</label>
-            <textarea class="form-control" id="start_urls" name="start_urls" placeholder="https://schule-1.de&#10;https://schule-2.de" required>{{ start_urls_input }}</textarea>
-            <div class="form-text">Für jede Start-URL werden nur die direkt verlinkten Seiten derselben Domain geprüft.</div>
+            <label class="form-label">Schulen aus den Stammdaten auswählen</label>
+            {% if not stammdaten_records %}
+                <div class="alert alert-warning" role="alert">
+                    Bitte importieren Sie zuerst eine Excel-Datei mit Stammdaten.
+                </div>
+            {% else %}
+                <div class="d-flex flex-wrap gap-2 mb-2">
+                    <button type="button" class="btn btn-outline-primary btn-sm" id="select-all">Alle auswählen</button>
+                    <button type="button" class="btn btn-outline-secondary btn-sm" id="select-none">Keine auswählen</button>
+                </div>
+                <div class="row g-2 mb-3">
+                    {% for field in stammdaten_fields %}
+                        <div class="col-md-4">
+                            <label class="form-label mb-1">{{ field.label }}</label>
+                            <div class="input-group input-group-sm">
+                                <input type="text" class="form-control filter-input" id="filter-{{ field.key }}" placeholder="Wert enthält ..." data-field="{{ field.key }}">
+                                <button type="button" class="btn btn-outline-primary filter-select" data-field="{{ field.key }}">Auswählen</button>
+                            </div>
+                        </div>
+                    {% endfor %}
+                </div>
+                <div class="form-text mb-2">Ausgewählte Schulen: <span id="selection-count">0</span></div>
+                <div class="table-responsive" style="max-height: 320px; overflow-y: auto;">
+                    <table class="table table-sm table-hover align-middle mb-0">
+                        <thead class="table-light">
+                        <tr>
+                            <th scope="col" style="width: 60px;">Auswahl</th>
+                            <th scope="col">Schul&nbsp;ID</th>
+                            <th scope="col">Träger</th>
+                            <th scope="col">Name</th>
+                            <th scope="col">Ort</th>
+                            <th scope="col">Anzahl Schüler</th>
+                            <th scope="col">Anzahl Klassen</th>
+                            <th scope="col">Homepage</th>
+                        </tr>
+                        </thead>
+                        <tbody>
+                        {% for record in stammdaten_records %}
+                            <tr>
+                                <td>
+                                    <div class="form-check m-0">
+                                        <input class="form-check-input school-checkbox" type="checkbox" value="{{ record.homepage }}" id="school-{{ loop.index }}" name="start_urls"
+                                               {% if record.homepage in selected_homepages %}checked{% endif %}
+                                               {% for field in stammdaten_fields %}
+                                                   data-{{ field.key|replace('_', '-') }}="{{ record[field.key]|default('', true) }}"
+                                               {% endfor %}>
+                                        <label class="form-check-label small" for="school-{{ loop.index }}">&nbsp;</label>
+                                    </div>
+                                </td>
+                                <td>{{ record.schul_id or "–" }}</td>
+                                <td>{{ record.traeger or "–" }}</td>
+                                <td>{{ record.name or "–" }}</td>
+                                <td>{{ record.ort or "–" }}</td>
+                                <td>{{ record.anzahl_schueler if record.anzahl_schueler is not none else "–" }}</td>
+                                <td>{{ record.anzahl_klassen if record.anzahl_klassen is not none else "–" }}</td>
+                                <td>
+                                    {% if record.homepage %}
+                                        <a href="{{ record.homepage }}" target="_blank" rel="noopener">{{ record.homepage }}</a>
+                                    {% else %}
+                                        –
+                                    {% endif %}
+                                </td>
+                            </tr>
+                        {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+            {% endif %}
         </div>
         <div class="mb-3">
             <label for="keywords" class="form-label">Suchstichwörter (ein Wort pro Zeile)</label>
@@ -55,7 +131,7 @@
                 <input type="date" class="form-control" id="end_date" name="end_date" value="{{ end_date_input }}">
             </div>
         </div>
-        <button type="submit" class="btn btn-primary">Crawler starten</button>
+        <button type="submit" class="btn btn-primary" {% if not stammdaten_records %}disabled{% endif %}>Crawler starten</button>
     </form>
 
     <div id="progress-section" class="mb-4" {% if not job_id %}style="display:none"{% endif %}>
@@ -112,6 +188,95 @@
         <div class="accordion" id="saved-searches-accordion"></div>
     </div>
 </div>
+
+<script>
+    (function () {
+        const schoolCheckboxes = Array.from(document.querySelectorAll('.school-checkbox'));
+        const selectionCount = document.getElementById('selection-count');
+        const selectAllButton = document.getElementById('select-all');
+        const selectNoneButton = document.getElementById('select-none');
+        const filterButtons = document.querySelectorAll('.filter-select');
+        const filterInputs = document.querySelectorAll('.filter-input');
+
+        function updateSelectionCount() {
+            if (!selectionCount) {
+                return;
+            }
+            const count = schoolCheckboxes.filter(cb => cb.checked).length;
+            selectionCount.textContent = count.toString();
+        }
+
+        function toDatasetKey(field) {
+            return field.replace(/_([a-z])/g, (_, letter) => letter.toUpperCase());
+        }
+
+        if (selectionCount) {
+            updateSelectionCount();
+            schoolCheckboxes.forEach(cb => {
+                cb.addEventListener('change', updateSelectionCount);
+            });
+        }
+
+        if (selectAllButton) {
+            selectAllButton.addEventListener('click', () => {
+                schoolCheckboxes.forEach(cb => {
+                    cb.checked = true;
+                });
+                updateSelectionCount();
+            });
+        }
+
+        if (selectNoneButton) {
+            selectNoneButton.addEventListener('click', () => {
+                schoolCheckboxes.forEach(cb => {
+                    cb.checked = false;
+                });
+                updateSelectionCount();
+            });
+        }
+
+        filterButtons.forEach(button => {
+            button.addEventListener('click', () => {
+                const field = button.dataset.field;
+                if (!field) {
+                    return;
+                }
+                const input = document.querySelector(`#filter-${field}`);
+                if (!input) {
+                    return;
+                }
+                const needle = input.value.trim().toLowerCase();
+                if (!needle) {
+                    return;
+                }
+                const datasetKey = toDatasetKey(field);
+                schoolCheckboxes.forEach(cb => {
+                    const value = (cb.dataset[datasetKey] || '').toLowerCase();
+                    if (value.includes(needle)) {
+                        cb.checked = true;
+                    }
+                });
+                updateSelectionCount();
+            });
+        });
+
+        filterInputs.forEach(input => {
+            input.addEventListener('keydown', event => {
+                if (event.key === 'Enter') {
+                    event.preventDefault();
+                    const field = input.dataset.field;
+                    if (!field) {
+                        return;
+                    }
+                    const button = document.querySelector(`.filter-select[data-field="${field}"]`);
+                    if (button) {
+                        button.click();
+                    }
+                }
+            });
+        });
+    })();
+</script>
 
 {% if job_id %}
 <script>
