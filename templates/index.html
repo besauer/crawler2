@@ -46,10 +46,16 @@
         <p class="mb-1"><strong>Status:</strong> <span id="status-text">Wird vorbereitet ...</span></p>
         <p class="mb-1">Such-URLs: <span id="start-progress">0/0</span></p>
         <p class="mb-1">Gefundene URLs: <span id="found-count">0</span></p>
-        <p class="mb-3">Aktuelle Seite: <span id="current-page">–</span></p>
+        <p class="mb-1">Aktuelle Seite: <span id="current-page">–</span></p>
+        <p class="mb-3">Warteschlange: <span id="queue-length">0</span> Seiten</p>
         <div class="progress" role="progressbar" aria-valuemin="0" aria-valuemax="100">
             <div id="progress-bar" class="progress-bar progress-bar-striped progress-bar-animated"
                  style="width: 0%;">0%</div>
+        </div>
+        <div class="mt-3">
+            <h3 class="h5">Zuletzt geprüfte Seiten</h3>
+            <ul id="recent-pages" class="list-unstyled small mb-0">
+            </ul>
         </div>
     </div>
 
@@ -83,10 +89,12 @@
     const startProgress = document.getElementById("start-progress");
     const foundCount = document.getElementById("found-count");
     const currentPage = document.getElementById("current-page");
+    const queueLength = document.getElementById("queue-length");
     const progressBar = document.getElementById("progress-bar");
     const resultsContainer = document.getElementById("results-container");
     const resultsTableBody = document.querySelector("#results-table tbody");
     const noResultsAlert = document.getElementById("no-results-alert");
+    const recentPagesList = document.getElementById("recent-pages");
 
     progressSection.style.display = "";
 
@@ -154,6 +162,7 @@
                 startProgress.textContent = `${data.processed_start_urls}/${data.total_start_urls}`;
                 foundCount.textContent = data.found_count;
                 currentPage.textContent = data.current_page || "–";
+                queueLength.textContent = data.queue_length ?? 0;
 
                 const percent = data.progress_percent || 0;
                 progressBar.style.width = `${percent}%`;
@@ -162,6 +171,25 @@
 
                 if (Array.isArray(data.results)) {
                     renderResults(data.results);
+                }
+
+                if (Array.isArray(data.recent_pages)) {
+                    recentPagesList.innerHTML = "";
+                    data.recent_pages.slice().reverse().forEach(pageUrl => {
+                        const listItem = document.createElement("li");
+                        const link = document.createElement("a");
+                        link.href = pageUrl;
+                        link.textContent = pageUrl;
+                        link.target = "_blank";
+                        link.rel = "noopener";
+                        listItem.appendChild(link);
+                        recentPagesList.appendChild(listItem);
+                    });
+                    if (data.recent_pages.length === 0) {
+                        const emptyItem = document.createElement("li");
+                        emptyItem.textContent = "Noch keine Seiten geprüft.";
+                        recentPagesList.appendChild(emptyItem);
+                    }
                 }
 
                 if (data.completed) {

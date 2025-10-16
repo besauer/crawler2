@@ -26,6 +26,8 @@ class CrawlJob:
     current_start_url: Optional[str] = None
     current_page: Optional[str] = None
     visited_in_current: int = 0
+    queue_length: int = 0
+    recent_pages: List[str] = field(default_factory=list)
     status: str = "pending"  # pending, running, finished, error
     error: Optional[str] = None
     results: List[CrawlResult] = field(default_factory=list)
@@ -47,9 +49,11 @@ class CrawlJob:
                 "current_start_url": self.current_start_url,
                 "current_page": self.current_page,
                 "visited_in_current": self.visited_in_current,
+                "queue_length": self.queue_length,
                 "found_count": self.found_count,
                 "progress_percent": self.progress_percent,
                 "completed": self.completed,
+                "recent_pages": list(self.recent_pages),
                 "results": [
                     {
                         "source_url": result.source_url,
@@ -62,8 +66,16 @@ class CrawlJob:
 
     def update_progress(self, progress: CrawlProgress) -> None:
         with self._lock:
+            if progress.queue_length is not None:
+                self.queue_length = progress.queue_length
+
             if progress.current_url:
                 self.current_page = progress.current_url
+                if progress.event in {"page", "visited"}:
+                    if not self.recent_pages or self.recent_pages[-1] != progress.current_url:
+                        self.recent_pages.append(progress.current_url)
+                        if len(self.recent_pages) > 10:
+                            self.recent_pages = self.recent_pages[-10:]
 
             if progress.event == "visited" and progress.visited is not None:
                 self.visited_in_current = progress.visited
@@ -84,6 +96,7 @@ class CrawlJob:
             self.processed_start_urls += 1
             self.visited_in_current = 0
             self.current_page = None
+            self.queue_length = 0
             pages_total = max(1, self.total_start_urls * self.max_pages)
             overall_pages = self.processed_start_urls * self.max_pages
             self.progress_percent = min(100, int((overall_pages / pages_total) * 100))
