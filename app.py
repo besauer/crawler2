@@ -45,8 +45,8 @@ STAMMDATEN_FIELDS = [
     {"key": "traeger", "label": "Träger"},
     {"key": "name", "label": "Name"},
     {"key": "ort", "label": "Ort"},
-    {"key": "anzahl_schueler", "label": "Anzahl Schüler"},
-    {"key": "anzahl_klassen", "label": "Anzahl Klassen"},
+    {"key": "anzahl_schueler", "label": "Anzahl Schüler", "type": "numeric"},
+    {"key": "anzahl_klassen", "label": "Anzahl Klassen", "type": "numeric"},
     {"key": "homepage", "label": "Homepage"},
 ]
 

@@ -82,8 +82,26 @@
                         <div class="col-md-4">
                             <label class="form-label mb-1">{{ field.label }}</label>
                             <div class="input-group input-group-sm">
-                                <input type="text" class="form-control filter-input" id="filter-{{ field.key }}" placeholder="Wert enthält ..." data-field="{{ field.key }}">
-                                <button type="button" class="btn btn-outline-primary filter-select" data-field="{{ field.key }}">Auswählen</button>
+                                {% if field.type == 'numeric' %}
+                                    <select class="form-select form-select-sm filter-operator" data-field="{{ field.key }}" aria-label="Vergleichsoperator auswählen">
+                                        <option value="eq">=</option>
+                                        <option value="gt">&gt;</option>
+                                        <option value="lt">&lt;</option>
+                                    </select>
+                                {% endif %}
+                                <input
+                                    type="text"
+                                    class="form-control filter-input"
+                                    id="filter-{{ field.key }}"
+                                    placeholder="{% if field.type == 'numeric' %}Zahl eingeben{% else %}Wert enthält ...{% endif %}"
+                                    data-field="{{ field.key }}"
+                                    data-filter-type="{{ field.type or 'text' }}"
+                                    {% if field.type == 'numeric' %}inputmode="decimal"{% endif %}
+                                >
+                                <button type="button" class="btn btn-outline-primary filter-select" data-field="{{ field.key }}">Filter anwenden</button>
+                                {% if field.type == 'numeric' %}
+                                    <div class="invalid-feedback">Bitte geben Sie eine gültige Zahl ein.</div>
+                                {% endif %}
                             </div>
                         </div>
                     {% endfor %}
@@ -268,6 +286,13 @@
         const selectNoneButton = document.getElementById('select-none');
         const filterButtons = document.querySelectorAll('.filter-select');
         const filterInputs = document.querySelectorAll('.filter-input');
+        const filterOperators = document.querySelectorAll('.filter-operator');
+        const numericFields = new Set([
+            {% for field in stammdaten_fields if field.type == 'numeric' %}
+                '{{ field.key }}',
+            {% endfor %}
+        ]);
+        const activeFilters = {};
 
         function updateSelectionCount() {
             if (!selectionCount) {
@@ -281,6 +306,122 @@
             return field.replace(/_([a-z])/g, (_, letter) => letter.toUpperCase());
         }
 
+        function getActiveFilterKeys() {
+            return Object.keys(activeFilters).filter(key => Boolean(activeFilters[key]));
+        }
+
+        function normalizeNumeric(value) {
+            if (typeof value !== 'string') {
+                value = value == null ? '' : String(value);
+            }
+            let normalized = value.trim();
+            normalized = normalized.replace(/\s+/g, '');
+            if (normalized.includes('.') && normalized.includes(',')) {
+                normalized = normalized.replace(/\./g, '').replace(',', '.');
+            } else if (normalized.includes(',')) {
+                normalized = normalized.replace(',', '.');
+            }
+            const parsed = parseFloat(normalized);
+            return Number.isNaN(parsed) ? NaN : parsed;
+        }
+
+        function applyFilters() {
+            const keys = getActiveFilterKeys();
+
+            if (keys.length === 0) {
+                updateSelectionCount();
+                return;
+            }
+
+            schoolCheckboxes.forEach(cb => {
+                let matches = true;
+                for (const key of keys) {
+                    const filter = activeFilters[key];
+                    if (!filter) {
+                        continue;
+                    }
+                    const datasetKey = toDatasetKey(key);
+                    const rawValue = (cb.dataset[datasetKey] || '').trim();
+
+                    if (filter.type === 'numeric') {
+                        const numericValue = normalizeNumeric(rawValue);
+                        if (Number.isNaN(numericValue)) {
+                            matches = false;
+                            break;
+                        }
+                        if (filter.operator === 'gt' && !(numericValue > filter.value)) {
+                            matches = false;
+                            break;
+                        }
+                        if (filter.operator === 'lt' && !(numericValue < filter.value)) {
+                            matches = false;
+                            break;
+                        }
+                        if (
+                            filter.operator === 'eq'
+                            && Math.abs(numericValue - filter.value) > Number.EPSILON
+                        ) {
+                            matches = false;
+                            break;
+                        }
+                    } else {
+                        if (!rawValue.toLowerCase().includes(filter.value)) {
+                            matches = false;
+                            break;
+                        }
+                    }
+                }
+
+                cb.checked = matches;
+            });
+
+            updateSelectionCount();
+        }
+
+        function applyFilterForField(field) {
+            if (!field) {
+                return;
+            }
+
+            const input = document.querySelector(`#filter-${field}`);
+            if (!input) {
+                return;
+            }
+
+            const type = input.dataset.filterType || (numericFields.has(field) ? 'numeric' : 'text');
+            const rawValue = input.value.trim();
+
+            if (!rawValue) {
+                delete activeFilters[field];
+                input.classList.remove('is-invalid');
+                applyFilters();
+                return;
+            }
+
+            if (type === 'numeric' || numericFields.has(field)) {
+                const operatorSelect = document.querySelector(`.filter-operator[data-field="${field}"]`);
+                const operator = operatorSelect ? operatorSelect.value : 'eq';
+                const numericValue = normalizeNumeric(rawValue);
+                if (Number.isNaN(numericValue)) {
+                    input.classList.add('is-invalid');
+                    return;
+                }
+                input.classList.remove('is-invalid');
+                activeFilters[field] = {
+                    type: 'numeric',
+                    operator,
+                    value: numericValue,
+                };
+            } else {
+                activeFilters[field] = {
+                    type: 'text',
+                    value: rawValue.toLowerCase(),
+                };
+            }
+
+            applyFilters();
+        }
+
         if (selectionCount) {
             updateSelectionCount();
             schoolCheckboxes.forEach(cb => {
@@ -290,10 +431,15 @@
 
         if (selectAllButton) {
             selectAllButton.addEventListener('click', () => {
-                schoolCheckboxes.forEach(cb => {
-                    cb.checked = true;
-                });
-                updateSelectionCount();
+                const hasFilters = getActiveFilterKeys().length > 0;
+                if (hasFilters) {
+                    applyFilters();
+                } else {
+                    schoolCheckboxes.forEach(cb => {
+                        cb.checked = true;
+                    });
+                    updateSelectionCount();
+                }
             });
         }
 
@@ -308,26 +454,7 @@
 
         filterButtons.forEach(button => {
             button.addEventListener('click', () => {
-                const field = button.dataset.field;
-                if (!field) {
-                    return;
-                }
-                const input = document.querySelector(`#filter-${field}`);
-                if (!input) {
-                    return;
-                }
-                const needle = input.value.trim().toLowerCase();
-                if (!needle) {
-                    return;
-                }
-                const datasetKey = toDatasetKey(field);
-                schoolCheckboxes.forEach(cb => {
-                    const value = (cb.dataset[datasetKey] || '').toLowerCase();
-                    if (value.includes(needle)) {
-                        cb.checked = true;
-                    }
-                });
-                updateSelectionCount();
+                applyFilterForField(button.dataset.field);
             });
         });
 
@@ -335,15 +462,22 @@
             input.addEventListener('keydown', event => {
                 if (event.key === 'Enter') {
                     event.preventDefault();
-                    const field = input.dataset.field;
-                    if (!field) {
-                        return;
-                    }
-                    const button = document.querySelector(`.filter-select[data-field="${field}"]`);
-                    if (button) {
-                        button.click();
-                    }
+                    applyFilterForField(input.dataset.field);
                 }
+            });
+            input.addEventListener('input', () => {
+                input.classList.remove('is-invalid');
+            });
+        });
+
+        filterOperators.forEach(select => {
+            select.addEventListener('change', () => {
+                const field = select.dataset.field;
+                const input = document.querySelector(`#filter-${field}`);
+                if (!field || !input || !input.value.trim()) {
+                    return;
+                }
+                applyFilterForField(field);
             });
         });
     })();
