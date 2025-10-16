@@ -3,7 +3,7 @@ from __future__ import annotations
 import collections
 import time
 from dataclasses import dataclass
-from typing import Iterable, List, Set, Tuple
+from typing import Callable, Iterable, List, Optional, Set, Tuple
 from urllib.parse import urljoin, urldefrag, urlparse
 from urllib.robotparser import RobotFileParser
 
@@ -21,6 +21,17 @@ class CrawlResult:
     source_url: str
     target_url: str
     matched_keywords: Tuple[str, ...]
+
+
+@dataclass
+class CrawlProgress:
+    """Represents a progress update during a crawl."""
+
+    event: str
+    current_url: Optional[str] = None
+    visited: Optional[int] = None
+    queue_length: Optional[int] = None
+    result: Optional[CrawlResult] = None
 
 
 def normalize_url(url: str) -> str:
@@ -81,6 +92,7 @@ def crawl_site(
     *,
     max_pages: int = MAX_PAGES_DEFAULT,
     same_domain_only: bool = True,
+    progress_callback: Optional[Callable[[CrawlProgress], None]] = None,
 ) -> List[CrawlResult]:
     """Crawl pages starting from start_url and return URLs containing keywords."""
 
@@ -100,6 +112,16 @@ def crawl_site(
     visited: Set[str] = set()
     results: List[CrawlResult] = []
 
+    if progress_callback:
+        progress_callback(
+            CrawlProgress(
+                event="start",
+                current_url=normalized_start,
+                visited=0,
+                queue_length=len(queue),
+            )
+        )
+
     while queue and len(visited) < max_pages:
         current_url = queue.popleft()
         if current_url in visited:
@@ -111,6 +133,16 @@ def crawl_site(
 
         if not robot_parser.can_fetch(USER_AGENT, current_url):
             continue
+
+        if progress_callback:
+            progress_callback(
+                CrawlProgress(
+                    event="page",
+                    current_url=current_url,
+                    visited=len(visited),
+                    queue_length=len(queue),
+                )
+            )
 
         try:
             response = requests.get(
@@ -125,19 +157,38 @@ def crawl_site(
 
         visited.add(current_url)
 
+        if progress_callback:
+            progress_callback(
+                CrawlProgress(
+                    event="visited",
+                    current_url=current_url,
+                    visited=len(visited),
+                    queue_length=len(queue),
+                )
+            )
+
         if not is_html_response(response) or not response.text:
             continue
 
         page_text = response.text
         matches = keyword_matches(page_text, keywords)
         if matches:
-            results.append(
-                CrawlResult(
-                    source_url=normalized_start,
-                    target_url=current_url,
-                    matched_keywords=matches,
-                )
+            crawl_result = CrawlResult(
+                source_url=normalized_start,
+                target_url=current_url,
+                matched_keywords=matches,
             )
+            results.append(crawl_result)
+            if progress_callback:
+                progress_callback(
+                    CrawlProgress(
+                        event="match",
+                        current_url=current_url,
+                        visited=len(visited),
+                        queue_length=len(queue),
+                        result=crawl_result,
+                    )
+                )
 
         for link in extract_links(response.url, page_text):
             if link not in visited:
@@ -145,7 +196,17 @@ def crawl_site(
 
         time.sleep(SLEEP_BETWEEN_REQUESTS)
 
+    if progress_callback:
+        progress_callback(
+            CrawlProgress(
+                event="finish",
+                current_url=None,
+                visited=len(visited),
+                queue_length=len(queue),
+            )
+        )
+
     return results
 
 
-__all__ = ["crawl_site", "CrawlResult"]
+__all__ = ["crawl_site", "CrawlResult", "CrawlProgress"]

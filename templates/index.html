@@ -41,10 +41,22 @@
         <button type="submit" class="btn btn-primary">Crawler starten</button>
     </form>
 
-    {% if results %}
+    <div id="progress-section" class="mb-4" {% if not job_id %}style="display:none"{% endif %}>
+        <h2>Fortschritt</h2>
+        <p class="mb-1"><strong>Status:</strong> <span id="status-text">Wird vorbereitet ...</span></p>
+        <p class="mb-1">Such-URLs: <span id="start-progress">0/0</span></p>
+        <p class="mb-1">Gefundene URLs: <span id="found-count">0</span></p>
+        <p class="mb-3">Aktuelle Seite: <span id="current-page">–</span></p>
+        <div class="progress" role="progressbar" aria-valuemin="0" aria-valuemax="100">
+            <div id="progress-bar" class="progress-bar progress-bar-striped progress-bar-animated"
+                 style="width: 0%;">0%</div>
+        </div>
+    </div>
+
+    <div id="results-container" class="mb-4" style="display:none;">
         <h2>Gefundene Seiten</h2>
         <div class="table-responsive">
-            <table class="table table-striped results-table">
+            <table class="table table-striped results-table" id="results-table">
                 <thead>
                 <tr>
                     <th>Ursprungs-URL</th>
@@ -52,18 +64,123 @@
                 </tr>
                 </thead>
                 <tbody>
-                {% for result in results %}
-                    <tr>
-                        <td><a href="{{ result.source_url }}" target="_blank" rel="noopener">{{ result.source_url }}</a></td>
-                        <td><a href="{{ result.target_url }}" target="_blank" rel="noopener">{{ result.target_url }}</a></td>
-                    </tr>
-                {% endfor %}
                 </tbody>
             </table>
         </div>
-    {% elif submitted %}
-        <div class="alert alert-info" role="alert">Keine Treffer für die angegebenen Stichwörter gefunden.</div>
-    {% endif %}
+    </div>
+
+    <div id="no-results-alert" class="alert alert-info" role="alert" style="display:none;">
+        Keine Treffer für die angegebenen Stichwörter gefunden.
+    </div>
 </div>
+
+{% if job_id %}
+<script>
+    const jobId = "{{ job_id }}";
+    const statusUrl = `/status/${jobId}`;
+    const progressSection = document.getElementById("progress-section");
+    const statusText = document.getElementById("status-text");
+    const startProgress = document.getElementById("start-progress");
+    const foundCount = document.getElementById("found-count");
+    const currentPage = document.getElementById("current-page");
+    const progressBar = document.getElementById("progress-bar");
+    const resultsContainer = document.getElementById("results-container");
+    const resultsTableBody = document.querySelector("#results-table tbody");
+    const noResultsAlert = document.getElementById("no-results-alert");
+
+    progressSection.style.display = "";
+
+    let pollInterval = null;
+
+    function translateStatus(status, errorMessage) {
+        switch (status) {
+            case "running":
+                return "Crawler läuft";
+            case "finished":
+                return "Suche abgeschlossen";
+            case "error":
+                return errorMessage ? `Fehler: ${errorMessage}` : "Fehler während der Suche";
+            default:
+                return "Wird vorbereitet ...";
+        }
+    }
+
+    function renderResults(results) {
+        resultsTableBody.innerHTML = "";
+        results.forEach(result => {
+            const row = document.createElement("tr");
+            const sourceCell = document.createElement("td");
+            const targetCell = document.createElement("td");
+
+            const sourceLink = document.createElement("a");
+            sourceLink.href = result.source_url;
+            sourceLink.textContent = result.source_url;
+            sourceLink.target = "_blank";
+            sourceLink.rel = "noopener";
+
+            const targetLink = document.createElement("a");
+            targetLink.href = result.target_url;
+            targetLink.textContent = result.target_url;
+            targetLink.target = "_blank";
+            targetLink.rel = "noopener";
+
+            sourceCell.appendChild(sourceLink);
+            targetCell.appendChild(targetLink);
+
+            row.appendChild(sourceCell);
+            row.appendChild(targetCell);
+
+            resultsTableBody.appendChild(row);
+        });
+
+        if (results.length > 0) {
+            resultsContainer.style.display = "";
+            noResultsAlert.style.display = "none";
+        }
+    }
+
+    function updateStatus() {
+        fetch(statusUrl)
+            .then(response => response.json())
+            .then(data => {
+                if (data.error && !data.status) {
+                    statusText.textContent = data.error;
+                    clearInterval(pollInterval);
+                    pollInterval = null;
+                    return;
+                }
+
+                statusText.textContent = translateStatus(data.status, data.error);
+                startProgress.textContent = `${data.processed_start_urls}/${data.total_start_urls}`;
+                foundCount.textContent = data.found_count;
+                currentPage.textContent = data.current_page || "–";
+
+                const percent = data.progress_percent || 0;
+                progressBar.style.width = `${percent}%`;
+                progressBar.textContent = `${percent}%`;
+                progressBar.setAttribute("aria-valuenow", percent);
+
+                if (Array.isArray(data.results)) {
+                    renderResults(data.results);
+                }
+
+                if (data.completed) {
+                    clearInterval(pollInterval);
+                    pollInterval = null;
+                    if ((data.results || []).length === 0 && !data.error) {
+                        noResultsAlert.style.display = "";
+                    }
+                    progressBar.classList.remove("progress-bar-animated");
+                }
+            })
+            .catch(() => {
+                statusText.textContent = "Fortschritt konnte nicht abgerufen werden.";
+            });
+    }
+
+    pollInterval = setInterval(updateStatus, 1500);
+    updateStatus();
+</script>
+{% endif %}
 </body>
 </html>

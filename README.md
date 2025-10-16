@@ -24,7 +24,11 @@ Ein lokaler Web-Crawler mit HTML-Oberfläche zum Durchsuchen von Schul-Webseiten
 2. Im Browser `http://127.0.0.1:5000` öffnen.
 3. Im Formular die gewünschten Start-URLs (eine URL pro Zeile) und Stichwörter (ein Stichwort pro Zeile) eintragen.
 4. Optional die maximale Seitenanzahl pro Start-URL anpassen.
-5. Formular absenden. Die Anwendung crawlt jede angegebene Domain systematisch, respektiert `robots.txt` und listet für jedes Stichwort-Paar die Ursprungs- und Ziel-URL auf.
+5. Formular absenden. Während der Suche zeigt die Oberfläche live an,
+   welche Seite aktuell geprüft wird, wie viele Start-URLs bereits
+   abgearbeitet sind, wie viele Treffer gefunden wurden und zu wie viel
+   Prozent der Crawl abgeschlossen ist. Treffer erscheinen fortlaufend in
+   der Tabelle mit Ursprungs- und Ziel-URL.
 
 ## Hinweise
 
