@@ -11,12 +11,19 @@ from typing import Dict, List, Optional, Set, Tuple
 
 from flask import Flask, jsonify, render_template, request
 
-from crawler import CrawlProgress, CrawlResult, crawl_site, MAX_PAGES_DEFAULT
+from crawler import (
+    CrawlProgress,
+    CrawlResult,
+    crawl_site,
+    MAX_PAGES_DEFAULT,
+)
 
 app = Flask(__name__)
 
 SAVED_SEARCHES_PATH = Path("saved_searches.json")
 saved_search_lock = threading.Lock()
+DEFAULT_CONCURRENCY = 5
+MAX_CONCURRENCY = 10
 
 
 def _read_saved_searches_unlocked() -> List[Dict[str, object]]:
@@ -57,6 +64,7 @@ class CrawlJob:
     start_urls: List[str]
     keywords: List[str]
     max_pages: int
+    concurrency: int
     total_start_urls: int
     start_date: Optional[date] = None
     end_date: Optional[date] = None
@@ -97,6 +105,7 @@ class CrawlJob:
                 "start_date": self.start_date.isoformat() if self.start_date else None,
                 "end_date": self.end_date.isoformat() if self.end_date else None,
                 "cancelled": self.cancelled,
+                "concurrency": self.concurrency,
                 "results": [
                     {
                         "source_url": result.source_url,
@@ -196,6 +205,7 @@ def run_crawl_job(job: CrawlJob) -> None:
                 start_date=job.start_date,
                 end_date=job.end_date,
                 cancel_event=job.cancel_event,
+                max_workers=job.concurrency,
             )
             if job.cancel_event.is_set():
                 job.mark_cancelled()
@@ -218,6 +228,7 @@ def index():
         max_pages = request.form.get("max_pages", type=int, default=MAX_PAGES_DEFAULT)
         raw_start_date = request.form.get("start_date", "").strip()
         raw_end_date = request.form.get("end_date", "").strip()
+        concurrency = request.form.get("concurrency", type=int, default=DEFAULT_CONCURRENCY)
 
         start_urls = [url.strip() for url in raw_start_urls.splitlines() if url.strip()]
         keywords = [kw.strip() for kw in raw_keywords.splitlines() if kw.strip()]
@@ -250,12 +261,17 @@ def index():
                 error = "Das Startdatum darf nicht nach dem Enddatum liegen."
 
         if not error:
+            if concurrency < 1:
+                concurrency = 1
+            elif concurrency > MAX_CONCURRENCY:
+                concurrency = MAX_CONCURRENCY
             job_id = uuid.uuid4().hex
             job = CrawlJob(
                 id=job_id,
                 start_urls=start_urls,
                 keywords=keywords,
                 max_pages=max_pages,
+                concurrency=concurrency,
                 total_start_urls=len(start_urls),
                 start_date=start_date_value,
                 end_date=end_date_value,
@@ -269,11 +285,13 @@ def index():
             start_urls_input=raw_start_urls,
             keywords_input=raw_keywords,
             max_pages=max_pages,
+            concurrency=concurrency,
             start_date_input=raw_start_date,
             end_date_input=raw_end_date,
             error=error,
             submitted=True,
             job_id=job_id,
+            max_concurrency=MAX_CONCURRENCY,
         )
 
     return render_template(
@@ -281,11 +299,13 @@ def index():
         start_urls_input="",
         keywords_input="",
         max_pages=MAX_PAGES_DEFAULT,
+        concurrency=DEFAULT_CONCURRENCY,
         start_date_input="",
         end_date_input="",
         error=None,
         submitted=False,
         job_id=None,
+        max_concurrency=MAX_CONCURRENCY,
     )
 
 
@@ -321,6 +341,7 @@ def save_search(job_id: str):
             "keywords": list(job.keywords),
             "start_date": job.start_date.isoformat() if job.start_date else None,
             "end_date": job.end_date.isoformat() if job.end_date else None,
+            "concurrency": job.concurrency,
             "status": job.status,
             "result_count": len(job.results),
             "results": [

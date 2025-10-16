@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-import collections
 import re
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from datetime import date
 from typing import Callable, Iterable, List, Optional, Set, Tuple
@@ -164,6 +164,7 @@ def crawl_site(
     start_date: Optional[date] = None,
     end_date: Optional[date] = None,
     cancel_event: Optional[threading.Event] = None,
+    max_workers: int = 5,
 ) -> List[CrawlResult]:
     """Crawl pages starting from start_url and return URLs containing keywords."""
 
@@ -179,81 +180,231 @@ def crawl_site(
 
     robot_parser = build_robot_parser(normalized_start)
 
-    queue: "collections.deque[str]" = collections.deque([normalized_start])
     visited: Set[str] = set()
     allowed_urls: Set[str] = {normalized_start}
     results: List[CrawlResult] = []
+    result_pairs: Set[Tuple[str, str]] = set()
 
-    if progress_callback:
-        progress_callback(
+    state_lock = threading.Lock()
+    state = {
+        "visited_count": 0,
+        "queue_remaining": 0,
+        "in_progress": 0,
+    }
+
+    def emit(progress: CrawlProgress) -> None:
+        if progress_callback:
+            progress_callback(progress)
+
+    if cancel_event and cancel_event.is_set():
+        return []
+
+    emit(
+        CrawlProgress(
+            event="start",
+            current_url=normalized_start,
+            visited=0,
+            queue_length=1,
+        )
+    )
+
+    if not robot_parser.can_fetch(USER_AGENT, normalized_start):
+        emit(
             CrawlProgress(
-                event="start",
-                current_url=normalized_start,
+                event="finish",
+                current_url=None,
                 visited=0,
-                queue_length=len(queue),
+                queue_length=0,
             )
         )
+        return []
 
-    while queue and len(visited) < max_pages:
-        if cancel_event and cancel_event.is_set():
-            break
-        current_url = queue.popleft()
-        if current_url in visited:
-            continue
+    emit(
+        CrawlProgress(
+            event="page",
+            current_url=normalized_start,
+            visited=0,
+            queue_length=0,
+        )
+    )
 
-        parsed_current = urlparse(current_url)
-        if same_domain_only and parsed_current.netloc != parsed_start.netloc:
-            continue
+    try:
+        response = requests.get(
+            normalized_start,
+            headers={"User-Agent": USER_AGENT},
+            timeout=REQUEST_TIMEOUT,
+            allow_redirects=True,
+        )
+    except requests.RequestException:
+        with state_lock:
+            visited.add(normalized_start)
+            state["visited_count"] = len(visited)
+            state["queue_remaining"] = 0
+            visited_now = state["visited_count"]
+        emit(
+            CrawlProgress(
+                event="visited",
+                current_url=normalized_start,
+                visited=visited_now,
+                queue_length=0,
+            )
+        )
+        emit(
+            CrawlProgress(
+                event="finish",
+                current_url=None,
+                visited=visited_now,
+                queue_length=0,
+            )
+        )
+        return results
 
-        if not robot_parser.can_fetch(USER_AGENT, current_url):
-            continue
+    page_text = response.text if response and response.text else ""
+    soup = None
+    if is_html_response(response) and page_text:
+        soup = BeautifulSoup(page_text, "html.parser")
 
-        if progress_callback:
-            progress_callback(
+    with state_lock:
+        visited.add(normalized_start)
+        state["visited_count"] = len(visited)
+        visited_now = state["visited_count"]
+
+    remaining_slots = max(0, max_pages - visited_now)
+    allowed_links: List[str] = []
+
+    if soup and remaining_slots:
+        for link in extract_links(response.url, page_text, soup=soup):
+            parsed_link = urlparse(link)
+            if same_domain_only and parsed_link.netloc != parsed_start.netloc:
+                continue
+            if link in allowed_urls or link in visited:
+                continue
+            if not robot_parser.can_fetch(USER_AGENT, link):
+                continue
+            allowed_urls.add(link)
+            allowed_links.append(link)
+            if len(allowed_links) >= remaining_slots:
+                break
+
+    with state_lock:
+        state["queue_remaining"] = len(allowed_links)
+        queue_after_start = max(0, state["queue_remaining"] + state["in_progress"])
+        visited_now = state["visited_count"]
+
+    emit(
+        CrawlProgress(
+            event="visited",
+            current_url=normalized_start,
+            visited=visited_now,
+            queue_length=queue_after_start,
+        )
+    )
+
+    if soup:
+        matches = keyword_matches(page_text, keywords)
+        if matches:
+            result = CrawlResult(
+                source_url=normalized_start,
+                target_url=normalized_start,
+                matched_keywords=matches,
+            )
+            with state_lock:
+                if (result.source_url, result.target_url) not in result_pairs:
+                    result_pairs.add((result.source_url, result.target_url))
+                    results.append(result)
+            emit(
                 CrawlProgress(
-                    event="page",
-                    current_url=current_url,
-                    visited=len(visited),
-                    queue_length=len(queue),
+                    event="match",
+                    current_url=normalized_start,
+                    visited=visited_now,
+                    queue_length=queue_after_start,
+                    result=result,
                 )
             )
 
+    time.sleep(SLEEP_BETWEEN_REQUESTS)
+
+    if cancel_event and cancel_event.is_set():
+        emit(
+            CrawlProgress(
+                event="finish",
+                current_url=None,
+                visited=visited_now,
+                queue_length=0,
+            )
+        )
+        return results
+
+    if not allowed_links:
+        emit(
+            CrawlProgress(
+                event="finish",
+                current_url=None,
+                visited=visited_now,
+                queue_length=0,
+            )
+        )
+        return results
+
+    max_workers = max(1, min(max_workers, len(allowed_links)))
+
+    def worker(url: str) -> None:
+
+        if cancel_event and cancel_event.is_set():
+            return
+
+        with state_lock:
+            if url in visited:
+                return
+            if state["queue_remaining"] > 0:
+                state["queue_remaining"] -= 1
+            state["in_progress"] += 1
+            visited_before = state["visited_count"]
+            queue_length_before = max(0, state["queue_remaining"] + max(0, state["in_progress"] - 1))
+
+        emit(
+            CrawlProgress(
+                event="page",
+                current_url=url,
+                visited=visited_before,
+                queue_length=queue_length_before,
+            )
+        )
+
+        if cancel_event and cancel_event.is_set():
+            with state_lock:
+                if state["in_progress"] > 0:
+                    state["in_progress"] -= 1
+                queue_length_after_cancel = max(0, state["queue_remaining"] + state["in_progress"])
+                visited_count_current = state["visited_count"]
+            emit(
+                CrawlProgress(
+                    event="visited",
+                    current_url=url,
+                    visited=visited_count_current,
+                    queue_length=queue_length_after_cancel,
+                )
+            )
+            return
+
         try:
             response = requests.get(
-                current_url,
+                url,
                 headers={"User-Agent": USER_AGENT},
                 timeout=REQUEST_TIMEOUT,
                 allow_redirects=True,
             )
         except requests.RequestException:
-            visited.add(current_url)
-            continue
+            response = None
 
-        visited.add(current_url)
+        page_text_local = response.text if response and response.text else ""
+        soup_local = None
+        if response and is_html_response(response) and page_text_local:
+            soup_local = BeautifulSoup(page_text_local, "html.parser")
 
-        if progress_callback:
-            progress_callback(
-                CrawlProgress(
-                    event="visited",
-                    current_url=current_url,
-                    visited=len(visited),
-                    queue_length=len(queue),
-                )
-            )
-
-        if not is_html_response(response) or not response.text:
-            continue
-
-        page_text = response.text
-        soup = BeautifulSoup(page_text, "html.parser")
-
-        should_filter = (
-            current_url != normalized_start and (start_date is not None or end_date is not None)
-        )
         within_range = True
-        publication_date: Optional[date] = None
-        if should_filter:
-            publication_date = extract_publication_date(soup)
+        if soup_local and (start_date is not None or end_date is not None):
+            publication_date = extract_publication_date(soup_local)
             if publication_date is None:
                 within_range = False
             else:
@@ -262,47 +413,64 @@ def crawl_site(
                 if end_date and publication_date > end_date:
                     within_range = False
 
-        if not should_filter or within_range:
-            matches = keyword_matches(page_text, keywords)
-            if matches:
-                crawl_result = CrawlResult(
-                    source_url=normalized_start,
-                    target_url=current_url,
-                    matched_keywords=matches,
-                )
-                results.append(crawl_result)
-                if progress_callback:
-                    progress_callback(
-                        CrawlProgress(
-                            event="match",
-                            current_url=current_url,
-                            visited=len(visited),
-                            queue_length=len(queue),
-                            result=crawl_result,
-                        )
-                    )
+        matches_local: Tuple[str, ...] = ()
+        if soup_local and within_range:
+            matches_local = keyword_matches(page_text_local, keywords)
 
-        if current_url == normalized_start:
-            for link in extract_links(response.url, page_text, soup=soup):
-                parsed_link = urlparse(link)
-                if same_domain_only and parsed_link.netloc != parsed_start.netloc:
-                    continue
-                if link in allowed_urls or link in visited:
-                    continue
-                allowed_urls.add(link)
-                queue.append(link)
+        with state_lock:
+            visited.add(url)
+            state["visited_count"] = len(visited)
+            if state["in_progress"] > 0:
+                state["in_progress"] -= 1
+            queue_length_after = max(0, state["queue_remaining"] + state["in_progress"])
+            visited_now_local = state["visited_count"]
+
+        emit(
+            CrawlProgress(
+                event="visited",
+                current_url=url,
+                visited=visited_now_local,
+                queue_length=queue_length_after,
+            )
+        )
+
+        if matches_local:
+            result_local = CrawlResult(
+                source_url=normalized_start,
+                target_url=url,
+                matched_keywords=matches_local,
+            )
+            with state_lock:
+                if (result_local.source_url, result_local.target_url) not in result_pairs:
+                    result_pairs.add((result_local.source_url, result_local.target_url))
+                    results.append(result_local)
+            emit(
+                CrawlProgress(
+                    event="match",
+                    current_url=url,
+                    visited=visited_now_local,
+                    queue_length=queue_length_after,
+                    result=result_local,
+                )
+            )
 
         time.sleep(SLEEP_BETWEEN_REQUESTS)
 
-    if progress_callback:
-        progress_callback(
-            CrawlProgress(
-                event="finish",
-                current_url=None,
-                visited=len(visited),
-                queue_length=len(queue),
-            )
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = [executor.submit(worker, url) for url in allowed_links]
+        wait(futures)
+
+    with state_lock:
+        final_visited = state["visited_count"]
+
+    emit(
+        CrawlProgress(
+            event="finish",
+            current_url=None,
+            visited=final_visited,
+            queue_length=0,
         )
+    )
 
     return results
 
