@@ -110,6 +110,7 @@ def crawl_site(
 
     queue: "collections.deque[str]" = collections.deque([normalized_start])
     visited: Set[str] = set()
+    allowed_urls: Set[str] = {normalized_start}
     results: List[CrawlResult] = []
 
     if progress_callback:
@@ -190,8 +191,14 @@ def crawl_site(
                     )
                 )
 
-        for link in extract_links(response.url, page_text):
-            if link not in visited:
+        if current_url == normalized_start:
+            for link in extract_links(response.url, page_text):
+                parsed_link = urlparse(link)
+                if same_domain_only and parsed_link.netloc != parsed_start.netloc:
+                    continue
+                if link in allowed_urls or link in visited:
+                    continue
+                allowed_urls.add(link)
                 queue.append(link)
 
         time.sleep(SLEEP_BETWEEN_REQUESTS)

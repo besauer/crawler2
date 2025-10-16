@@ -36,3 +36,4 @@ Ein lokaler Web-Crawler mit HTML-Oberfläche zum Durchsuchen von Schul-Webseiten
 - Es wird ein konservativer User-Agent verwendet und zwischen Anfragen automatisch pausiert.
 - Gesperrte Pfade laut `robots.txt` werden nicht besucht.
 - Standardmäßig bleibt der Crawler innerhalb der Domain der Start-URL. Diese Einstellung kann im Code angepasst werden.
+- Pro Start-URL werden nur die Startseite und deren direkte internen Links durchsucht; weitere Ebenen werden übersprungen.
