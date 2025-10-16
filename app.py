@@ -23,7 +23,7 @@ app = Flask(__name__)
 SAVED_SEARCHES_PATH = Path("saved_searches.json")
 saved_search_lock = threading.Lock()
 DEFAULT_CONCURRENCY = 5
-MAX_CONCURRENCY = 10
+MAX_CONCURRENCY = 150
 
 
 def _read_saved_searches_unlocked() -> List[Dict[str, object]]:
