@@ -7,12 +7,35 @@
           integrity="sha384-QWTKZyjpPEjISv5WaRU9OFeRpok6YctnYmDr5pNlyT2bRjXh0JMhjY6hW+ALEwIH"
           crossorigin="anonymous">
     <style>
-        body { padding-top: 2rem; }
+        body { padding-top: 0; }
         table tbody tr td { vertical-align: middle; }
     </style>
 </head>
 <body>
-<div class="container">
+<nav class="navbar navbar-expand-lg navbar-light bg-light border-bottom">
+    <div class="container">
+        <a class="navbar-brand" href="{{ url_for('index') }}">Schul-Crawler</a>
+        <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#mainNav"
+                aria-controls="mainNav" aria-expanded="false" aria-label="Navigation umschalten">
+            <span class="navbar-toggler-icon"></span>
+        </button>
+        <div class="collapse navbar-collapse" id="mainNav">
+            <ul class="navbar-nav ms-auto mb-2 mb-lg-0">
+                <li class="nav-item">
+                    <a class="nav-link {% if active_page == 'search' %}active{% endif %}"
+                       {% if active_page == 'search' %}aria-current="page"{% endif %}
+                       href="{{ url_for('index') }}">Suche</a>
+                </li>
+                <li class="nav-item">
+                    <a class="nav-link {% if active_page == 'stammdaten' %}active{% endif %}"
+                       {% if active_page == 'stammdaten' %}aria-current="page"{% endif %}
+                       href="{{ url_for('stammdaten') }}">Stammdaten</a>
+                </li>
+            </ul>
+        </div>
+    </div>
+</nav>
+<main class="container py-4">
     <h1 class="mb-4">Stammdaten verwalten</h1>
     <p class="text-muted">Importieren Sie eine Excel-Datei mit Stammdaten (eine Zeile pro Schule).
         Die Daten werden lokal in <code>{{ storage_file }}</code> gespeichert und stehen anschließend in der Suche zur Auswahl.</p>
@@ -32,7 +55,7 @@
         </div>
         <div class="d-flex gap-2 flex-wrap">
             <button type="submit" class="btn btn-primary">Stammdaten importieren</button>
-            <a href="{{ url_for('index') }}" class="btn btn-outline-secondary">Zurück zur Suche</a>
+            <a href="{{ url_for('index') }}" class="btn btn-outline-secondary">Zur Suche</a>
         </div>
     </form>
 
@@ -73,7 +96,7 @@
             Es sind noch keine Stammdaten gespeichert.
         </div>
     {% endif %}
-</div>
+</main>
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"
         integrity="sha384-YvpcrYf0tY3lHB60NNkmXc5s9fDVZLESaAA55NDzOxhy9GkcIdslK1eN7N6jIeHz"
         crossorigin="anonymous"></script>

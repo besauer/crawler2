@@ -22,9 +22,9 @@ Ein lokaler Web-Crawler mit HTML-Oberfläche zum Durchsuchen von Schul-Webseiten
    Alternativ kann `python app.py` verwendet werden, um den integrierten Entwicklungsserver zu starten.
 
 2. Im Browser `http://127.0.0.1:5000` öffnen.
-3. Über den Link „Stammdaten verwalten“ eine Excel-Datei (`.xlsx`) mit den Schulstammdaten hochladen. Erwartete Spalten: Schul ID, Träger, Name, Ort, Anzahl Schüler, Anzahl Klassen, Homepage. Die importierten Daten werden lokal in `stammdaten.json` abgelegt.
-4. Im Suchformular die gewünschten Schulen per Checkbox auswählen (Alle/Keine sowie Feldfilter „Wert enthält …“ stehen als Hilfen zur Verfügung) und die Stichwörter (ein Suchbegriff pro Zeile) eintragen.
-5. Optional die maximale Seitenanzahl pro Start-URL, die Anzahl paralleler Seitenabrufe (bis zu 150 gleichzeitig) sowie ein Veröffentlichungszeitfenster auswählen. Seiten ohne Datum werden – mit Ausnahme der Startseite – übersprungen, wenn ein Zeitraum gesetzt ist.
+3. Über das Menü „Stammdaten“ eine Excel-Datei (`.xlsx`) mit den Schulstammdaten hochladen. Erwartete Spalten: Schul ID, Träger, Name, Ort, Anzahl Schüler, Anzahl Klassen, Homepage. Die importierten Daten werden lokal in `stammdaten.json` abgelegt.
+4. Zurück auf der Seite „Suche“ die gewünschten Schulen per Checkbox auswählen (Alle/Keine sowie Feldfilter „Wert enthält …“ stehen als Hilfen zur Verfügung) und die Stichwörter (ein Suchbegriff pro Zeile) eintragen.
+5. Optional die maximale Seitenanzahl pro Start-URL, die Anzahl paralleler Seitenabrufe (bis zu 150 gleichzeitig), ob `robots.txt` respektiert wird, sowie ein Veröffentlichungszeitfenster auswählen. Seiten ohne Datum werden – mit Ausnahme der Startseite – übersprungen, wenn ein Zeitraum gesetzt ist.
 6. Formular absenden. Während der Suche zeigt die Oberfläche live an,
    welche Seite aktuell geprüft wird, welche Seiten zuletzt besucht
    wurden, wie viele Start-URLs bereits abgearbeitet sind, wie viele
@@ -36,7 +36,7 @@ Ein lokaler Web-Crawler mit HTML-Oberfläche zum Durchsuchen von Schul-Webseiten
 ## Hinweise
 
 - Es wird ein konservativer User-Agent verwendet und zwischen Anfragen automatisch pausiert.
-- Gesperrte Pfade laut `robots.txt` werden nicht besucht.
+- Gesperrte Pfade laut `robots.txt` werden standardmäßig nicht besucht; über den Schalter „robots.txt respektieren“ kann die Vorgabe bei Bedarf aufgehoben werden.
 - Standardmäßig bleibt der Crawler innerhalb der Domain der Start-URL. Diese Einstellung kann im Code angepasst werden.
 - Pro Start-URL werden nur die Startseite und deren direkte internen Links durchsucht; weitere Ebenen werden übersprungen.
 - Über das Feld „Parallele Seitenabrufe“ lassen sich bis zu 150 Seiten gleichzeitig laden, um die Ausführung zu beschleunigen.

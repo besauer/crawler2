@@ -27,6 +27,7 @@ SAVED_SEARCHES_PATH = Path("saved_searches.json")
 saved_search_lock = threading.Lock()
 DEFAULT_CONCURRENCY = 5
 MAX_CONCURRENCY = 150
+DEFAULT_RESPECT_ROBOTS = True
 STAMMDATEN_PATH = Path("stammdaten.json")
 stammdaten_lock = threading.Lock()
 
@@ -221,6 +222,7 @@ class CrawlJob:
     total_start_urls: int
     start_date: Optional[date] = None
     end_date: Optional[date] = None
+    respect_robots: bool = DEFAULT_RESPECT_ROBOTS
     processed_start_urls: int = 0
     current_start_url: Optional[str] = None
     current_page: Optional[str] = None
@@ -259,6 +261,7 @@ class CrawlJob:
                 "end_date": self.end_date.isoformat() if self.end_date else None,
                 "cancelled": self.cancelled,
                 "concurrency": self.concurrency,
+                "respect_robots": self.respect_robots,
                 "results": [
                     {
                         "source_url": result.source_url,
@@ -359,6 +362,7 @@ def run_crawl_job(job: CrawlJob) -> None:
                 end_date=job.end_date,
                 cancel_event=job.cancel_event,
                 max_workers=job.concurrency,
+                respect_robots=job.respect_robots,
             )
             if job.cancel_event.is_set():
                 job.mark_cancelled()
@@ -382,6 +386,7 @@ def index():
     concurrency = DEFAULT_CONCURRENCY
     start_date_input = ""
     end_date_input = ""
+    respect_robots = DEFAULT_RESPECT_ROBOTS
     error: Optional[str] = None
     job_id: Optional[str] = None
     submitted = False
@@ -394,6 +399,7 @@ def index():
         concurrency = request.form.get("concurrency", type=int, default=DEFAULT_CONCURRENCY)
         start_date_input = request.form.get("start_date", "").strip()
         end_date_input = request.form.get("end_date", "").strip()
+        respect_robots = bool(request.form.get("respect_robots"))
 
         selected_values = request.form.getlist("start_urls")
         allowed_homepages = {record["homepage"] for record in stammdaten_records if record.get("homepage")}
@@ -449,6 +455,7 @@ def index():
                 total_start_urls=len(selected_homepages),
                 start_date=start_date_value,
                 end_date=end_date_value,
+                respect_robots=respect_robots,
             )
             jobs[job_id] = job
             thread = threading.Thread(target=run_crawl_job, args=(job,), daemon=True)
@@ -464,10 +471,12 @@ def index():
         concurrency=concurrency,
         start_date_input=start_date_input,
         end_date_input=end_date_input,
+        respect_robots=respect_robots,
         error=error,
         submitted=submitted,
         job_id=job_id,
         max_concurrency=MAX_CONCURRENCY,
+        active_page="search",
     )
 
 
@@ -500,6 +509,7 @@ def stammdaten():
         message_category=message_category,
         stammdaten_fields=STAMMDATEN_FIELDS,
         storage_file=STAMMDATEN_PATH.name,
+        active_page="stammdaten",
     )
 
 
@@ -536,6 +546,7 @@ def save_search(job_id: str):
             "start_date": job.start_date.isoformat() if job.start_date else None,
             "end_date": job.end_date.isoformat() if job.end_date else None,
             "concurrency": job.concurrency,
+            "respect_robots": job.respect_robots,
             "status": job.status,
             "result_count": len(job.results),
             "results": [

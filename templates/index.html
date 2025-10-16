@@ -7,31 +7,52 @@
           integrity="sha384-QWTKZyjpPEjISv5WaRU9OFeRpok6YctnYmDr5pNlyT2bRjXh0JMhjY6hW+ALEwIH"
           crossorigin="anonymous">
     <style>
-        body { padding-top: 2rem; }
+        body { padding-top: 0; }
         textarea { min-height: 120px; }
         .results-table td { vertical-align: top; }
     </style>
 </head>
 <body>
-<div class="container">
+<nav class="navbar navbar-expand-lg navbar-light bg-light border-bottom">
+    <div class="container">
+        <a class="navbar-brand" href="{{ url_for('index') }}">Schul-Crawler</a>
+        <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#mainNav"
+                aria-controls="mainNav" aria-expanded="false" aria-label="Navigation umschalten">
+            <span class="navbar-toggler-icon"></span>
+        </button>
+        <div class="collapse navbar-collapse" id="mainNav">
+            <ul class="navbar-nav ms-auto mb-2 mb-lg-0">
+                <li class="nav-item">
+                    <a class="nav-link {% if active_page == 'search' %}active{% endif %}"
+                       {% if active_page == 'search' %}aria-current="page"{% endif %}
+                       href="{{ url_for('index') }}">Suche</a>
+                </li>
+                <li class="nav-item">
+                    <a class="nav-link {% if active_page == 'stammdaten' %}active{% endif %}"
+                       {% if active_page == 'stammdaten' %}aria-current="page"{% endif %}
+                       href="{{ url_for('stammdaten') }}">Stammdaten</a>
+                </li>
+            </ul>
+        </div>
+    </div>
+</nav>
+<main class="container py-4">
     <h1 class="mb-4">Crawler für Schul-Webseiten</h1>
     <p class="text-muted">Durchsuchen Sie eine Website systematisch nach bestimmten Stichwörtern. Die Anwendung
-        respektiert <code>robots.txt</code> und bleibt standardmäßig innerhalb der Startdomain.</p>
+        respektiert standardmäßig <code>robots.txt</code> und bleibt innerhalb der Startdomain; bei Bedarf kann die
+        robots-Regel im Formular deaktiviert werden.</p>
+
+    <p class="text-muted small">
+        {% if stammdaten_records %}
+            {{ stammdaten_records|length }} Schulen in den Stammdaten verfügbar.
+        {% else %}
+            Keine Stammdaten importiert.
+        {% endif %}
+    </p>
 
     {% if error %}
         <div class="alert alert-danger" role="alert">{{ error }}</div>
     {% endif %}
-
-    <div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
-        <a href="{{ url_for('stammdaten') }}" class="btn btn-link px-0">Stammdaten verwalten</a>
-        <span class="text-muted small">
-            {% if stammdaten_records %}
-                {{ stammdaten_records|length }} Schulen in den Stammdaten
-            {% else %}
-                Keine Stammdaten importiert
-            {% endif %}
-        </span>
-    </div>
 
     <form method="post" class="mb-4">
         <div class="mb-3">
@@ -120,6 +141,12 @@
                    value="{{ concurrency }}">
             <div class="form-text">Anzahl der Seiten, die gleichzeitig geladen werden (maximal {{ max_concurrency }}).</div>
         </div>
+        <div class="form-check form-switch mb-3">
+            <input class="form-check-input" type="checkbox" role="switch" id="respect_robots" name="respect_robots"
+                   {% if respect_robots %}checked{% endif %}>
+            <label class="form-check-label" for="respect_robots">robots.txt respektieren</label>
+            <div class="form-text">Wenn deaktiviert, werden auch Seiten durchsucht, die in <code>robots.txt</code> gesperrt sind.</div>
+        </div>
         <div class="row g-3 mb-3">
             <div class="col-md-6">
                 <label for="start_date" class="form-label">Veröffentlichungsdatum ab (optional)</label>
@@ -187,7 +214,7 @@
         </div>
         <div class="accordion" id="saved-searches-accordion"></div>
     </div>
-</div>
+</main>
 
 <script>
     (function () {
@@ -539,6 +566,15 @@
                 const concurrencyValue = typeof entry.concurrency === "number" ? entry.concurrency : null;
                 concurrencyP.append(document.createTextNode(concurrencyValue ? String(concurrencyValue) : "–"));
                 body.appendChild(concurrencyP);
+
+                const robotsP = document.createElement("p");
+                robotsP.className = "mb-2";
+                const robotsLabel = document.createElement("strong");
+                robotsLabel.textContent = "robots.txt respektiert: ";
+                robotsP.appendChild(robotsLabel);
+                const robotsValue = entry.respect_robots === false ? "Nein" : "Ja";
+                robotsP.append(document.createTextNode(robotsValue));
+                body.appendChild(robotsP);
 
                 const statusP = document.createElement("p");
                 statusP.className = "mb-3";

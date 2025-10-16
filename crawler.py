@@ -165,6 +165,7 @@ def crawl_site(
     end_date: Optional[date] = None,
     cancel_event: Optional[threading.Event] = None,
     max_workers: int = 5,
+    respect_robots: bool = True,
 ) -> List[CrawlResult]:
     """Crawl pages starting from start_url and return URLs containing keywords."""
 
@@ -178,7 +179,17 @@ def crawl_site(
     if not keywords:
         return []
 
-    robot_parser = build_robot_parser(normalized_start)
+    if respect_robots:
+        robot_parser = build_robot_parser(normalized_start)
+
+        def can_fetch(url: str) -> bool:
+            return robot_parser.can_fetch(USER_AGENT, url)
+
+    else:
+        robot_parser = None
+
+        def can_fetch(_url: str) -> bool:
+            return True
 
     visited: Set[str] = set()
     allowed_urls: Set[str] = {normalized_start}
@@ -208,7 +219,7 @@ def crawl_site(
         )
     )
 
-    if not robot_parser.can_fetch(USER_AGENT, normalized_start):
+    if not can_fetch(normalized_start):
         emit(
             CrawlProgress(
                 event="finish",
@@ -279,7 +290,7 @@ def crawl_site(
                 continue
             if link in allowed_urls or link in visited:
                 continue
-            if not robot_parser.can_fetch(USER_AGENT, link):
+            if not can_fetch(link):
                 continue
             allowed_urls.add(link)
             allowed_links.append(link)
