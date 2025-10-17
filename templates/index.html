@@ -1,0 +1,1751 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+    <meta charset="UTF-8">
+    <title>Schul-Webseiten Crawler</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css"
+          integrity="sha384-QWTKZyjpPEjISv5WaRU9OFeRpok6YctnYmDr5pNlyT2bRjXh0JMhjY6hW+ALEwIH"
+          crossorigin="anonymous">
+    <style>
+        body { padding-top: 0; }
+        textarea { min-height: 120px; }
+        .results-table td { vertical-align: top; }
+    </style>
+</head>
+<body>
+<nav class="navbar navbar-expand-lg navbar-light bg-light border-bottom">
+    <div class="container">
+        <a class="navbar-brand" href="{{ url_for('index') }}">Schul-Crawler</a>
+        <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#mainNav"
+                aria-controls="mainNav" aria-expanded="false" aria-label="Navigation umschalten">
+            <span class="navbar-toggler-icon"></span>
+        </button>
+        <div class="collapse navbar-collapse" id="mainNav">
+            <ul class="navbar-nav ms-auto mb-2 mb-lg-0">
+                <li class="nav-item">
+                    <a class="nav-link {% if active_page == 'search' %}active{% endif %}"
+                       {% if active_page == 'search' %}aria-current="page"{% endif %}
+                       href="{{ url_for('index') }}">Suche</a>
+                </li>
+                <li class="nav-item">
+                    <a class="nav-link {% if active_page == 'stammdaten' %}active{% endif %}"
+                       {% if active_page == 'stammdaten' %}aria-current="page"{% endif %}
+                       href="{{ url_for('stammdaten') }}">Stammdaten</a>
+                </li>
+                <li class="nav-item">
+                    <a class="nav-link {% if active_page == 'settings' %}active{% endif %}"
+                       {% if active_page == 'settings' %}aria-current="page"{% endif %}
+                       href="{{ url_for('settings') }}">Einstellungen</a>
+                </li>
+            </ul>
+        </div>
+    </div>
+</nav>
+<main class="container py-4">
+    <h1 class="mb-4">Crawler für Schul-Webseiten</h1>
+    <p class="text-muted">Durchsuchen Sie eine Website systematisch nach bestimmten Stichwörtern. Die Anwendung
+        respektiert standardmäßig <code>robots.txt</code> und bleibt innerhalb der Startdomain; bei Bedarf kann die
+        robots-Regel im Formular deaktiviert werden.</p>
+
+    <p class="text-muted small">
+        {% if stammdaten_records %}
+            {{ stammdaten_records|length }} Schulen in den Stammdaten verfügbar.
+        {% else %}
+            Keine Stammdaten importiert.
+        {% endif %}
+    </p>
+
+    {% if error %}
+        <div class="alert alert-danger" role="alert">{{ error }}</div>
+    {% endif %}
+
+    {% if synonym_messages %}
+        {% for note in synonym_messages %}
+            <div class="alert alert-{{ note.category or 'info' }} mt-2" role="alert">{{ note.text }}</div>
+        {% endfor %}
+    {% endif %}
+
+    <form method="post" class="mb-4">
+        <div class="mb-3">
+            <label class="form-label">Schulen aus den Stammdaten auswählen</label>
+            {% if not stammdaten_records %}
+                <div class="alert alert-warning" role="alert">
+                    Bitte importieren Sie zuerst eine Excel-Datei mit Stammdaten.
+                </div>
+            {% else %}
+                <div class="d-flex flex-wrap gap-2 mb-2">
+                    <button type="button" class="btn btn-outline-primary btn-sm" id="select-all">Alle auswählen</button>
+                    <button type="button" class="btn btn-outline-secondary btn-sm" id="select-none">Keine auswählen</button>
+                </div>
+                <div class="row g-2 mb-3">
+                    {% for field in stammdaten_fields %}
+                        <div class="col-md-4">
+                            <label class="form-label mb-1">{{ field.label }}</label>
+                            <div class="input-group input-group-sm">
+                                {% if field.type == 'numeric' %}
+                                    <select class="form-select form-select-sm filter-operator" data-field="{{ field.key }}" aria-label="Vergleichsoperator auswählen">
+                                        <option value="eq">=</option>
+                                        <option value="gt">&gt;</option>
+                                        <option value="lt">&lt;</option>
+                                    </select>
+                                {% endif %}
+                                <input
+                                    type="text"
+                                    class="form-control filter-input"
+                                    id="filter-{{ field.key }}"
+                                    placeholder="{% if field.type == 'numeric' %}Zahl eingeben{% else %}Wert enthält ...{% endif %}"
+                                    data-field="{{ field.key }}"
+                                    data-filter-type="{{ field.type or 'text' }}"
+                                    {% if field.type == 'numeric' %}inputmode="decimal"{% endif %}
+                                >
+                                <button type="button" class="btn btn-outline-primary filter-select" data-field="{{ field.key }}">Filter anwenden</button>
+                                {% if field.type == 'numeric' %}
+                                    <div class="invalid-feedback">Bitte geben Sie eine gültige Zahl ein.</div>
+                                {% endif %}
+                            </div>
+                        </div>
+                    {% endfor %}
+                </div>
+                <div class="form-text mb-2">Ausgewählte Schulen: <span id="selection-count">0</span></div>
+                <div class="table-responsive" style="max-height: 320px; overflow-y: auto;">
+                    <table class="table table-sm table-hover align-middle mb-0">
+                        <thead class="table-light">
+                        <tr>
+                            <th scope="col" style="width: 60px;">Auswahl</th>
+                            <th scope="col">Schul&nbsp;ID</th>
+                            <th scope="col">Träger</th>
+                            <th scope="col">Name</th>
+                            <th scope="col">Ort</th>
+                            <th scope="col">Anzahl Schüler</th>
+                            <th scope="col">Anzahl Klassen</th>
+                            <th scope="col">Homepage</th>
+                            <th scope="col">Aktiv</th>
+                        </tr>
+                        </thead>
+                        <tbody>
+                        {% for record in stammdaten_records %}
+                            <tr>
+                                <td>
+                                    <div class="form-check m-0">
+                                        <input class="form-check-input school-checkbox" type="checkbox" value="{{ record.homepage }}" id="school-{{ loop.index }}" name="start_urls"
+                                               {% if record.homepage in selected_homepages %}checked{% endif %}
+                                               {% for field in stammdaten_fields %}
+                                                   {% if field.key == 'aktiv' %}
+                                                       data-aktiv="{{ 'ja' if record.get(field.key, True) else 'nein' }}"
+                                                   {% else %}
+                                                       data-{{ field.key|replace('_', '-') }}="{{ record.get(field.key, '') }}"
+                                                   {% endif %}
+                                               {% endfor %}>
+                                        <label class="form-check-label small" for="school-{{ loop.index }}">&nbsp;</label>
+                                    </div>
+                                </td>
+                                <td>{{ record.schul_id or "–" }}</td>
+                                <td>{{ record.traeger or "–" }}</td>
+                                <td>{{ record.name or "–" }}</td>
+                                <td>{{ record.ort or "–" }}</td>
+                                <td>{{ record.anzahl_schueler if record.anzahl_schueler is not none else "–" }}</td>
+                                <td>{{ record.anzahl_klassen if record.anzahl_klassen is not none else "–" }}</td>
+                                <td>
+                                    {% if record.homepage %}
+                                        <a href="{{ record.homepage }}" target="_blank" rel="noopener">{{ record.homepage }}</a>
+                                    {% else %}
+                                        –
+                                    {% endif %}
+                                </td>
+                                <td>{{ 'Ja' if record.get('aktiv', True) else 'Nein' }}</td>
+                            </tr>
+                        {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+            {% endif %}
+        </div>
+        <div class="mb-3">
+            <label for="keywords" class="form-label">Suchstichwörter (ein Wort pro Zeile)</label>
+            <textarea class="form-control" id="keywords" name="keywords" rows="4" required>{{ keywords_input }}</textarea>
+            <div class="form-text">Ein Begriff pro Zeile. Mit „Suchbegriff erweitern“ können Sie passende Synonyme hinzufügen oder entfernen.</div>
+            <div class="mt-3" id="keyword-manager">
+                <div class="d-flex justify-content-between align-items-center mb-2">
+                    <span class="fw-semibold">Verwaltete Stichwörter</span>
+                    <span class="small text-muted">Synonyme werden automatisch übernommen und lassen sich hier anpassen.</span>
+                </div>
+                <div id="keyword-empty" class="text-muted small">Fügen Sie oben mindestens einen Suchbegriff hinzu, um Synonyme zu verwalten.</div>
+                <div class="list-group" id="keyword-list"></div>
+            </div>
+            <div class="mt-3 d-flex flex-wrap align-items-center gap-2" id="keyword-evaluation-controls">
+                <button type="button" class="btn btn-outline-primary btn-sm" id="evaluate-keywords-btn">Suchwörter bewerten</button>
+                <span class="small text-muted">Ermittelt die Güte der Suchbegriffe und schlägt präzisere Varianten vor.</span>
+            </div>
+            <div id="keyword-evaluation-alert" class="alert alert-warning mt-3 d-none" role="alert"></div>
+            <div class="mt-3" id="keyword-evaluation-results" style="display:none;">
+                <div class="table-responsive">
+                    <table class="table table-sm mb-0">
+                        <thead>
+                        <tr>
+                            <th>Suchwort</th>
+                            <th>Wie gut?</th>
+                            <th>Bessere Suchbegriffe</th>
+                        </tr>
+                        </thead>
+                        <tbody></tbody>
+                    </table>
+                </div>
+            </div>
+            <input type="hidden" id="keyword-groups-payload" name="keyword_groups_payload" value="{{ keyword_groups|tojson|e }}">
+            <input type="hidden" id="keyword-groups-mode" name="keyword_groups_mode" value="{{ 'manual' if synonym_groups_manual else '' }}">
+            <input type="hidden" id="keyword-evaluations-payload" name="keyword_evaluations_payload" value="{{ keyword_evaluations|tojson|e }}">
+        </div>
+        <div class="mb-3">
+            <label for="max_pages" class="form-label">Maximale Seitenanzahl pro Start-URL</label>
+            <input type="number" class="form-control" id="max_pages" name="max_pages" min="1"
+                   value="{{ max_pages }}">
+            <div class="form-text">Begrenzt die Anzahl der Seiten, die pro Start-URL analysiert werden (Standard: {{ max_pages }}).</div>
+        </div>
+        <div class="mb-3">
+            <label for="concurrency" class="form-label">Parallele Seitenabrufe</label>
+            <input type="number" class="form-control" id="concurrency" name="concurrency" min="1" max="{{ max_concurrency }}"
+                   value="{{ concurrency }}">
+            <div class="form-text">Anzahl der Seiten, die gleichzeitig geladen werden (maximal {{ max_concurrency }}).</div>
+        </div>
+        {% if not has_api_key %}
+            <div class="alert alert-warning" role="alert">
+                Für die Synonymerweiterung ist ein OpenAI-Schlüssel erforderlich. Bitte unter Einstellungen → API-Schlüssel hinterlegen.
+            </div>
+        {% endif %}
+        <div class="form-check form-switch mb-3">
+            <input class="form-check-input" type="checkbox" role="switch" id="respect_robots" name="respect_robots"
+                   {% if respect_robots %}checked{% endif %}>
+            <label class="form-check-label" for="respect_robots">robots.txt respektieren</label>
+            <div class="form-text">Wenn deaktiviert, werden auch Seiten durchsucht, die in <code>robots.txt</code> gesperrt sind.</div>
+        </div>
+        <div class="row g-3 mb-3">
+            <div class="col-md-6">
+                <label for="start_date" class="form-label">Veröffentlichungsdatum ab (optional)</label>
+                <input type="date" class="form-control" id="start_date" name="start_date" value="{{ start_date_input }}">
+                <div class="form-text">Seiten ohne Datum werden ausgelassen, außer der Startseite.</div>
+            </div>
+            <div class="col-md-6">
+                <label for="end_date" class="form-label">Veröffentlichungsdatum bis (optional)</label>
+                <input type="date" class="form-control" id="end_date" name="end_date" value="{{ end_date_input }}">
+            </div>
+        </div>
+        <button type="submit" class="btn btn-primary" {% if not stammdaten_records %}disabled{% endif %}>Crawler starten</button>
+    </form>
+
+    {% if job_id and expanded_keywords %}
+        <div class="card mb-4" id="keyword-summary">
+            <div class="card-header">Verwendete Suchbegriffe</div>
+            <div class="card-body">
+                <p class="mb-2"><strong>Gesamtliste:</strong> {{ expanded_keywords|join(', ') }}</p>
+                <p class="mb-3"><strong>Synonymerweiterung:</strong> {{ synonym_status }}</p>
+                <ul class="list-group list-group-flush">
+                    {% for group in keyword_groups %}
+                        <li class="list-group-item">
+                            <strong>{{ group.original }}</strong>
+                            {% if group.additional %}
+                                <span class="badge bg-primary ms-2">+{{ group.additional|length }}</span>
+                                <div class="small text-muted mt-1">Zusätzliche Begriffe: {{ group.additional|join(', ') }}</div>
+                            {% else %}
+                                <div class="small text-muted mt-1">Keine zusätzlichen Begriffe ermittelt.</div>
+                            {% endif %}
+                        </li>
+                    {% endfor %}
+                </ul>
+            </div>
+        </div>
+    {% endif %}
+
+    <div id="progress-section" class="mb-4" {% if not job_id %}style="display:none"{% endif %}>
+        <h2>Fortschritt</h2>
+        <p class="mb-1"><strong>Status:</strong> <span id="status-text">Wird vorbereitet ...</span></p>
+        <p class="mb-1">Such-URLs: <span id="start-progress">0/0</span></p>
+        <p class="mb-1">Gefundene URLs: <span id="found-count">0</span></p>
+        <p class="mb-1">Aktuelle Seite: <span id="current-page">–</span></p>
+        <p class="mb-1">Synonymerweiterung: <span id="synonym-status">{{ synonym_status }}</span></p>
+        <p class="mb-3">Warteschlange: <span id="queue-length">0</span> Seiten</p>
+        <div class="progress" role="progressbar" aria-valuemin="0" aria-valuemax="100">
+            <div id="progress-bar" class="progress-bar progress-bar-striped progress-bar-animated"
+                 style="width: 0%;">0%</div>
+        </div>
+        <div class="d-flex gap-2 flex-wrap mt-3">
+            <button type="button" class="btn btn-outline-danger" id="cancel-button">Suche abbrechen</button>
+            <button type="button" class="btn btn-outline-secondary" id="save-button" disabled>Suche speichern</button>
+        </div>
+        <div id="action-status" class="small text-muted mt-2"></div>
+        <div class="mt-3">
+            <h3 class="h5">Zuletzt geprüfte Seiten</h3>
+            <ul id="recent-pages" class="list-unstyled small mb-0">
+            </ul>
+        </div>
+    </div>
+
+    <div id="results-container" class="mb-4" style="display:none;">
+        <h2>Gefundene Seiten</h2>
+        <div class="table-responsive">
+            <table class="table table-striped results-table" id="results-table">
+                <thead>
+                <tr>
+                    <th>Ursprungs-URL</th>
+                    <th>Gefundene URL</th>
+                    <th>Suchbegriff</th>
+                </tr>
+                </thead>
+                <tbody>
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <div id="no-results-alert" class="alert alert-info" role="alert" style="display:none;">
+        Keine Treffer für die angegebenen Stichwörter gefunden.
+    </div>
+
+    <div class="mb-3">
+        <button type="button" class="btn btn-secondary" id="load-saved-searches">Alte Suchen anzeigen</button>
+    </div>
+    <div id="saved-searches-section" style="display:none;">
+        <h2>Gespeicherte Suchläufe</h2>
+        <div id="saved-searches-empty" class="alert alert-secondary" role="alert" style="display:none;">
+            Es wurden noch keine Suchläufe gespeichert.
+        </div>
+        <div class="accordion" id="saved-searches-accordion"></div>
+    </div>
+</main>
+
+<div class="modal fade" id="synonymModal" tabindex="-1" aria-labelledby="synonymModalLabel" aria-hidden="true">
+    <div class="modal-dialog modal-lg modal-dialog-scrollable">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title" id="synonymModalLabel">Synonyme erweitern</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Schließen"></button>
+            </div>
+            <div class="modal-body">
+                <p class="mb-3">Ausgangsbegriff: <strong id="synonym-modal-keyword">–</strong></p>
+                <div class="mb-3">
+                    <label for="synonym-modal-prompt" class="form-label">Prompt für die Synonymerweiterung</label>
+                    <textarea class="form-control" id="synonym-modal-prompt" rows="6"></textarea>
+                    <div class="form-text">Passe den Prompt an, bevor die Anfrage gesendet wird. Mit Strg+Enter bzw. Cmd+Enter senden.</div>
+                </div>
+                <div id="synonym-modal-error" class="alert alert-danger d-none" role="alert"></div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal" id="synonym-modal-cancel">Abbrechen</button>
+                <button type="button" class="btn btn-primary" id="synonym-modal-submit">
+                    <span class="spinner-border spinner-border-sm me-2 d-none" role="status" aria-hidden="true"></span>
+                    Synonyme abrufen
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+    window.DEFAULT_SYNONYM_PROMPT = {{ default_synonym_prompt|tojson }};
+    window.INITIAL_KEYWORD_GROUPS = {{ keyword_groups|tojson }};
+    window.SYNONYM_GROUPS_MANUAL = {{ 'true' if synonym_groups_manual else 'false' }};
+    window.INITIAL_KEYWORD_EVALUATIONS = {{ keyword_evaluations|tojson }};
+</script>
+
+<script>
+    (function () {
+        const keywordsTextarea = document.getElementById('keywords');
+        const keywordList = document.getElementById('keyword-list');
+        const keywordEmpty = document.getElementById('keyword-empty');
+        const groupsInput = document.getElementById('keyword-groups-payload');
+        const groupsModeInput = document.getElementById('keyword-groups-mode');
+        const evaluationsInput = document.getElementById('keyword-evaluations-payload');
+        const evaluationButton = document.getElementById('evaluate-keywords-btn');
+        const evaluationAlert = document.getElementById('keyword-evaluation-alert');
+        const evaluationSection = document.getElementById('keyword-evaluation-results');
+        const evaluationTableBody = evaluationSection ? evaluationSection.querySelector('tbody') : null;
+        const modalElement = document.getElementById('synonymModal');
+        const modalKeyword = document.getElementById('synonym-modal-keyword');
+        const modalPrompt = document.getElementById('synonym-modal-prompt');
+        const modalError = document.getElementById('synonym-modal-error');
+        const modalSubmit = document.getElementById('synonym-modal-submit');
+        let modalInstance = null;
+        if (modalElement && typeof bootstrap !== 'undefined') {
+            modalInstance = new bootstrap.Modal(modalElement);
+        }
+
+        const defaultPrompt = window.DEFAULT_SYNONYM_PROMPT || '';
+        const initialGroups = Array.isArray(window.INITIAL_KEYWORD_GROUPS) ? window.INITIAL_KEYWORD_GROUPS : [];
+        const initialEvaluations = Array.isArray(window.INITIAL_KEYWORD_EVALUATIONS) ? window.INITIAL_KEYWORD_EVALUATIONS : [];
+        const keywordState = new Map();
+        let currentKeywords = [];
+        let keywordSetLower = new Set();
+        let activeModalKeyword = null;
+
+        function setManualMode() {
+            if (groupsModeInput) {
+                groupsModeInput.value = 'manual';
+            }
+        }
+
+        function getKeywordsFromTextarea() {
+            if (!keywordsTextarea) {
+                return [];
+            }
+            const lines = keywordsTextarea.value.split(/\r?\n/);
+            const result = [];
+            const seenLower = new Set();
+            lines.forEach(line => {
+                const trimmed = line.trim();
+                if (!trimmed) {
+                    return;
+                }
+                const lowered = trimmed.toLowerCase();
+                if (seenLower.has(lowered)) {
+                    return;
+                }
+                seenLower.add(lowered);
+                result.push(trimmed);
+            });
+            return result;
+        }
+
+        function ensureKeywordState(keyword) {
+            if (!keywordState.has(keyword)) {
+                keywordState.set(keyword, {
+                    synonyms: [],
+                    synonymSet: new Set(),
+                    lastPrompt: defaultPrompt,
+                    evaluation: null,
+                });
+            }
+            return keywordState.get(keyword);
+        }
+
+        function syncInitialGroups() {
+            if (!Array.isArray(initialGroups) || initialGroups.length === 0) {
+                return;
+            }
+            initialGroups.forEach(group => {
+                if (!group || typeof group !== 'object') {
+                    return;
+                }
+                const original = typeof group.original === 'string' ? group.original.trim() : '';
+                if (!original || !keywordSetLower.has(original.toLowerCase())) {
+                    return;
+                }
+                const entry = ensureKeywordState(original);
+                const additional = Array.isArray(group.additional) ? group.additional : [];
+                additional.forEach(value => {
+                    const text = typeof value === 'string' ? value.trim() : '';
+                    if (!text) {
+                        return;
+                    }
+                    const lowered = text.toLowerCase();
+                    if (entry.synonymSet.has(lowered) || keywordSetLower.has(lowered)) {
+                        return;
+                    }
+                    entry.synonymSet.add(lowered);
+                    entry.synonyms.push(text);
+                });
+            });
+        }
+
+        function syncInitialEvaluations() {
+            if (!Array.isArray(initialEvaluations) || initialEvaluations.length === 0) {
+                return;
+            }
+            initialEvaluations.forEach(entry => {
+                if (!entry || typeof entry !== 'object') {
+                    return;
+                }
+                const keyword = typeof entry.keyword === 'string' ? entry.keyword.trim() : '';
+                if (!keyword || !keywordSetLower.has(keyword.toLowerCase())) {
+                    return;
+                }
+                const record = ensureKeywordState(keyword);
+                const quality = typeof entry.quality === 'string' ? entry.quality.trim() : '';
+                const betterRaw = Array.isArray(entry.better_keywords) ? entry.better_keywords : [];
+                const better = [];
+                const seenLocal = new Set();
+                betterRaw.forEach(value => {
+                    const text = typeof value === 'string' ? value.trim() : '';
+                    if (!text) {
+                        return;
+                    }
+                    const lowered = text.toLowerCase();
+                    if (seenLocal.has(lowered)) {
+                        return;
+                    }
+                    seenLocal.add(lowered);
+                    better.push(text);
+                });
+                record.evaluation = {
+                    quality,
+                    betterKeywords: better,
+                };
+            });
+        }
+
+        function renderKeywordList() {
+            if (!keywordList) {
+                return;
+            }
+            keywordList.innerHTML = '';
+            if (keywordEmpty) {
+                keywordEmpty.style.display = currentKeywords.length === 0 ? '' : 'none';
+            }
+            if (currentKeywords.length === 0) {
+                return;
+            }
+            currentKeywords.forEach(keyword => {
+                const entry = ensureKeywordState(keyword);
+                const listItem = document.createElement('div');
+                listItem.className = 'list-group-item';
+                listItem.dataset.keyword = keyword;
+
+                const header = document.createElement('div');
+                header.className = 'd-flex justify-content-between align-items-start flex-wrap gap-2';
+
+                const title = document.createElement('div');
+                title.className = 'me-2';
+                const strong = document.createElement('strong');
+                strong.textContent = keyword;
+                title.appendChild(strong);
+                if (entry.evaluation && entry.evaluation.quality) {
+                    const qualityBadge = document.createElement('span');
+                    qualityBadge.className = 'badge bg-info text-dark ms-2';
+                    qualityBadge.textContent = `Güte: ${entry.evaluation.quality}`;
+                    title.appendChild(qualityBadge);
+                }
+                header.appendChild(title);
+
+                const expandButton = document.createElement('button');
+                expandButton.type = 'button';
+                expandButton.className = 'btn btn-link btn-sm p-0';
+                expandButton.dataset.action = 'expand';
+                expandButton.dataset.keyword = keyword;
+                expandButton.textContent = 'Suchbegriff erweitern';
+                header.appendChild(expandButton);
+
+                listItem.appendChild(header);
+
+                const synonymsWrapper = document.createElement('div');
+                synonymsWrapper.className = 'mt-2';
+
+                if (entry.synonyms.length === 0) {
+                    const emptyText = document.createElement('div');
+                    emptyText.className = 'text-muted small';
+                    emptyText.textContent = 'Keine Synonyme hinzugefügt.';
+                    synonymsWrapper.appendChild(emptyText);
+                } else {
+                    const synonymsList = document.createElement('div');
+                    synonymsList.className = 'd-flex flex-wrap gap-2';
+                    entry.synonyms.forEach(value => {
+                        const badge = document.createElement('span');
+                        badge.className = 'badge bg-secondary d-flex align-items-center';
+                        const textSpan = document.createElement('span');
+                        textSpan.textContent = value;
+                        badge.appendChild(textSpan);
+                        const removeButton = document.createElement('button');
+                        removeButton.type = 'button';
+                        removeButton.className = 'btn btn-sm btn-link text-white ms-2 p-0 remove-synonym';
+                        removeButton.dataset.synonym = value;
+                        removeButton.setAttribute('aria-label', `Synonym „${value}“ entfernen`);
+                        removeButton.innerHTML = '&times;';
+                        badge.appendChild(removeButton);
+                        synonymsList.appendChild(badge);
+                    });
+                    synonymsWrapper.appendChild(synonymsList);
+                }
+
+                const addGroup = document.createElement('div');
+                addGroup.className = 'input-group input-group-sm mt-2';
+                const addInput = document.createElement('input');
+                addInput.type = 'text';
+                addInput.className = 'form-control';
+                addInput.placeholder = 'Synonym hinzufügen';
+                addInput.dataset.role = 'synonym-input';
+                const addButton = document.createElement('button');
+                addButton.type = 'button';
+                addButton.className = 'btn btn-outline-secondary';
+                addButton.dataset.role = 'synonym-add';
+                addButton.textContent = 'Hinzufügen';
+                addGroup.appendChild(addInput);
+                addGroup.appendChild(addButton);
+                synonymsWrapper.appendChild(addGroup);
+
+                listItem.appendChild(synonymsWrapper);
+                keywordList.appendChild(listItem);
+            });
+        }
+
+        function updateGroupsInput() {
+            if (!groupsInput) {
+                return;
+            }
+            const payload = currentKeywords.map(keyword => {
+                const entry = keywordState.get(keyword);
+                return {
+                    original: keyword,
+                    additional: entry ? entry.synonyms.slice() : [],
+                };
+            });
+            groupsInput.value = JSON.stringify(payload);
+        }
+
+        function collectEvaluationPayload() {
+            const payload = [];
+            currentKeywords.forEach(keyword => {
+                const entry = keywordState.get(keyword);
+                if (!entry || !entry.evaluation) {
+                    return;
+                }
+                const better = Array.isArray(entry.evaluation.betterKeywords)
+                    ? entry.evaluation.betterKeywords.filter(value => typeof value === 'string' && value.trim().length > 0)
+                    : [];
+                payload.push({
+                    keyword,
+                    quality: entry.evaluation.quality || '',
+                    better_keywords: better,
+                });
+            });
+            return payload;
+        }
+
+        function updateEvaluationPayload() {
+            if (!evaluationsInput) {
+                return;
+            }
+            const payload = collectEvaluationPayload();
+            evaluationsInput.value = JSON.stringify(payload);
+        }
+
+        function renderEvaluationTable() {
+            if (!evaluationTableBody || !evaluationSection) {
+                return;
+            }
+            evaluationTableBody.innerHTML = '';
+            const rows = [];
+            currentKeywords.forEach(keyword => {
+                const entry = keywordState.get(keyword);
+                if (!entry || !entry.evaluation) {
+                    return;
+                }
+                const better = Array.isArray(entry.evaluation.betterKeywords)
+                    ? entry.evaluation.betterKeywords.filter(value => typeof value === 'string' && value.trim().length > 0)
+                    : [];
+                rows.push({
+                    keyword,
+                    quality: entry.evaluation.quality || '',
+                    better,
+                });
+            });
+            if (rows.length === 0) {
+                evaluationSection.style.display = 'none';
+                return;
+            }
+            rows.forEach(row => {
+                const tr = document.createElement('tr');
+                const keywordCell = document.createElement('td');
+                keywordCell.textContent = row.keyword;
+                tr.appendChild(keywordCell);
+
+                const qualityCell = document.createElement('td');
+                qualityCell.textContent = row.quality || '–';
+                tr.appendChild(qualityCell);
+
+                const betterCell = document.createElement('td');
+                betterCell.textContent = row.better.length > 0 ? row.better.join(', ') : '–';
+                tr.appendChild(betterCell);
+
+                evaluationTableBody.appendChild(tr);
+            });
+            evaluationSection.style.display = '';
+        }
+
+        function setEvaluationAlert(message, category = 'warning') {
+            if (!evaluationAlert) {
+                return;
+            }
+            evaluationAlert.classList.remove('d-none', 'alert-warning', 'alert-danger', 'alert-info', 'alert-success');
+            if (!message) {
+                evaluationAlert.classList.add('d-none');
+                evaluationAlert.textContent = '';
+                return;
+            }
+            let className = 'alert-warning';
+            if (category === 'success') {
+                className = 'alert-success';
+            } else if (category === 'info') {
+                className = 'alert-info';
+            } else if (category === 'danger') {
+                className = 'alert-danger';
+            }
+            evaluationAlert.classList.add(className);
+            evaluationAlert.textContent = message;
+        }
+
+        function setEvaluationButtonLoading(loading) {
+            if (!evaluationButton) {
+                return;
+            }
+            if (loading) {
+                evaluationButton.dataset.loading = 'true';
+                evaluationButton.disabled = true;
+                if (!evaluationButton.dataset.originalText) {
+                    evaluationButton.dataset.originalText = evaluationButton.textContent || '';
+                }
+                evaluationButton.textContent = 'Bewertung läuft …';
+            } else {
+                delete evaluationButton.dataset.loading;
+                evaluationButton.disabled = false;
+                if (evaluationButton.dataset.originalText) {
+                    evaluationButton.textContent = evaluationButton.dataset.originalText;
+                }
+            }
+        }
+
+        function addSynonym(keyword, synonym) {
+            const trimmed = typeof synonym === 'string' ? synonym.trim() : '';
+            if (!trimmed) {
+                return false;
+            }
+            const lowered = trimmed.toLowerCase();
+            if (keywordSetLower.has(lowered)) {
+                return false;
+            }
+            const entry = ensureKeywordState(keyword);
+            if (entry.synonymSet.has(lowered)) {
+                return false;
+            }
+            entry.synonymSet.add(lowered);
+            entry.synonyms.push(trimmed);
+            setManualMode();
+            updateGroupsInput();
+            renderKeywordList();
+            renderEvaluationTable();
+            updateEvaluationPayload();
+            return true;
+        }
+
+        function removeSynonym(keyword, synonym) {
+            const entry = keywordState.get(keyword);
+            if (!entry) {
+                return;
+            }
+            const lowered = synonym.toLowerCase();
+            if (!entry.synonymSet.has(lowered)) {
+                return;
+            }
+            entry.synonymSet.delete(lowered);
+            entry.synonyms = entry.synonyms.filter(value => value.toLowerCase() !== lowered);
+            setManualMode();
+            updateGroupsInput();
+            renderKeywordList();
+            renderEvaluationTable();
+            updateEvaluationPayload();
+        }
+
+        function openModal(keyword) {
+            if (!modalInstance || !modalKeyword || !modalPrompt) {
+                return;
+            }
+            const entry = ensureKeywordState(keyword);
+            activeModalKeyword = keyword;
+            modalKeyword.textContent = keyword;
+            modalPrompt.value = entry.lastPrompt || defaultPrompt;
+            if (modalError) {
+                modalError.classList.add('d-none');
+                modalError.textContent = '';
+            }
+            if (modalSubmit) {
+                modalSubmit.disabled = false;
+                modalSubmit.innerHTML = '<span class="spinner-border spinner-border-sm me-2 d-none" role="status" aria-hidden="true"></span>Synonyme abrufen';
+            }
+            modalInstance.show();
+        }
+
+        function showModalError(message) {
+            if (!modalError) {
+                return;
+            }
+            modalError.textContent = message;
+            modalError.classList.remove('d-none');
+        }
+
+        function setSubmitLoading(loading) {
+            if (!modalSubmit) {
+                return;
+            }
+            const spinner = modalSubmit.querySelector('.spinner-border');
+            if (loading) {
+                modalSubmit.disabled = true;
+                if (spinner) {
+                    spinner.classList.remove('d-none');
+                }
+            } else {
+                modalSubmit.disabled = false;
+                if (spinner) {
+                    spinner.classList.add('d-none');
+                }
+            }
+        }
+
+        function handleModalSubmit() {
+            if (!activeModalKeyword || !modalPrompt) {
+                return;
+            }
+            const keyword = activeModalKeyword;
+            const promptValue = modalPrompt.value || '';
+            if (modalError) {
+                modalError.classList.add('d-none');
+                modalError.textContent = '';
+            }
+            setSubmitLoading(true);
+            fetch('/synonyms', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({ keyword, prompt: promptValue }),
+            })
+                .then(response => {
+                    if (!response.ok) {
+                        return response.json().catch(() => ({ error: `Fehler ${response.status}` }));
+                    }
+                    return response.json();
+                })
+                .then(data => {
+                    if (!data) {
+                        showModalError('Unbekannte Antwort von der Synonym-API.');
+                        return;
+                    }
+                    if (data.error) {
+                        showModalError(data.error);
+                        return;
+                    }
+                    const entry = ensureKeywordState(keyword);
+                    entry.lastPrompt = promptValue || defaultPrompt;
+                    const synonyms = Array.isArray(data.synonyms) ? data.synonyms : [];
+                    let added = 0;
+                    synonyms.forEach(value => {
+                        if (addSynonym(keyword, value)) {
+                            added += 1;
+                        }
+                    });
+                    if (added === 0) {
+                        showModalError('Keine neuen Synonyme hinzugefügt.');
+                        return;
+                    }
+                    setManualMode();
+                    if (modalInstance) {
+                        modalInstance.hide();
+                    }
+                })
+                .catch(() => {
+                    showModalError('Synonyme konnten nicht abgerufen werden.');
+                })
+                .finally(() => {
+                    setSubmitLoading(false);
+                });
+        }
+
+        if (modalSubmit) {
+            modalSubmit.addEventListener('click', event => {
+                event.preventDefault();
+                handleModalSubmit();
+            });
+        }
+
+        if (modalPrompt) {
+            modalPrompt.addEventListener('keydown', event => {
+                if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'enter') {
+                    event.preventDefault();
+                    handleModalSubmit();
+                }
+            });
+        }
+
+        if (modalElement) {
+            modalElement.addEventListener('hidden.bs.modal', () => {
+                activeModalKeyword = null;
+                setSubmitLoading(false);
+            });
+        }
+
+        if (keywordList) {
+            keywordList.addEventListener('click', event => {
+                const expandButton = event.target.closest('[data-action="expand"]');
+                if (expandButton) {
+                    const keyword = expandButton.dataset.keyword;
+                    if (keyword) {
+                        openModal(keyword);
+                    }
+                    event.preventDefault();
+                    return;
+                }
+                const removeButton = event.target.closest('.remove-synonym');
+                if (removeButton) {
+                    const listItem = removeButton.closest('.list-group-item');
+                    if (listItem) {
+                        const keyword = listItem.dataset.keyword;
+                        const synonym = removeButton.dataset.synonym || removeButton.textContent || '';
+                        if (keyword && synonym) {
+                            removeSynonym(keyword, synonym);
+                        }
+                    }
+                    event.preventDefault();
+                }
+            });
+
+            keywordList.addEventListener('click', event => {
+                const addButton = event.target.closest('[data-role="synonym-add"]');
+                if (!addButton) {
+                    return;
+                }
+                const listItem = addButton.closest('.list-group-item');
+                if (!listItem) {
+                    return;
+                }
+                const keyword = listItem.dataset.keyword;
+                const input = listItem.querySelector('[data-role="synonym-input"]');
+                if (!keyword || !input) {
+                    return;
+                }
+                const value = input.value.trim();
+                if (value) {
+                    const added = addSynonym(keyword, value);
+                    if (added) {
+                        input.value = '';
+                    }
+                }
+            });
+
+            keywordList.addEventListener('keydown', event => {
+                if (event.key !== 'Enter') {
+                    return;
+                }
+                const input = event.target.closest('[data-role="synonym-input"]');
+                if (!input) {
+                    return;
+                }
+                event.preventDefault();
+                const listItem = input.closest('.list-group-item');
+                if (!listItem) {
+                    return;
+                }
+                const keyword = listItem.dataset.keyword;
+                const value = input.value.trim();
+                if (keyword && value) {
+                    const added = addSynonym(keyword, value);
+                    if (added) {
+                        input.value = '';
+                    }
+                }
+            });
+        }
+
+        function rebuildFromTextarea() {
+            const keywords = getKeywordsFromTextarea();
+            currentKeywords = keywords;
+            keywordSetLower = new Set(keywords.map(kw => kw.toLowerCase()));
+            Array.from(keywordState.keys()).forEach(key => {
+                if (!keywordSetLower.has(key.toLowerCase())) {
+                    keywordState.delete(key);
+                }
+            });
+            keywords.forEach(keyword => {
+                ensureKeywordState(keyword);
+            });
+            if (evaluationButton && !evaluationButton.dataset.loading) {
+                evaluationButton.disabled = currentKeywords.length === 0;
+            }
+            renderKeywordList();
+            updateGroupsInput();
+            renderEvaluationTable();
+            updateEvaluationPayload();
+            if (currentKeywords.length === 0) {
+                setEvaluationAlert('');
+            }
+        }
+
+        if (keywordsTextarea) {
+            keywordsTextarea.addEventListener('input', () => {
+                rebuildFromTextarea();
+            });
+        }
+
+        if (evaluationButton) {
+            evaluationButton.addEventListener('click', () => {
+                const keywords = getKeywordsFromTextarea();
+                if (keywords.length === 0) {
+                    setEvaluationAlert('Bitte geben Sie mindestens ein Suchstichwort ein.', 'warning');
+                    return;
+                }
+                setEvaluationAlert('');
+                setEvaluationButtonLoading(true);
+                fetch('/evaluate-keywords', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({ keywords }),
+                })
+                    .then(response => response.json().then(data => ({ ok: response.ok, data })))
+                    .then(({ ok, data }) => {
+                        if (!ok) {
+                            const message = data && typeof data.error === 'string' && data.error
+                                ? data.error
+                                : 'Bewertung konnte nicht durchgeführt werden.';
+                            setEvaluationAlert(message, 'danger');
+                            return;
+                        }
+                        if (data && Array.isArray(data.evaluations)) {
+                            data.evaluations.forEach(item => {
+                                if (!item || typeof item !== 'object') {
+                                    return;
+                                }
+                                const keyword = typeof item.keyword === 'string' ? item.keyword.trim() : '';
+                                if (!keyword || !keywordSetLower.has(keyword.toLowerCase())) {
+                                    return;
+                                }
+                                const entry = ensureKeywordState(keyword);
+                                const quality = typeof item.quality === 'string' ? item.quality.trim() : '';
+                                const betterRaw = Array.isArray(item.better_keywords) ? item.better_keywords : [];
+                                const better = [];
+                                const seenBetter = new Set();
+                                betterRaw.forEach(value => {
+                                    const text = typeof value === 'string' ? value.trim() : '';
+                                    if (!text) {
+                                        return;
+                                    }
+                                    const lowered = text.toLowerCase();
+                                    if (seenBetter.has(lowered)) {
+                                        return;
+                                    }
+                                    seenBetter.add(lowered);
+                                    better.push(text);
+                                });
+                                entry.evaluation = {
+                                    quality: quality || 'unbewertet',
+                                    betterKeywords: better,
+                                };
+                            });
+                        }
+                        if (data && Array.isArray(data.messages) && data.messages.length > 0) {
+                            const joined = data.messages.join(' ');
+                            const category = data.evaluations && data.evaluations.length > 0 ? 'warning' : 'danger';
+                            setEvaluationAlert(joined, category);
+                        } else if (data && Array.isArray(data.evaluations) && data.evaluations.length > 0) {
+                            setEvaluationAlert('Bewertungen aktualisiert.', 'info');
+                        } else {
+                            setEvaluationAlert('Keine Bewertungen verfügbar.', 'warning');
+                        }
+                        renderKeywordList();
+                        renderEvaluationTable();
+                        updateEvaluationPayload();
+                    })
+                    .catch(() => {
+                        setEvaluationAlert('Bewertung konnte nicht durchgeführt werden.', 'danger');
+                    })
+                    .finally(() => {
+                        setEvaluationButtonLoading(false);
+                        if (evaluationButton) {
+                            evaluationButton.disabled = currentKeywords.length === 0;
+                        }
+                    });
+            });
+        }
+
+        rebuildFromTextarea();
+        if (window.SYNONYM_GROUPS_MANUAL === true || window.SYNONYM_GROUPS_MANUAL === 'true') {
+            setManualMode();
+        }
+        syncInitialGroups();
+        syncInitialEvaluations();
+        renderKeywordList();
+        renderEvaluationTable();
+        updateGroupsInput();
+        updateEvaluationPayload();
+    })();
+</script>
+
+<script>
+    (function () {
+        const schoolCheckboxes = Array.from(document.querySelectorAll('.school-checkbox'));
+        const selectionCount = document.getElementById('selection-count');
+        const selectAllButton = document.getElementById('select-all');
+        const selectNoneButton = document.getElementById('select-none');
+        const filterButtons = document.querySelectorAll('.filter-select');
+        const filterInputs = document.querySelectorAll('.filter-input');
+        const filterOperators = document.querySelectorAll('.filter-operator');
+        const numericFields = new Set([
+            {% for field in stammdaten_fields if field.type == 'numeric' %}
+                '{{ field.key }}',
+            {% endfor %}
+        ]);
+        const activeFilters = {};
+
+        function updateSelectionCount() {
+            if (!selectionCount) {
+                return;
+            }
+            const count = schoolCheckboxes.filter(cb => cb.checked).length;
+            selectionCount.textContent = count.toString();
+        }
+
+        function toDatasetKey(field) {
+            return field.replace(/_([a-z])/g, (_, letter) => letter.toUpperCase());
+        }
+
+        function getActiveFilterKeys() {
+            return Object.keys(activeFilters).filter(key => Boolean(activeFilters[key]));
+        }
+
+        function normalizeNumeric(value) {
+            if (typeof value !== 'string') {
+                value = value == null ? '' : String(value);
+            }
+            let normalized = value.trim();
+            normalized = normalized.replace(/\s+/g, '');
+            if (normalized.includes('.') && normalized.includes(',')) {
+                normalized = normalized.replace(/\./g, '').replace(',', '.');
+            } else if (normalized.includes(',')) {
+                normalized = normalized.replace(',', '.');
+            }
+            const parsed = parseFloat(normalized);
+            return Number.isNaN(parsed) ? NaN : parsed;
+        }
+
+        function applyFilters() {
+            const keys = getActiveFilterKeys();
+
+            if (keys.length === 0) {
+                schoolCheckboxes.forEach(cb => {
+                    const row = cb.closest('tr');
+                    if (row) {
+                        row.style.display = 'table-row';
+                    }
+                });
+                updateSelectionCount();
+                return;
+            }
+
+            schoolCheckboxes.forEach(cb => {
+                let matches = true;
+                for (const key of keys) {
+                    const filter = activeFilters[key];
+                    if (!filter) {
+                        continue;
+                    }
+                    const datasetKey = toDatasetKey(key);
+                    const rawValue = (cb.dataset[datasetKey] || '').trim();
+
+                    if (filter.type === 'numeric') {
+                        const numericValue = normalizeNumeric(rawValue);
+                        if (Number.isNaN(numericValue)) {
+                            matches = false;
+                            break;
+                        }
+                        if (filter.operator === 'gt' && !(numericValue > filter.value)) {
+                            matches = false;
+                            break;
+                        }
+                        if (filter.operator === 'lt' && !(numericValue < filter.value)) {
+                            matches = false;
+                            break;
+                        }
+                        if (
+                            filter.operator === 'eq'
+                            && Math.abs(numericValue - filter.value) > Number.EPSILON
+                        ) {
+                            matches = false;
+                            break;
+                        }
+                    } else {
+                        if (!rawValue.toLowerCase().includes(filter.value)) {
+                            matches = false;
+                            break;
+                        }
+                    }
+                }
+
+                cb.checked = matches;
+                const row = cb.closest('tr');
+                if (row) {
+                    row.style.display = matches ? 'table-row' : 'none';
+                }
+            });
+
+            updateSelectionCount();
+        }
+
+        function applyFilterForField(field) {
+            if (!field) {
+                return;
+            }
+
+            const input = document.querySelector(`#filter-${field}`);
+            if (!input) {
+                return;
+            }
+
+            const type = input.dataset.filterType || (numericFields.has(field) ? 'numeric' : 'text');
+            const rawValue = input.value.trim();
+
+            if (!rawValue) {
+                delete activeFilters[field];
+                input.classList.remove('is-invalid');
+                applyFilters();
+                return;
+            }
+
+            if (type === 'numeric' || numericFields.has(field)) {
+                const operatorSelect = document.querySelector(`.filter-operator[data-field="${field}"]`);
+                const operator = operatorSelect ? operatorSelect.value : 'eq';
+                const numericValue = normalizeNumeric(rawValue);
+                if (Number.isNaN(numericValue)) {
+                    input.classList.add('is-invalid');
+                    return;
+                }
+                input.classList.remove('is-invalid');
+                activeFilters[field] = {
+                    type: 'numeric',
+                    operator,
+                    value: numericValue,
+                };
+            } else {
+                activeFilters[field] = {
+                    type: 'text',
+                    value: rawValue.toLowerCase(),
+                };
+            }
+
+            applyFilters();
+        }
+
+        if (selectionCount) {
+            updateSelectionCount();
+            schoolCheckboxes.forEach(cb => {
+                cb.addEventListener('change', updateSelectionCount);
+            });
+        }
+
+        if (selectAllButton) {
+            selectAllButton.addEventListener('click', () => {
+                const hasFilters = getActiveFilterKeys().length > 0;
+                if (hasFilters) {
+                    applyFilters();
+                } else {
+                    schoolCheckboxes.forEach(cb => {
+                        cb.checked = true;
+                    });
+                    updateSelectionCount();
+                }
+            });
+        }
+
+        if (selectNoneButton) {
+            selectNoneButton.addEventListener('click', () => {
+                schoolCheckboxes.forEach(cb => {
+                    cb.checked = false;
+                });
+                updateSelectionCount();
+            });
+        }
+
+        filterButtons.forEach(button => {
+            button.addEventListener('click', () => {
+                applyFilterForField(button.dataset.field);
+            });
+        });
+
+        filterInputs.forEach(input => {
+            input.addEventListener('keydown', event => {
+                if (event.key === 'Enter') {
+                    event.preventDefault();
+                    applyFilterForField(input.dataset.field);
+                }
+            });
+            input.addEventListener('input', () => {
+                input.classList.remove('is-invalid');
+            });
+        });
+
+        filterOperators.forEach(select => {
+            select.addEventListener('change', () => {
+                const field = select.dataset.field;
+                const input = document.querySelector(`#filter-${field}`);
+                if (!field || !input || !input.value.trim()) {
+                    return;
+                }
+                applyFilterForField(field);
+            });
+        });
+    })();
+</script>
+
+{% if job_id %}
+<script>
+    const jobId = "{{ job_id }}";
+    const statusUrl = `/status/${jobId}`;
+    const progressSection = document.getElementById("progress-section");
+    const statusText = document.getElementById("status-text");
+    const startProgress = document.getElementById("start-progress");
+    const foundCount = document.getElementById("found-count");
+    const currentPage = document.getElementById("current-page");
+    const queueLength = document.getElementById("queue-length");
+    const progressBar = document.getElementById("progress-bar");
+    const synonymStatus = document.getElementById("synonym-status");
+    const resultsContainer = document.getElementById("results-container");
+    const resultsTableBody = document.querySelector("#results-table tbody");
+    const noResultsAlert = document.getElementById("no-results-alert");
+    const recentPagesList = document.getElementById("recent-pages");
+    const cancelButton = document.getElementById("cancel-button");
+    const saveButton = document.getElementById("save-button");
+    const actionStatus = document.getElementById("action-status");
+
+    progressSection.style.display = "";
+
+    let pollInterval = null;
+
+    function translateStatus(status, errorMessage) {
+        switch (status) {
+            case "running":
+                return "Crawler läuft";
+            case "finished":
+                return "Suche abgeschlossen";
+            case "cancelling":
+                return "Abbruch wird vorbereitet";
+            case "cancelled":
+                return "Suche abgebrochen";
+            case "error":
+                return errorMessage ? `Fehler: ${errorMessage}` : "Fehler während der Suche";
+            default:
+                return "Wird vorbereitet ...";
+        }
+    }
+
+    function renderResults(results) {
+        resultsTableBody.innerHTML = "";
+        results.forEach(result => {
+            const row = document.createElement("tr");
+            const sourceCell = document.createElement("td");
+            const targetCell = document.createElement("td");
+            const keywordCell = document.createElement("td");
+
+            const sourceLink = document.createElement("a");
+            sourceLink.href = result.source_url;
+            sourceLink.textContent = result.source_url;
+            sourceLink.target = "_blank";
+            sourceLink.rel = "noopener";
+
+            const targetLink = document.createElement("a");
+            targetLink.href = result.target_url;
+            targetLink.textContent = result.target_url;
+            targetLink.target = "_blank";
+            targetLink.rel = "noopener";
+
+            sourceCell.appendChild(sourceLink);
+            targetCell.appendChild(targetLink);
+
+            const matches = Array.isArray(result.matched_keywords) ? result.matched_keywords : [];
+            keywordCell.textContent = matches.length > 0 ? matches[0] : "–";
+
+            row.appendChild(sourceCell);
+            row.appendChild(targetCell);
+            row.appendChild(keywordCell);
+
+            resultsTableBody.appendChild(row);
+        });
+
+        if (results.length > 0) {
+            resultsContainer.style.display = "";
+            noResultsAlert.style.display = "none";
+        }
+    }
+
+    function updateStatus() {
+        fetch(statusUrl)
+            .then(response => response.json())
+            .then(data => {
+                if (data.error && !data.status) {
+                    statusText.textContent = data.error;
+                    clearInterval(pollInterval);
+                    pollInterval = null;
+                    return;
+                }
+
+                statusText.textContent = translateStatus(data.status, data.error);
+                startProgress.textContent = `${data.processed_start_urls}/${data.total_start_urls}`;
+                foundCount.textContent = data.found_count;
+                currentPage.textContent = data.current_page || "–";
+                queueLength.textContent = data.queue_length ?? 0;
+                if (synonymStatus && data.synonym_status) {
+                    synonymStatus.textContent = data.synonym_status;
+                }
+
+                const percent = data.progress_percent || 0;
+                progressBar.style.width = `${percent}%`;
+                progressBar.textContent = `${percent}%`;
+                progressBar.setAttribute("aria-valuenow", percent);
+
+                if (cancelButton) {
+                    if (data.completed || data.status === "error") {
+                        cancelButton.disabled = true;
+                    } else {
+                        cancelButton.disabled = data.status === "cancelling";
+                    }
+                }
+
+                if (saveButton) {
+                    saveButton.disabled = !data.completed || data.status === "error";
+                }
+
+                if (Array.isArray(data.results)) {
+                    renderResults(data.results);
+                }
+
+                if (Array.isArray(data.recent_pages)) {
+                    recentPagesList.innerHTML = "";
+                    data.recent_pages.slice().reverse().forEach(pageUrl => {
+                        const listItem = document.createElement("li");
+                        const link = document.createElement("a");
+                        link.href = pageUrl;
+                        link.textContent = pageUrl;
+                        link.target = "_blank";
+                        link.rel = "noopener";
+                        listItem.appendChild(link);
+                        recentPagesList.appendChild(listItem);
+                    });
+                    if (data.recent_pages.length === 0) {
+                        const emptyItem = document.createElement("li");
+                        emptyItem.textContent = "Noch keine Seiten geprüft.";
+                        recentPagesList.appendChild(emptyItem);
+                    }
+                }
+
+                if (data.completed) {
+                    clearInterval(pollInterval);
+                    pollInterval = null;
+                    if ((data.results || []).length === 0 && !data.error) {
+                        noResultsAlert.style.display = "";
+                    }
+                    progressBar.classList.remove("progress-bar-animated");
+                }
+            })
+            .catch(() => {
+                statusText.textContent = "Fortschritt konnte nicht abgerufen werden.";
+            });
+    }
+
+    pollInterval = setInterval(updateStatus, 1500);
+    updateStatus();
+
+    if (cancelButton) {
+        cancelButton.addEventListener("click", () => {
+            cancelButton.disabled = true;
+            actionStatus.textContent = "Suche wird abgebrochen ...";
+            fetch(`/cancel/${jobId}`, {method: "POST"})
+                .then(response => response.json())
+                .then(data => {
+                    actionStatus.textContent = data.error ? data.error : "Abbruchsignal gesendet.";
+                })
+                .catch(() => {
+                    actionStatus.textContent = "Abbruch konnte nicht ausgelöst werden.";
+                });
+        });
+    }
+
+    if (saveButton) {
+        saveButton.addEventListener("click", () => {
+            saveButton.disabled = true;
+            actionStatus.textContent = "Suche wird gespeichert ...";
+            fetch(`/save-search/${jobId}`, {method: "POST"})
+                .then(response => response.json())
+                .then(data => {
+                    if (data.error) {
+                        actionStatus.textContent = data.error;
+                        saveButton.disabled = false;
+                    } else {
+                        actionStatus.textContent = "Suche wurde gespeichert.";
+                    }
+                })
+                .catch(() => {
+                    actionStatus.textContent = "Speichern fehlgeschlagen.";
+                    saveButton.disabled = false;
+                });
+        });
+    }
+</script>
+{% endif %}
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"
+        integrity="sha384-YvpcrYf0tY3lHB60NNkmXc5s9fDVZLESaAA55NDzOxhy9GkcIdslK1eN7N6jIeHz"
+        crossorigin="anonymous"></script>
+<script>
+    const savedSearchesButton = document.getElementById("load-saved-searches");
+    const savedSearchesSection = document.getElementById("saved-searches-section");
+    const savedSearchesEmpty = document.getElementById("saved-searches-empty");
+    const savedSearchesAccordion = document.getElementById("saved-searches-accordion");
+
+    function renderSavedSearches(searches) {
+        savedSearchesAccordion.innerHTML = "";
+        if (!Array.isArray(searches) || searches.length === 0) {
+            savedSearchesEmpty.style.display = "";
+            savedSearchesSection.style.display = "";
+            return;
+        }
+        savedSearchesEmpty.style.display = "none";
+        searches
+            .slice()
+            .reverse()
+            .forEach((entry, index) => {
+                const itemId = `saved-search-${index}`;
+                const headerId = `${itemId}-heading`;
+                const collapseId = `${itemId}-collapse`;
+                const accordionItem = document.createElement("div");
+                accordionItem.className = "accordion-item";
+
+                const header = document.createElement("h2");
+                header.className = "accordion-header";
+                header.id = headerId;
+
+                const button = document.createElement("button");
+                button.className = "accordion-button collapsed";
+                button.type = "button";
+                button.setAttribute("data-bs-toggle", "collapse");
+                button.setAttribute("data-bs-target", `#${collapseId}`);
+                button.setAttribute("aria-expanded", "false");
+                button.setAttribute("aria-controls", collapseId);
+                const keywords = Array.isArray(entry.keywords) ? entry.keywords.join(", ") : "";
+                button.textContent = `${entry.saved_at || "Unbekanntes Datum"} – ${keywords}`;
+                header.appendChild(button);
+                accordionItem.appendChild(header);
+
+                const collapse = document.createElement("div");
+                collapse.id = collapseId;
+                collapse.className = "accordion-collapse collapse";
+                collapse.setAttribute("aria-labelledby", headerId);
+                collapse.setAttribute("data-bs-parent", "#saved-searches-accordion");
+
+                const body = document.createElement("div");
+                body.className = "accordion-body";
+
+                const startUrlsP = document.createElement("p");
+                startUrlsP.className = "mb-2";
+                const startLabel = document.createElement("strong");
+                startLabel.textContent = "Start-URLs: ";
+                startUrlsP.appendChild(startLabel);
+                startUrlsP.append(document.createTextNode((Array.isArray(entry.start_urls) && entry.start_urls.length > 0) ? entry.start_urls.join(", ") : "–"));
+                body.appendChild(startUrlsP);
+
+                const rangeP = document.createElement("p");
+                rangeP.className = "mb-2";
+                const rangeLabel = document.createElement("strong");
+                rangeLabel.textContent = "Zeitraum: ";
+                rangeP.appendChild(rangeLabel);
+                rangeP.append(document.createTextNode(`${entry.start_date || "–"} bis ${entry.end_date || "–"}`));
+                body.appendChild(rangeP);
+
+                const concurrencyP = document.createElement("p");
+                concurrencyP.className = "mb-2";
+                const concurrencyLabel = document.createElement("strong");
+                concurrencyLabel.textContent = "Parallele Abrufe: ";
+                concurrencyP.appendChild(concurrencyLabel);
+                const concurrencyValue = typeof entry.concurrency === "number" ? entry.concurrency : null;
+                concurrencyP.append(document.createTextNode(concurrencyValue ? String(concurrencyValue) : "–"));
+                body.appendChild(concurrencyP);
+
+                const robotsP = document.createElement("p");
+                robotsP.className = "mb-2";
+                const robotsLabel = document.createElement("strong");
+                robotsLabel.textContent = "robots.txt respektiert: ";
+                robotsP.appendChild(robotsLabel);
+                const robotsValue = entry.respect_robots === false ? "Nein" : "Ja";
+                robotsP.append(document.createTextNode(robotsValue));
+                body.appendChild(robotsP);
+
+                const synonymP = document.createElement("p");
+                synonymP.className = "mb-2";
+                const synonymLabel = document.createElement("strong");
+                synonymLabel.textContent = "Synonymerweiterung: ";
+                synonymP.appendChild(synonymLabel);
+                const synonymText = entry.synonym_status || 'aktiv';
+                synonymP.append(document.createTextNode(synonymText));
+                body.appendChild(synonymP);
+
+                if (Array.isArray(entry.expanded_keywords) && entry.expanded_keywords.length > 0) {
+                    const expandedP = document.createElement("p");
+                    expandedP.className = "mb-2 small text-muted";
+                    expandedP.textContent = `Gesamtliste: ${entry.expanded_keywords.join(", ")}`;
+                    body.appendChild(expandedP);
+                }
+
+                if (Array.isArray(entry.keyword_groups) && entry.keyword_groups.length > 0) {
+                    const groupList = document.createElement("ul");
+                    groupList.className = "list-group list-group-flush mb-3";
+                    entry.keyword_groups.forEach(group => {
+                        const li = document.createElement("li");
+                        li.className = "list-group-item";
+                        const originalStrong = document.createElement("strong");
+                        const originalText = group && typeof group.original === "string" && group.original ? group.original : "–";
+                        originalStrong.textContent = originalText;
+                        li.appendChild(originalStrong);
+                        const additional = Array.isArray(group.additional) ? group.additional.filter(value => typeof value === "string" && value.trim().length > 0) : [];
+                        if (additional.length > 0) {
+                            const badge = document.createElement("span");
+                            badge.className = "badge bg-primary ms-2";
+                            badge.textContent = `+${additional.length}`;
+                            li.appendChild(badge);
+                            const extraDiv = document.createElement("div");
+                            extraDiv.className = "small text-muted mt-1";
+                            extraDiv.textContent = `Zusätzliche Begriffe: ${additional.join(", ")}`;
+                            li.appendChild(extraDiv);
+                        } else {
+                            const noneDiv = document.createElement("div");
+                            noneDiv.className = "small text-muted mt-1";
+                            noneDiv.textContent = "Keine zusätzlichen Begriffe ermittelt.";
+                            li.appendChild(noneDiv);
+                        }
+                        groupList.appendChild(li);
+                    });
+                    body.appendChild(groupList);
+                }
+
+                if (Array.isArray(entry.keyword_evaluations) && entry.keyword_evaluations.length > 0) {
+                    const evalWrapper = document.createElement("div");
+                    evalWrapper.className = "table-responsive mb-3";
+                    const evalTable = document.createElement("table");
+                    evalTable.className = "table table-sm";
+                    const evalHead = document.createElement("thead");
+                    const evalHeadRow = document.createElement("tr");
+                    ["Suchwort", "Wie gut?", "Bessere Suchbegriffe"].forEach(text => {
+                        const th = document.createElement("th");
+                        th.textContent = text;
+                        evalHeadRow.appendChild(th);
+                    });
+                    evalHead.appendChild(evalHeadRow);
+                    evalTable.appendChild(evalHead);
+                    const evalBody = document.createElement("tbody");
+                    entry.keyword_evaluations.forEach(item => {
+                        if (!item || typeof item !== "object") {
+                            return;
+                        }
+                        const keyword = typeof item.keyword === "string" ? item.keyword : "";
+                        const quality = typeof item.quality === "string" ? item.quality : "";
+                        const better = Array.isArray(item.better_keywords)
+                            ? item.better_keywords.filter(value => typeof value === "string" && value.trim().length > 0)
+                            : [];
+                        const tr = document.createElement("tr");
+                        const keywordCell = document.createElement("td");
+                        keywordCell.textContent = keyword || "–";
+                        tr.appendChild(keywordCell);
+                        const qualityCell = document.createElement("td");
+                        qualityCell.textContent = quality || "–";
+                        tr.appendChild(qualityCell);
+                        const betterCell = document.createElement("td");
+                        betterCell.textContent = better.length > 0 ? better.join(", ") : "–";
+                        tr.appendChild(betterCell);
+                        evalBody.appendChild(tr);
+                    });
+                    evalTable.appendChild(evalBody);
+                    evalWrapper.appendChild(evalTable);
+                    body.appendChild(evalWrapper);
+                }
+
+                const statusP = document.createElement("p");
+                statusP.className = "mb-3";
+                const statusLabel = document.createElement("strong");
+                statusLabel.textContent = "Status: ";
+                statusP.appendChild(statusLabel);
+                statusP.append(document.createTextNode(entry.status || "–"));
+                statusP.append(document.createTextNode(" • "));
+                const hitsLabel = document.createElement("strong");
+                hitsLabel.textContent = "Treffer: ";
+                statusP.appendChild(hitsLabel);
+                const resultCount = typeof entry.result_count === "number" ? entry.result_count : Array.isArray(entry.results) ? entry.results.length : 0;
+                statusP.append(document.createTextNode(String(resultCount)));
+                body.appendChild(statusP);
+
+                const tableWrapper = document.createElement("div");
+                tableWrapper.className = "table-responsive";
+                const table = document.createElement("table");
+                table.className = "table table-sm";
+                const thead = document.createElement("thead");
+                const headerRow = document.createElement("tr");
+                ["Ursprungs-URL", "Gefundene URL", "Suchbegriff"].forEach(text => {
+                    const th = document.createElement("th");
+                    th.textContent = text;
+                    headerRow.appendChild(th);
+                });
+                thead.appendChild(headerRow);
+                table.appendChild(thead);
+
+                const tbody = document.createElement("tbody");
+                (entry.results || []).forEach(result => {
+                    const matches = Array.isArray(result.matched_keywords) && result.matched_keywords.length > 0
+                        ? result.matched_keywords
+                        : [null];
+                    matches.forEach(matchValue => {
+                        const row = document.createElement("tr");
+
+                        const sourceCell = document.createElement("td");
+                        const sourceUrl = typeof result.source_url === "string" ? result.source_url : "";
+                        if (sourceUrl) {
+                            const sourceLink = document.createElement("a");
+                            sourceLink.href = sourceUrl;
+                            sourceLink.textContent = sourceUrl;
+                            sourceLink.target = "_blank";
+                            sourceLink.rel = "noopener";
+                            sourceCell.appendChild(sourceLink);
+                        } else {
+                            sourceCell.textContent = "–";
+                        }
+                        row.appendChild(sourceCell);
+
+                        const targetCell = document.createElement("td");
+                        const targetUrl = typeof result.target_url === "string" ? result.target_url : "";
+                        if (targetUrl) {
+                            const targetLink = document.createElement("a");
+                            targetLink.href = targetUrl;
+                            targetLink.textContent = targetUrl;
+                            targetLink.target = "_blank";
+                            targetLink.rel = "noopener";
+                            targetCell.appendChild(targetLink);
+                        } else {
+                            targetCell.textContent = "–";
+                        }
+                        row.appendChild(targetCell);
+
+                        const keywordCell = document.createElement("td");
+                        const keywordText = typeof matchValue === "string" && matchValue.trim().length > 0 ? matchValue : "–";
+                        keywordCell.textContent = keywordText;
+                        row.appendChild(keywordCell);
+
+                        tbody.appendChild(row);
+                    });
+                });
+                table.appendChild(tbody);
+                tableWrapper.appendChild(table);
+                body.appendChild(tableWrapper);
+
+                collapse.appendChild(body);
+                accordionItem.appendChild(collapse);
+
+                savedSearchesAccordion.appendChild(accordionItem);
+            });
+        savedSearchesSection.style.display = "";
+    }
+
+    if (savedSearchesButton) {
+        savedSearchesButton.addEventListener("click", () => {
+            fetch("/saved-searches")
+                .then(response => response.json())
+                .then(data => {
+                    renderSavedSearches(data.searches || []);
+                })
+                .catch(() => {
+                    savedSearchesEmpty.textContent = "Gespeicherte Suchläufe konnten nicht geladen werden.";
+                    savedSearchesEmpty.style.display = "";
+                    savedSearchesSection.style.display = "";
+                });
+        });
+    }
+</script>
+</body>
+</html>
