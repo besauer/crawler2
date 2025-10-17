@@ -52,6 +52,7 @@
         <div class="card-body">
             <p class="mb-3"><strong>Status:</strong> {{ 'Schlüssel gespeichert' if key_present else 'Kein Schlüssel hinterlegt' }}</p>
             <form method="post" class="row g-3">
+                <input type="hidden" name="form_id" value="api">
                 <div class="col-12">
                     <label for="api_key" class="form-label">OpenAI-API-Schlüssel</label>
                     <input type="password" class="form-control" id="api_key" name="api_key" placeholder="sk-..." autocomplete="off">
@@ -61,6 +62,44 @@
                     <button type="submit" name="action" value="save" class="btn btn-primary">Speichern</button>
                     <button type="submit" name="action" value="test" class="btn btn-outline-secondary">Verbindung prüfen</button>
                     <button type="submit" name="action" value="remove" class="btn btn-outline-danger" {% if not key_present %}disabled{% endif %}>Entfernen</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <div class="card mb-4">
+        <div class="card-body">
+            <h2 class="h5">Synonym-Standardwerte</h2>
+            <p class="text-muted">Diese Werte werden beim Öffnen des Synonym-Dialogs vorausgefüllt und können dort pro Abruf angepasst werden.</p>
+            <form method="post" class="row g-3">
+                <input type="hidden" name="form_id" value="synonym-defaults">
+                <div class="col-12">
+                    <label for="synonym_prompt" class="form-label">Standard-Prompt</label>
+                    <textarea class="form-control" id="synonym_prompt" name="synonym_prompt" rows="5" required>{{ synonym_defaults.prompt }}</textarea>
+                    <div class="form-text">Wird dem Modell als Systemprompt übergeben. Platzhalter sind nicht erforderlich.</div>
+                </div>
+                <div class="col-md-4 col-12">
+                    <label for="synonym_model" class="form-label">Standard-Sprachmodell</label>
+                    <input type="text" class="form-control" id="synonym_model" name="synonym_model" list="model-options" value="{{ synonym_defaults.model }}" required>
+                    <div class="form-text">Beliebiges Chat-Completions-Modell von OpenAI.</div>
+                    <datalist id="model-options">
+                        {% for option in available_models %}
+                            <option value="{{ option }}"></option>
+                        {% endfor %}
+                    </datalist>
+                </div>
+                <div class="col-md-4 col-12">
+                    <label for="synonym_max_results" class="form-label">Max. Anzahl Synonyme</label>
+                    <input type="number" class="form-control" id="synonym_max_results" name="synonym_max_results" min="1" max="150" value="{{ synonym_defaults.max_results }}" required>
+                    <div class="form-text">Die Anzahl der Vorschläge, die pro Abruf verarbeitet wird.</div>
+                </div>
+                <div class="col-md-4 col-12">
+                    <label for="synonym_temperature" class="form-label">Standard-Temperatur</label>
+                    <input type="number" step="0.1" min="0" max="2" class="form-control" id="synonym_temperature" name="synonym_temperature" value="{{ '%.2f'|format(synonym_defaults.temperature|default(0.2)) }}" required>
+                    <div class="form-text">Höhere Werte führen zu kreativeren, aber ungenaueren Vorschlägen.</div>
+                </div>
+                <div class="col-12">
+                    <button type="submit" class="btn btn-primary">Standardwerte speichern</button>
                 </div>
             </form>
         </div>

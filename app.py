@@ -33,6 +33,10 @@ MAX_CONCURRENCY = 150
 DEFAULT_RESPECT_ROBOTS = True
 STAMMDATEN_PATH = Path("stammdaten.json")
 stammdaten_lock = threading.Lock()
+SETTINGS_PATH = Path("settings.json")
+settings_lock = threading.Lock()
+SYNONYM_CACHE_PATH = Path("synonym_cache.json")
+synonym_cache_lock = threading.Lock()
 OPENAI_CHAT_COMPLETIONS_URL = "https://api.openai.com/v1/chat/completions"
 OPENAI_MODELS_URL = "https://api.openai.com/v1/models?limit=1"
 OPENAI_MODEL_NAME = "gpt-4o-mini"
@@ -50,6 +54,16 @@ DEFAULT_KEYWORD_EVALUATION_PROMPT = (
     '"better_keywords"' " (Liste von bis zu fünf besseren oder spezifischeren deutschen Suchbegriffen). "
     "Falls es keine besseren Begriffe gibt, gib eine leere Liste zurück. Keine Erklärungen."
 )
+DEFAULT_SYNONYM_MAX_RESULTS = 50
+DEFAULT_SYNONYM_TEMPERATURE = 0.2
+AVAILABLE_OPENAI_MODELS = [
+    "gpt-4o-mini",
+    "gpt-4o",
+    "gpt-4.1-mini",
+    "gpt-4.1",
+    "o4-mini",
+    "gpt-3.5-turbo",
+]
 
 api_key_lock = threading.Lock()
 _api_key_value: Optional[str] = None
@@ -68,6 +82,164 @@ STAMMDATEN_FIELDS = [
 
 class OpenAIIntegrationError(Exception):
     """Raised when the OpenAI integration cannot provide synonyms."""
+
+
+def _default_synonym_settings() -> Dict[str, object]:
+    return {
+        "prompt": DEFAULT_SYNONYM_PROMPT,
+        "max_results": DEFAULT_SYNONYM_MAX_RESULTS,
+        "temperature": DEFAULT_SYNONYM_TEMPERATURE,
+        "model": OPENAI_MODEL_NAME,
+    }
+
+
+def _read_settings_unlocked() -> Dict[str, object]:
+    if not SETTINGS_PATH.exists():
+        return {}
+    try:
+        with SETTINGS_PATH.open("r", encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (json.JSONDecodeError, OSError):
+        return {}
+    if isinstance(data, dict):
+        return data
+    return {}
+
+
+def load_settings_data() -> Dict[str, object]:
+    with settings_lock:
+        return dict(_read_settings_unlocked())
+
+
+def save_settings_data(data: Dict[str, object]) -> None:
+    with settings_lock:
+        try:
+            with SETTINGS_PATH.open("w", encoding="utf-8") as handle:
+                json.dump(data, handle, ensure_ascii=False, indent=2)
+        except OSError:
+            pass
+
+
+def get_synonym_defaults() -> Dict[str, object]:
+    data = load_settings_data()
+    defaults = _default_synonym_settings()
+    result = {}
+    result.update(defaults)
+    settings_synonyms = data.get("synonym_defaults") if isinstance(data, dict) else {}
+    if isinstance(settings_synonyms, dict):
+        prompt = str(settings_synonyms.get("prompt", "")).strip()
+        if prompt:
+            result["prompt"] = prompt
+        max_results = settings_synonyms.get("max_results")
+        if isinstance(max_results, int) and 1 <= max_results <= 150:
+            result["max_results"] = max_results
+        temperature = settings_synonyms.get("temperature")
+        try:
+            temp_value = float(temperature)
+        except (TypeError, ValueError):
+            temp_value = None
+        if temp_value is not None and 0 <= temp_value <= 2:
+            result["temperature"] = temp_value
+        model = str(settings_synonyms.get("model", "")).strip()
+        if model:
+            result["model"] = model
+    return result
+
+
+def update_synonym_defaults(values: Dict[str, object]) -> Dict[str, object]:
+    current = load_settings_data()
+    defaults = _default_synonym_settings()
+    prompt = str(values.get("prompt", "")).strip() or defaults["prompt"]
+    max_results_raw = values.get("max_results")
+    try:
+        max_results = int(max_results_raw)
+    except (TypeError, ValueError):
+        max_results = defaults["max_results"]
+    if max_results < 1:
+        max_results = 1
+    elif max_results > 150:
+        max_results = 150
+    temperature_raw = values.get("temperature")
+    try:
+        temperature = float(temperature_raw)
+    except (TypeError, ValueError):
+        temperature = defaults["temperature"]
+    if temperature < 0:
+        temperature = 0.0
+    elif temperature > 2:
+        temperature = 2.0
+    model = str(values.get("model", "")).strip() or defaults["model"]
+
+    current.setdefault("synonym_defaults", {})
+    current["synonym_defaults"] = {
+        "prompt": prompt,
+        "max_results": max_results,
+        "temperature": temperature,
+        "model": model,
+    }
+    save_settings_data(current)
+    return current["synonym_defaults"]
+
+
+def _read_synonym_cache_unlocked() -> Dict[str, object]:
+    if not SYNONYM_CACHE_PATH.exists():
+        return {}
+    try:
+        with SYNONYM_CACHE_PATH.open("r", encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (json.JSONDecodeError, OSError):
+        return {}
+    if isinstance(data, dict):
+        return data
+    return {}
+
+
+def _write_synonym_cache_unlocked(data: Dict[str, object]) -> None:
+    try:
+        with SYNONYM_CACHE_PATH.open("w", encoding="utf-8") as handle:
+            json.dump(data, handle, ensure_ascii=False, indent=2)
+    except OSError:
+        pass
+
+
+def load_synonym_cache() -> Dict[str, object]:
+    with synonym_cache_lock:
+        return dict(_read_synonym_cache_unlocked())
+
+
+def update_synonym_cache_entry(key: str, synonyms: List[str]) -> None:
+    with synonym_cache_lock:
+        cache = _read_synonym_cache_unlocked()
+        cache[key] = {
+            "synonyms": list(synonyms),
+            "updated_at": datetime.utcnow().isoformat() + "Z",
+        }
+        _write_synonym_cache_unlocked(cache)
+
+
+def get_synonyms_from_cache(key: str) -> Optional[List[str]]:
+    cache = load_synonym_cache()
+    entry = cache.get(key) if isinstance(cache, dict) else None
+    if isinstance(entry, dict):
+        values = entry.get("synonyms")
+        if isinstance(values, list):
+            result: List[str] = []
+            for item in values:
+                text = str(item).strip()
+                if text:
+                    result.append(text)
+            return result
+    return None
+
+
+def synonym_cache_key(keyword: str, prompt: str, model: str, temperature: float) -> str:
+    payload = {
+        "keyword": keyword.strip().lower(),
+        "prompt": prompt.strip(),
+        "model": model.strip(),
+        "temperature": round(float(temperature), 3),
+    }
+    return json.dumps(payload, ensure_ascii=False, sort_keys=True)
 
 
 def set_api_key(value: str) -> None:
@@ -105,7 +277,11 @@ def has_api_key() -> bool:
 def fetch_synonyms_from_openai(
     keyword: str,
     api_key: str,
+    *,
     prompt: Optional[str] = None,
+    model: Optional[str] = None,
+    temperature: Optional[float] = None,
+    max_results: Optional[int] = None,
 ) -> List[str]:
     """Request synonyms for a single keyword from the OpenAI API."""
 
@@ -114,13 +290,31 @@ def fetch_synonyms_from_openai(
         "Content-Type": "application/json",
     }
     prompt_text = (prompt or "").strip() or DEFAULT_SYNONYM_PROMPT
+    model_name = (model or "").strip() or OPENAI_MODEL_NAME
+    try:
+        temperature_value = float(temperature) if temperature is not None else DEFAULT_SYNONYM_TEMPERATURE
+    except (TypeError, ValueError):
+        temperature_value = DEFAULT_SYNONYM_TEMPERATURE
+    max_results_value: Optional[int]
+    if max_results is None:
+        max_results_value = None
+    else:
+        try:
+            max_results_value = int(max_results)
+        except (TypeError, ValueError):
+            max_results_value = None
+    if max_results_value is not None:
+        if max_results_value < 1:
+            max_results_value = 1
+        elif max_results_value > 150:
+            max_results_value = 150
     payload = {
-        "model": OPENAI_MODEL_NAME,
+        "model": model_name,
         "messages": [
             {"role": "system", "content": prompt_text},
             {"role": "user", "content": f'Begriff: "{keyword}"'},
         ],
-        "temperature": 0.2,
+        "temperature": temperature_value,
         "max_tokens": 200,
     }
 
@@ -193,7 +387,7 @@ def fetch_synonyms_from_openai(
             continue
         seen.add(lowered)
         synonyms.append(text)
-        if len(synonyms) >= 12:
+        if max_results_value is not None and len(synonyms) >= max_results_value:
             break
 
     return synonyms
@@ -218,6 +412,7 @@ def expand_keywords_with_ai(
 
     keyword_groups: List[Dict[str, List[str]]] = []
     messages: List[Dict[str, str]] = []
+    defaults = get_synonym_defaults()
 
     if not cleaned_keywords:
         return expanded, keyword_groups, messages, False
@@ -244,7 +439,14 @@ def expand_keywords_with_ai(
     for kw in cleaned_keywords:
         additional: List[str] = []
         try:
-            synonyms = fetch_synonyms_from_openai(kw, api_key)
+            synonyms = fetch_synonyms_from_openai(
+                kw,
+                api_key,
+                prompt=defaults.get("prompt"),
+                model=str(defaults.get("model") or OPENAI_MODEL_NAME),
+                temperature=defaults.get("temperature"),
+                max_results=defaults.get("max_results"),
+            )
         except OpenAIIntegrationError as exc:
             text = str(exc)
             if text and text not in message_texts:
@@ -413,16 +615,65 @@ def generate_synonyms() -> ResponseReturnValue:
 
     keyword = str(payload.get("keyword", "")).strip()
     prompt = payload.get("prompt")
+    model = payload.get("model")
+    max_results = payload.get("max_results")
+    temperature = payload.get("temperature")
+    defaults = get_synonym_defaults()
 
     if not keyword:
         return jsonify({"error": "Bitte geben Sie einen Suchbegriff an."}), 400
 
+    prompt_text = (prompt or "").strip() or str(defaults.get("prompt", DEFAULT_SYNONYM_PROMPT))
+    model_name = str(model or defaults.get("model") or OPENAI_MODEL_NAME).strip() or OPENAI_MODEL_NAME
     try:
-        synonyms = fetch_synonyms_from_openai(keyword, api_key, prompt=prompt)
+        temperature_value = float(temperature) if temperature is not None else float(defaults.get("temperature", DEFAULT_SYNONYM_TEMPERATURE))
+    except (TypeError, ValueError):
+        temperature_value = float(defaults.get("temperature", DEFAULT_SYNONYM_TEMPERATURE))
+    if temperature_value < 0:
+        temperature_value = 0.0
+    elif temperature_value > 2:
+        temperature_value = 2.0
+    try:
+        max_results_value = int(max_results) if max_results is not None else int(defaults.get("max_results", DEFAULT_SYNONYM_MAX_RESULTS))
+    except (TypeError, ValueError):
+        max_results_value = int(defaults.get("max_results", DEFAULT_SYNONYM_MAX_RESULTS))
+    if max_results_value < 1:
+        max_results_value = 1
+    elif max_results_value > 150:
+        max_results_value = 150
+
+    cache_key = synonym_cache_key(keyword, prompt_text, model_name, temperature_value)
+    cached = get_synonyms_from_cache(cache_key)
+    if cached is not None:
+        return jsonify(
+            {
+                "keyword": keyword,
+                "synonyms": cached[:max_results_value],
+                "cached": True,
+            }
+        )
+
+    try:
+        synonyms = fetch_synonyms_from_openai(
+            keyword,
+            api_key,
+            prompt=prompt_text,
+            model=model_name,
+            temperature=temperature_value,
+            max_results=max_results_value,
+        )
     except OpenAIIntegrationError as exc:
         return jsonify({"error": str(exc)}), 502
 
-    return jsonify({"keyword": keyword, "synonyms": synonyms})
+    update_synonym_cache_entry(cache_key, synonyms)
+
+    return jsonify(
+        {
+            "keyword": keyword,
+            "synonyms": synonyms,
+            "cached": False,
+        }
+    )
 
 
 @app.post("/evaluate-keywords")
@@ -890,6 +1141,7 @@ def index():
     job_id: Optional[str] = None
     submitted = False
     has_key = has_api_key()
+    synonym_defaults = get_synonym_defaults()
 
     if request.method == "POST":
         submitted = True
@@ -1048,23 +1300,16 @@ def index():
                         }
                     )
             else:
-                expanded_keywords, keyword_groups, additional_messages, synonyms_expanded = expand_keywords_with_ai(
-                    keywords,
-                    enabled=True,
-                    api_key=get_api_key(),
+                expanded_keywords = list(keywords)
+                keyword_groups = [{"original": kw, "additional": []} for kw in keywords]
+                synonyms_expanded = False
+                synonym_status = "Synonymerweiterung bereit (keine Auswahl)"
+                synonym_messages.append(
+                    {
+                        "category": "info",
+                        "text": "Keine Synonyme ausgewählt. Verwenden Sie „Synonyme finden“, um Vorschläge hinzuzufügen.",
+                    }
                 )
-                synonym_messages.extend(additional_messages)
-
-                if synonyms_expanded:
-                    synonym_status = "Synonymerweiterung aktiv (mit zusätzlichen Begriffen)"
-                elif any(
-                    msg.get("text", "").strip()
-                    for msg in additional_messages
-                    if isinstance(msg, dict)
-                ):
-                    synonym_status = "Synonymerweiterung nicht möglich (siehe Hinweise)"
-                else:
-                    synonym_status = "Synonymerweiterung aktiv (keine zusätzlichen Begriffe)"
 
             evaluation_payload_raw = request.form.get("keyword_evaluations_payload", "").strip()
             if evaluation_payload_raw:
@@ -1179,7 +1424,9 @@ def index():
         synonym_status=synonym_status,
         synonym_groups_manual=synonym_groups_manual,
         keyword_evaluations=keyword_evaluations,
-        default_synonym_prompt=DEFAULT_SYNONYM_PROMPT,
+        default_synonym_prompt=synonym_defaults.get("prompt", DEFAULT_SYNONYM_PROMPT),
+        synonym_defaults=synonym_defaults,
+        available_models=AVAILABLE_OPENAI_MODELS,
         has_api_key=has_key,
         error=error,
         submitted=submitted,
@@ -1226,48 +1473,62 @@ def settings():
     message: Optional[str] = None
     message_category: Optional[str] = None
     key_present = has_api_key()
+    synonym_defaults = get_synonym_defaults()
 
     if request.method == "POST":
-        action = request.form.get("action", "save")
-        if action == "remove":
-            if key_present:
-                clear_api_key()
-                key_present = False
-                message = "Der API-Schlüssel wurde entfernt."
-                message_category = "success"
-            else:
-                message = "Es ist kein API-Schlüssel hinterlegt."
-                message_category = "info"
-        elif action == "test":
-            candidate = request.form.get("api_key", "").strip()
-            key_to_test = candidate or get_api_key()
-            if not key_to_test:
-                message = "Bitte geben Sie einen API-Schlüssel ein oder speichern Sie ihn zuerst."
-                message_category = "danger"
-            else:
-                try:
-                    test_openai_api_key(key_to_test)
-                except OpenAIIntegrationError as exc:
-                    message = str(exc)
+        form_id = request.form.get("form_id", "api")
+        if form_id == "synonym-defaults":
+            values = {
+                "prompt": request.form.get("synonym_prompt", ""),
+                "max_results": request.form.get("synonym_max_results"),
+                "temperature": request.form.get("synonym_temperature"),
+                "model": request.form.get("synonym_model", ""),
+            }
+            update_synonym_defaults(values)
+            synonym_defaults = get_synonym_defaults()
+            message = "Die Standardwerte für die Synonymsuche wurden gespeichert."
+            message_category = "success"
+        else:
+            action = request.form.get("action", "save")
+            if action == "remove":
+                if key_present:
+                    clear_api_key()
+                    key_present = False
+                    message = "Der API-Schlüssel wurde entfernt."
+                    message_category = "success"
+                else:
+                    message = "Es ist kein API-Schlüssel hinterlegt."
+                    message_category = "info"
+            elif action == "test":
+                candidate = request.form.get("api_key", "").strip()
+                key_to_test = candidate or get_api_key()
+                if not key_to_test:
+                    message = "Bitte geben Sie einen API-Schlüssel ein oder speichern Sie ihn zuerst."
                     message_category = "danger"
                 else:
-                    if candidate:
-                        set_api_key(candidate)
-                        message = "Der API-Schlüssel wurde gespeichert und erfolgreich geprüft."
+                    try:
+                        test_openai_api_key(key_to_test)
+                    except OpenAIIntegrationError as exc:
+                        message = str(exc)
+                        message_category = "danger"
                     else:
-                        message = "Der hinterlegte API-Schlüssel wurde erfolgreich geprüft."
-                    message_category = "success"
-                key_present = has_api_key()
-        else:
-            key_value = request.form.get("api_key", "").strip()
-            if not key_value:
-                message = "Bitte geben Sie einen gültigen API-Schlüssel ein."
-                message_category = "danger"
+                        if candidate:
+                            set_api_key(candidate)
+                            message = "Der API-Schlüssel wurde gespeichert und erfolgreich geprüft."
+                        else:
+                            message = "Der hinterlegte API-Schlüssel wurde erfolgreich geprüft."
+                        message_category = "success"
+                    key_present = has_api_key()
             else:
-                set_api_key(key_value)
-                key_present = True
-                message = "Der API-Schlüssel wurde gespeichert."
-                message_category = "success"
+                key_value = request.form.get("api_key", "").strip()
+                if not key_value:
+                    message = "Bitte geben Sie einen gültigen API-Schlüssel ein."
+                    message_category = "danger"
+                else:
+                    set_api_key(key_value)
+                    key_present = True
+                    message = "Der API-Schlüssel wurde gespeichert."
+                    message_category = "success"
 
     key_present = has_api_key()
 
@@ -1276,6 +1537,8 @@ def settings():
         message=message,
         message_category=message_category,
         key_present=key_present,
+        synonym_defaults=synonym_defaults,
+        available_models=AVAILABLE_OPENAI_MODELS,
         active_page="settings",
     )
 

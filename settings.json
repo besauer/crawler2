@@ -1,0 +1,8 @@
+{
+  "synonym_defaults": {
+    "prompt": "Du bist ein Synonym-Generator für deutschsprachige Websuche. Gib ausschließlich eine JSON-Liste mit gebräuchlichen Synonymen, nahen Begriffen und typischen Kurzformen des folgenden Begriffs zurück. Keine Erklärungen, keine weiteren Wörter. Vermeide Homonyme und irrelevante Bedeutungen.",
+    "max_results": 50,
+    "temperature": 0.2,
+    "model": "gpt-4o-mini"
+  }
+}
