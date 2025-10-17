@@ -6,7 +6,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from datetime import date
-from typing import Callable, Iterable, List, Optional, Set, Tuple
+from typing import Callable, Iterable, List, Optional, Pattern, Set, Tuple
 from urllib.parse import urljoin, urldefrag, urlparse
 from urllib.robotparser import RobotFileParser
 
@@ -122,16 +122,34 @@ def extract_publication_date(soup: BeautifulSoup) -> Optional[date]:
     return None
 
 
-def keyword_matches(text: str, keywords: Iterable[str]) -> Tuple[str, ...]:
-    lower_text = text.lower()
-    matches = []
+KeywordPattern = Tuple[str, Pattern[str]]
+
+
+def build_keyword_patterns(keywords: Iterable[str]) -> List[KeywordPattern]:
+    patterns: List[KeywordPattern] = []
+    seen: Set[str] = set()
     for keyword in keywords:
-        keyword = keyword.strip().lower()
-        if not keyword:
+        text = str(keyword).strip()
+        if not text:
             continue
-        # Use simple containment. Regex word boundaries optional? We'll use containment.
-        if keyword in lower_text:
-            matches.append(keyword)
+        lowered = text.lower()
+        if lowered in seen:
+            continue
+        seen.add(lowered)
+        escaped = re.escape(text)
+        if any(char.isalnum() or char == "_" for char in text):
+            pattern = re.compile(rf"(?<!\\w){escaped}(?!\\w)", re.IGNORECASE)
+        else:
+            pattern = re.compile(escaped, re.IGNORECASE)
+        patterns.append((text, pattern))
+    return patterns
+
+
+def keyword_matches(text: str, patterns: Iterable[KeywordPattern]) -> Tuple[str, ...]:
+    matches: List[str] = []
+    for original, pattern in patterns:
+        if pattern.search(text):
+            matches.append(original)
     return tuple(matches)
 
 
@@ -179,6 +197,10 @@ def crawl_site(
     if not keywords:
         return []
 
+    keyword_patterns = build_keyword_patterns(keywords)
+    if not keyword_patterns:
+        return []
+
     if respect_robots:
         robot_parser = build_robot_parser(normalized_start)
 
@@ -194,7 +216,7 @@ def crawl_site(
     visited: Set[str] = set()
     allowed_urls: Set[str] = {normalized_start}
     results: List[CrawlResult] = []
-    result_pairs: Set[Tuple[str, str]] = set()
+    result_pairs: Set[Tuple[str, str, str]] = set()
 
     state_lock = threading.Lock()
     state = {
@@ -312,16 +334,18 @@ def crawl_site(
     )
 
     if soup:
-        matches = keyword_matches(page_text, keywords)
-        if matches:
+        matches = keyword_matches(page_text, keyword_patterns)
+        for match in matches:
             result = CrawlResult(
                 source_url=normalized_start,
                 target_url=normalized_start,
-                matched_keywords=matches,
+                matched_keywords=(match,),
             )
+            lowered_match = match.lower()
             with state_lock:
-                if (result.source_url, result.target_url) not in result_pairs:
-                    result_pairs.add((result.source_url, result.target_url))
+                key = (result.source_url, result.target_url, lowered_match)
+                if key not in result_pairs:
+                    result_pairs.add(key)
                     results.append(result)
             emit(
                 CrawlProgress(
@@ -426,7 +450,7 @@ def crawl_site(
 
         matches_local: Tuple[str, ...] = ()
         if soup_local and within_range:
-            matches_local = keyword_matches(page_text_local, keywords)
+            matches_local = keyword_matches(page_text_local, keyword_patterns)
 
         with state_lock:
             visited.add(url)
@@ -445,15 +469,17 @@ def crawl_site(
             )
         )
 
-        if matches_local:
+        for match in matches_local:
             result_local = CrawlResult(
                 source_url=normalized_start,
                 target_url=url,
-                matched_keywords=matches_local,
+                matched_keywords=(match,),
             )
+            lowered_match = match.lower()
             with state_lock:
-                if (result_local.source_url, result_local.target_url) not in result_pairs:
-                    result_pairs.add((result_local.source_url, result_local.target_url))
+                key = (result_local.source_url, result_local.target_url, lowered_match)
+                if key not in result_pairs:
+                    result_pairs.add(key)
                     results.append(result_local)
             emit(
                 CrawlProgress(

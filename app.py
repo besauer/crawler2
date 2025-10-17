@@ -43,6 +43,13 @@ DEFAULT_SYNONYM_PROMPT = (
     "nahen Begriffen und typischen Kurzformen des folgenden Begriffs zurück. "
     "Keine Erklärungen, keine weiteren Wörter. Vermeide Homonyme und irrelevante Bedeutungen."
 )
+DEFAULT_KEYWORD_EVALUATION_PROMPT = (
+    "Du bewertest deutsche Suchbegriffe für eine Websuche. "
+    "Antworte ausschließlich mit einem JSON-Objekt mit den Schlüsseln "
+    '"quality"' " (Werte: \"hoch\", \"mittel\" oder \"niedrig\") und "
+    '"better_keywords"' " (Liste von bis zu fünf besseren oder spezifischeren deutschen Suchbegriffen). "
+    "Falls es keine besseren Begriffe gibt, gib eine leere Liste zurück. Keine Erklärungen."
+)
 
 api_key_lock = threading.Lock()
 _api_key_value: Optional[str] = None
@@ -270,6 +277,117 @@ def expand_keywords_with_ai(
     return expanded, keyword_groups, messages, synonyms_expanded
 
 
+def evaluate_keyword_with_openai(
+    keyword: str,
+    api_key: str,
+    *,
+    prompt: Optional[str] = None,
+) -> Dict[str, object]:
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+    prompt_text = (prompt or "").strip() or DEFAULT_KEYWORD_EVALUATION_PROMPT
+    payload = {
+        "model": OPENAI_MODEL_NAME,
+        "messages": [
+            {"role": "system", "content": prompt_text},
+            {"role": "user", "content": f'Begriff: "{keyword}"'},
+        ],
+        "temperature": 0.2,
+        "max_tokens": 200,
+    }
+
+    try:
+        response = requests.post(
+            OPENAI_CHAT_COMPLETIONS_URL,
+            headers=headers,
+            json=payload,
+            timeout=OPENAI_TIMEOUT,
+        )
+    except requests.RequestException as exc:  # pragma: no cover - network failure
+        raise OpenAIIntegrationError(
+            f'Bewertung für "{keyword}" nicht möglich: Keine Verbindung zur OpenAI-API.'
+        ) from exc
+
+    if response.status_code >= 400:
+        raise OpenAIIntegrationError(
+            f'Bewertung für "{keyword}" nicht möglich: OpenAI-API meldet Status {response.status_code}.'
+        )
+
+    try:
+        response_payload = response.json()
+    except ValueError as exc:  # pragma: no cover - invalid JSON
+        raise OpenAIIntegrationError(
+            f'Bewertung für "{keyword}" nicht möglich: Antwort konnte nicht gelesen werden.'
+        ) from exc
+
+    choices = response_payload.get("choices") if isinstance(response_payload, dict) else None
+    content = ""
+    if isinstance(choices, list) and choices:
+        message = choices[0].get("message") if isinstance(choices[0], dict) else None
+        if isinstance(message, dict):
+            content = str(message.get("content", ""))
+
+    if not content:
+        raise OpenAIIntegrationError(
+            f'Bewertung für "{keyword}" nicht möglich: Antwort enthielt keine Daten.'
+        )
+
+    content = content.strip()
+    try:
+        parsed = json.loads(content)
+    except json.JSONDecodeError:
+        start_idx = content.find("{")
+        end_idx = content.rfind("}")
+        if start_idx == -1 or end_idx == -1 or end_idx <= start_idx:
+            raise OpenAIIntegrationError(
+                f'Bewertung für "{keyword}" nicht möglich: Antwort war nicht im JSON-Format.'
+            )
+        try:
+            parsed = json.loads(content[start_idx : end_idx + 1])
+        except json.JSONDecodeError as exc:
+            raise OpenAIIntegrationError(
+                f'Bewertung für "{keyword}" nicht möglich: Antwort war nicht im JSON-Format.'
+            ) from exc
+
+    if not isinstance(parsed, dict):
+        raise OpenAIIntegrationError(
+            f'Bewertung für "{keyword}" nicht möglich: Antwort enthielt kein Objekt.'
+        )
+
+    quality_raw = str(parsed.get("quality", "")).strip()
+    quality = quality_raw or "unbewertet"
+
+    better_raw = (
+        parsed.get("better_keywords")
+        or parsed.get("betterTerms")
+        or parsed.get("better_terms")
+        or parsed.get("bessere_suchbegriffe")
+        or parsed.get("alternativen")
+    )
+    better_keywords: List[str] = []
+    if isinstance(better_raw, list):
+        seen: Set[str] = set()
+        for item in better_raw:
+            text = str(item).strip()
+            if not text:
+                continue
+            lowered = text.lower()
+            if lowered in seen:
+                continue
+            seen.add(lowered)
+            better_keywords.append(text)
+            if len(better_keywords) >= 8:
+                break
+
+    return {
+        "keyword": keyword,
+        "quality": quality,
+        "better_keywords": better_keywords,
+    }
+
+
 def test_openai_api_key(api_key: str) -> None:
     headers = {"Authorization": f"Bearer {api_key}"}
     try:
@@ -305,6 +423,54 @@ def generate_synonyms() -> ResponseReturnValue:
         return jsonify({"error": str(exc)}), 502
 
     return jsonify({"keyword": keyword, "synonyms": synonyms})
+
+
+@app.post("/evaluate-keywords")
+def evaluate_keywords() -> ResponseReturnValue:
+    api_key = get_api_key()
+    if not api_key:
+        return jsonify({"error": "OpenAI-Schlüssel erforderlich."}), 400
+
+    payload = request.get_json(silent=True) or {}
+    if not isinstance(payload, dict):
+        return jsonify({"error": "Ungültige Anfrage."}), 400
+
+    keywords_raw = payload.get("keywords")
+    prompt = payload.get("prompt")
+
+    if not isinstance(keywords_raw, list):
+        return jsonify({"error": "Bitte geben Sie eine Liste von Suchbegriffen an."}), 400
+
+    cleaned: List[str] = []
+    seen_lower: Set[str] = set()
+    for item in keywords_raw:
+        text = str(item).strip()
+        if not text:
+            continue
+        lowered = text.lower()
+        if lowered in seen_lower:
+            continue
+        seen_lower.add(lowered)
+        cleaned.append(text)
+
+    if not cleaned:
+        return jsonify({"evaluations": [], "messages": []})
+
+    evaluations: List[Dict[str, object]] = []
+    messages: List[str] = []
+
+    for keyword in cleaned:
+        try:
+            result = evaluate_keyword_with_openai(keyword, api_key, prompt=prompt)
+        except OpenAIIntegrationError as exc:
+            text = str(exc)
+            if text:
+                messages.append(text)
+        else:
+            evaluations.append(result)
+
+    status = 200 if evaluations or not messages else 502
+    return jsonify({"evaluations": evaluations, "messages": messages}), status
 
 
 
@@ -513,6 +679,7 @@ class CrawlJob:
     original_keywords: List[str] = field(default_factory=list)
     expanded_keywords: List[str] = field(default_factory=list)
     keyword_groups: List[Dict[str, List[str]]] = field(default_factory=list)
+    keyword_evaluations: List[Dict[str, object]] = field(default_factory=list)
     synonym_messages: List[Dict[str, str]] = field(default_factory=list)
     synonyms_enabled: bool = False
     synonyms_expanded: bool = False
@@ -534,7 +701,7 @@ class CrawlJob:
     progress_percent: int = 0
     started_at: float = field(default_factory=time.time)
     completed: bool = False
-    result_pairs: Set[Tuple[str, str]] = field(default_factory=set, repr=False, compare=False)
+    result_pairs: Set[Tuple[str, str, str]] = field(default_factory=set, repr=False, compare=False)
     cancel_event: threading.Event = field(default_factory=threading.Event, repr=False, compare=False)
     cancelled: bool = False
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False, compare=False)
@@ -569,6 +736,14 @@ class CrawlJob:
                     }
                     for group in self.keyword_groups
                 ],
+                "keyword_evaluations": [
+                    {
+                        "keyword": entry.get("keyword"),
+                        "quality": entry.get("quality"),
+                        "better_keywords": list(entry.get("better_keywords", [])),
+                    }
+                    for entry in self.keyword_evaluations
+                ],
                 "synonym_messages": list(self.synonym_messages),
                 "synonyms_enabled": self.synonyms_enabled,
                 "synonyms_expanded": self.synonyms_expanded,
@@ -601,7 +776,9 @@ class CrawlJob:
                 self.visited_in_current = progress.visited
 
             if progress.event == "match" and progress.result:
-                key = (progress.result.source_url, progress.result.target_url)
+                keywords_tuple = tuple(progress.result.matched_keywords)
+                lowered = keywords_tuple[0].lower() if keywords_tuple else ""
+                key = (progress.result.source_url, progress.result.target_url, lowered)
                 if key not in self.result_pairs:
                     self.results.append(progress.result)
                     self.result_pairs.add(key)
@@ -704,6 +881,7 @@ def index():
     synonyms_enabled = False
     keyword_groups: List[Dict[str, List[str]]] = []
     expanded_keywords: List[str] = []
+    keyword_evaluations: List[Dict[str, object]] = []
     synonym_messages: List[Dict[str, str]] = []
     synonyms_expanded = False
     synonym_groups_manual = False
@@ -889,6 +1067,62 @@ def index():
                 else:
                     synonym_status = "deaktiviert"
 
+            evaluation_payload_raw = request.form.get("keyword_evaluations_payload", "").strip()
+            if evaluation_payload_raw:
+                try:
+                    evaluation_raw = json.loads(evaluation_payload_raw)
+                except json.JSONDecodeError:
+                    synonym_messages.append(
+                        {
+                            "category": "warning",
+                            "text": "Bewertung der Suchbegriffe: Die übermittelten Daten konnten nicht gelesen werden.",
+                        }
+                    )
+                else:
+                    if isinstance(evaluation_raw, list):
+                        allowed_map = {kw.lower(): kw for kw in keywords}
+                        evaluation_map: Dict[str, Dict[str, object]] = {}
+                        for entry in evaluation_raw:
+                            if not isinstance(entry, dict):
+                                continue
+                            keyword_value = str(entry.get("keyword", "")).strip()
+                            if not keyword_value:
+                                continue
+                            lowered_key = keyword_value.lower()
+                            if lowered_key not in allowed_map:
+                                continue
+                            quality_value = str(entry.get("quality", "")).strip()
+                            suggestions_raw = entry.get("better_keywords", [])
+                            suggestions: List[str] = []
+                            if isinstance(suggestions_raw, list):
+                                seen_local: Set[str] = set()
+                                for candidate in suggestions_raw:
+                                    text = str(candidate).strip()
+                                    if not text:
+                                        continue
+                                    lowered_candidate = text.lower()
+                                    if lowered_candidate in seen_local:
+                                        continue
+                                    seen_local.add(lowered_candidate)
+                                    suggestions.append(text)
+                            evaluation_map[lowered_key] = {
+                                "keyword": allowed_map[lowered_key],
+                                "quality": quality_value,
+                                "better_keywords": suggestions,
+                            }
+                        keyword_evaluations = [
+                            evaluation_map[key.lower()]
+                            for key in keywords
+                            if key.lower() in evaluation_map
+                        ]
+                    elif evaluation_raw not in (None, ""):
+                        synonym_messages.append(
+                            {
+                                "category": "warning",
+                                "text": "Bewertung der Suchbegriffe: Die übermittelten Daten waren ungültig.",
+                            }
+                        )
+
             job_id = uuid.uuid4().hex
             job = CrawlJob(
                 id=job_id,
@@ -902,6 +1136,14 @@ def index():
                         "additional": list(group.get("additional", [])),
                     }
                     for group in keyword_groups
+                ],
+                keyword_evaluations=[
+                    {
+                        "keyword": entry.get("keyword"),
+                        "quality": entry.get("quality"),
+                        "better_keywords": list(entry.get("better_keywords", [])),
+                    }
+                    for entry in keyword_evaluations
                 ],
                 synonym_messages=list(synonym_messages),
                 synonyms_enabled=synonyms_enabled,
@@ -937,6 +1179,7 @@ def index():
         synonyms_expanded=synonyms_expanded,
         synonym_status=synonym_status,
         synonym_groups_manual=synonym_groups_manual,
+        keyword_evaluations=keyword_evaluations,
         default_synonym_prompt=DEFAULT_SYNONYM_PROMPT,
         has_api_key=has_key,
         error=error,
@@ -1076,6 +1319,14 @@ def save_search(job_id: str):
                     "additional": list(group.get("additional", [])),
                 }
                 for group in job.keyword_groups
+            ],
+            "keyword_evaluations": [
+                {
+                    "keyword": entry.get("keyword"),
+                    "quality": entry.get("quality"),
+                    "better_keywords": list(entry.get("better_keywords", [])),
+                }
+                for entry in job.keyword_evaluations
             ],
             "synonym_messages": list(job.synonym_messages),
             "synonyms_enabled": job.synonyms_enabled,

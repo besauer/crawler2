@@ -172,8 +172,28 @@
                 <div id="keyword-empty" class="text-muted small">Fügen Sie oben mindestens einen Suchbegriff hinzu, um Synonyme zu verwalten.</div>
                 <div class="list-group" id="keyword-list"></div>
             </div>
+            <div class="mt-3 d-flex flex-wrap align-items-center gap-2" id="keyword-evaluation-controls">
+                <button type="button" class="btn btn-outline-primary btn-sm" id="evaluate-keywords-btn">Suchwörter bewerten</button>
+                <span class="small text-muted">Ermittelt die Güte der Suchbegriffe und schlägt präzisere Varianten vor.</span>
+            </div>
+            <div id="keyword-evaluation-alert" class="alert alert-warning mt-3 d-none" role="alert"></div>
+            <div class="mt-3" id="keyword-evaluation-results" style="display:none;">
+                <div class="table-responsive">
+                    <table class="table table-sm mb-0">
+                        <thead>
+                        <tr>
+                            <th>Suchwort</th>
+                            <th>Wie gut?</th>
+                            <th>Bessere Suchbegriffe</th>
+                        </tr>
+                        </thead>
+                        <tbody></tbody>
+                    </table>
+                </div>
+            </div>
             <input type="hidden" id="keyword-groups-payload" name="keyword_groups_payload" value="{{ keyword_groups|tojson|e }}">
             <input type="hidden" id="keyword-groups-mode" name="keyword_groups_mode" value="{{ 'manual' if synonym_groups_manual else '' }}">
+            <input type="hidden" id="keyword-evaluations-payload" name="keyword_evaluations_payload" value="{{ keyword_evaluations|tojson|e }}">
         </div>
         <div class="mb-3">
             <label for="max_pages" class="form-label">Maximale Seitenanzahl pro Start-URL</label>
@@ -271,6 +291,7 @@
                 <tr>
                     <th>Ursprungs-URL</th>
                     <th>Gefundene URL</th>
+                    <th>Suchbegriff</th>
                 </tr>
                 </thead>
                 <tbody>
@@ -326,6 +347,7 @@
     window.DEFAULT_SYNONYM_PROMPT = {{ default_synonym_prompt|tojson }};
     window.INITIAL_KEYWORD_GROUPS = {{ keyword_groups|tojson }};
     window.SYNONYM_GROUPS_MANUAL = {{ 'true' if synonym_groups_manual else 'false' }};
+    window.INITIAL_KEYWORD_EVALUATIONS = {{ keyword_evaluations|tojson }};
 </script>
 
 <script>
@@ -336,6 +358,11 @@
         const useSynonymsCheckbox = document.getElementById('use_synonyms');
         const groupsInput = document.getElementById('keyword-groups-payload');
         const groupsModeInput = document.getElementById('keyword-groups-mode');
+        const evaluationsInput = document.getElementById('keyword-evaluations-payload');
+        const evaluationButton = document.getElementById('evaluate-keywords-btn');
+        const evaluationAlert = document.getElementById('keyword-evaluation-alert');
+        const evaluationSection = document.getElementById('keyword-evaluation-results');
+        const evaluationTableBody = evaluationSection ? evaluationSection.querySelector('tbody') : null;
         const modalElement = document.getElementById('synonymModal');
         const modalKeyword = document.getElementById('synonym-modal-keyword');
         const modalPrompt = document.getElementById('synonym-modal-prompt');
@@ -348,6 +375,7 @@
 
         const defaultPrompt = window.DEFAULT_SYNONYM_PROMPT || '';
         const initialGroups = Array.isArray(window.INITIAL_KEYWORD_GROUPS) ? window.INITIAL_KEYWORD_GROUPS : [];
+        const initialEvaluations = Array.isArray(window.INITIAL_KEYWORD_EVALUATIONS) ? window.INITIAL_KEYWORD_EVALUATIONS : [];
         const keywordState = new Map();
         let currentKeywords = [];
         let keywordSetLower = new Set();
@@ -387,6 +415,7 @@
                     synonyms: [],
                     synonymSet: new Set(),
                     lastPrompt: defaultPrompt,
+                    evaluation: null,
                 });
             }
             return keywordState.get(keyword);
@@ -421,6 +450,42 @@
             });
         }
 
+        function syncInitialEvaluations() {
+            if (!Array.isArray(initialEvaluations) || initialEvaluations.length === 0) {
+                return;
+            }
+            initialEvaluations.forEach(entry => {
+                if (!entry || typeof entry !== 'object') {
+                    return;
+                }
+                const keyword = typeof entry.keyword === 'string' ? entry.keyword.trim() : '';
+                if (!keyword || !keywordSetLower.has(keyword.toLowerCase())) {
+                    return;
+                }
+                const record = ensureKeywordState(keyword);
+                const quality = typeof entry.quality === 'string' ? entry.quality.trim() : '';
+                const betterRaw = Array.isArray(entry.better_keywords) ? entry.better_keywords : [];
+                const better = [];
+                const seenLocal = new Set();
+                betterRaw.forEach(value => {
+                    const text = typeof value === 'string' ? value.trim() : '';
+                    if (!text) {
+                        return;
+                    }
+                    const lowered = text.toLowerCase();
+                    if (seenLocal.has(lowered)) {
+                        return;
+                    }
+                    seenLocal.add(lowered);
+                    better.push(text);
+                });
+                record.evaluation = {
+                    quality,
+                    betterKeywords: better,
+                };
+            });
+        }
+
         function renderKeywordList() {
             if (!keywordList) {
                 return;
@@ -447,6 +512,12 @@
                 const strong = document.createElement('strong');
                 strong.textContent = keyword;
                 title.appendChild(strong);
+                if (entry.evaluation && entry.evaluation.quality) {
+                    const qualityBadge = document.createElement('span');
+                    qualityBadge.className = 'badge bg-info text-dark ms-2';
+                    qualityBadge.textContent = `Güte: ${entry.evaluation.quality}`;
+                    title.appendChild(qualityBadge);
+                }
                 header.appendChild(title);
 
                 const expandButton = document.createElement('button');
@@ -535,6 +606,118 @@
             groupsInput.value = JSON.stringify(payload);
         }
 
+        function collectEvaluationPayload() {
+            const payload = [];
+            currentKeywords.forEach(keyword => {
+                const entry = keywordState.get(keyword);
+                if (!entry || !entry.evaluation) {
+                    return;
+                }
+                const better = Array.isArray(entry.evaluation.betterKeywords)
+                    ? entry.evaluation.betterKeywords.filter(value => typeof value === 'string' && value.trim().length > 0)
+                    : [];
+                payload.push({
+                    keyword,
+                    quality: entry.evaluation.quality || '',
+                    better_keywords: better,
+                });
+            });
+            return payload;
+        }
+
+        function updateEvaluationPayload() {
+            if (!evaluationsInput) {
+                return;
+            }
+            const payload = collectEvaluationPayload();
+            evaluationsInput.value = JSON.stringify(payload);
+        }
+
+        function renderEvaluationTable() {
+            if (!evaluationTableBody || !evaluationSection) {
+                return;
+            }
+            evaluationTableBody.innerHTML = '';
+            const rows = [];
+            currentKeywords.forEach(keyword => {
+                const entry = keywordState.get(keyword);
+                if (!entry || !entry.evaluation) {
+                    return;
+                }
+                const better = Array.isArray(entry.evaluation.betterKeywords)
+                    ? entry.evaluation.betterKeywords.filter(value => typeof value === 'string' && value.trim().length > 0)
+                    : [];
+                rows.push({
+                    keyword,
+                    quality: entry.evaluation.quality || '',
+                    better,
+                });
+            });
+            if (rows.length === 0) {
+                evaluationSection.style.display = 'none';
+                return;
+            }
+            rows.forEach(row => {
+                const tr = document.createElement('tr');
+                const keywordCell = document.createElement('td');
+                keywordCell.textContent = row.keyword;
+                tr.appendChild(keywordCell);
+
+                const qualityCell = document.createElement('td');
+                qualityCell.textContent = row.quality || '–';
+                tr.appendChild(qualityCell);
+
+                const betterCell = document.createElement('td');
+                betterCell.textContent = row.better.length > 0 ? row.better.join(', ') : '–';
+                tr.appendChild(betterCell);
+
+                evaluationTableBody.appendChild(tr);
+            });
+            evaluationSection.style.display = '';
+        }
+
+        function setEvaluationAlert(message, category = 'warning') {
+            if (!evaluationAlert) {
+                return;
+            }
+            evaluationAlert.classList.remove('d-none', 'alert-warning', 'alert-danger', 'alert-info', 'alert-success');
+            if (!message) {
+                evaluationAlert.classList.add('d-none');
+                evaluationAlert.textContent = '';
+                return;
+            }
+            let className = 'alert-warning';
+            if (category === 'success') {
+                className = 'alert-success';
+            } else if (category === 'info') {
+                className = 'alert-info';
+            } else if (category === 'danger') {
+                className = 'alert-danger';
+            }
+            evaluationAlert.classList.add(className);
+            evaluationAlert.textContent = message;
+        }
+
+        function setEvaluationButtonLoading(loading) {
+            if (!evaluationButton) {
+                return;
+            }
+            if (loading) {
+                evaluationButton.dataset.loading = 'true';
+                evaluationButton.disabled = true;
+                if (!evaluationButton.dataset.originalText) {
+                    evaluationButton.dataset.originalText = evaluationButton.textContent || '';
+                }
+                evaluationButton.textContent = 'Bewertung läuft …';
+            } else {
+                delete evaluationButton.dataset.loading;
+                evaluationButton.disabled = false;
+                if (evaluationButton.dataset.originalText) {
+                    evaluationButton.textContent = evaluationButton.dataset.originalText;
+                }
+            }
+        }
+
         function addSynonym(keyword, synonym) {
             const trimmed = typeof synonym === 'string' ? synonym.trim() : '';
             if (!trimmed) {
@@ -553,6 +736,8 @@
             setManualMode();
             updateGroupsInput();
             renderKeywordList();
+            renderEvaluationTable();
+            updateEvaluationPayload();
             return true;
         }
 
@@ -570,6 +755,8 @@
             setManualMode();
             updateGroupsInput();
             renderKeywordList();
+            renderEvaluationTable();
+            updateEvaluationPayload();
         }
 
         function openModal(keyword) {
@@ -787,8 +974,16 @@
             keywords.forEach(keyword => {
                 ensureKeywordState(keyword);
             });
+            if (evaluationButton && !evaluationButton.dataset.loading) {
+                evaluationButton.disabled = currentKeywords.length === 0;
+            }
             renderKeywordList();
             updateGroupsInput();
+            renderEvaluationTable();
+            updateEvaluationPayload();
+            if (currentKeywords.length === 0) {
+                setEvaluationAlert('');
+            }
         }
 
         if (keywordsTextarea) {
@@ -800,6 +995,90 @@
         if (useSynonymsCheckbox) {
             useSynonymsCheckbox.addEventListener('change', () => {
                 renderKeywordList();
+                renderEvaluationTable();
+                updateEvaluationPayload();
+            });
+        }
+
+        if (evaluationButton) {
+            evaluationButton.addEventListener('click', () => {
+                const keywords = getKeywordsFromTextarea();
+                if (keywords.length === 0) {
+                    setEvaluationAlert('Bitte geben Sie mindestens ein Suchstichwort ein.', 'warning');
+                    return;
+                }
+                setEvaluationAlert('');
+                setEvaluationButtonLoading(true);
+                fetch('/evaluate-keywords', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({ keywords }),
+                })
+                    .then(response => response.json().then(data => ({ ok: response.ok, data })))
+                    .then(({ ok, data }) => {
+                        if (!ok) {
+                            const message = data && typeof data.error === 'string' && data.error
+                                ? data.error
+                                : 'Bewertung konnte nicht durchgeführt werden.';
+                            setEvaluationAlert(message, 'danger');
+                            return;
+                        }
+                        if (data && Array.isArray(data.evaluations)) {
+                            data.evaluations.forEach(item => {
+                                if (!item || typeof item !== 'object') {
+                                    return;
+                                }
+                                const keyword = typeof item.keyword === 'string' ? item.keyword.trim() : '';
+                                if (!keyword || !keywordSetLower.has(keyword.toLowerCase())) {
+                                    return;
+                                }
+                                const entry = ensureKeywordState(keyword);
+                                const quality = typeof item.quality === 'string' ? item.quality.trim() : '';
+                                const betterRaw = Array.isArray(item.better_keywords) ? item.better_keywords : [];
+                                const better = [];
+                                const seenBetter = new Set();
+                                betterRaw.forEach(value => {
+                                    const text = typeof value === 'string' ? value.trim() : '';
+                                    if (!text) {
+                                        return;
+                                    }
+                                    const lowered = text.toLowerCase();
+                                    if (seenBetter.has(lowered)) {
+                                        return;
+                                    }
+                                    seenBetter.add(lowered);
+                                    better.push(text);
+                                });
+                                entry.evaluation = {
+                                    quality: quality || 'unbewertet',
+                                    betterKeywords: better,
+                                };
+                            });
+                        }
+                        if (data && Array.isArray(data.messages) && data.messages.length > 0) {
+                            const joined = data.messages.join(' ');
+                            const category = data.evaluations && data.evaluations.length > 0 ? 'warning' : 'danger';
+                            setEvaluationAlert(joined, category);
+                        } else if (data && Array.isArray(data.evaluations) && data.evaluations.length > 0) {
+                            setEvaluationAlert('Bewertungen aktualisiert.', 'info');
+                        } else {
+                            setEvaluationAlert('Keine Bewertungen verfügbar.', 'warning');
+                        }
+                        renderKeywordList();
+                        renderEvaluationTable();
+                        updateEvaluationPayload();
+                    })
+                    .catch(() => {
+                        setEvaluationAlert('Bewertung konnte nicht durchgeführt werden.', 'danger');
+                    })
+                    .finally(() => {
+                        setEvaluationButtonLoading(false);
+                        if (evaluationButton) {
+                            evaluationButton.disabled = currentKeywords.length === 0;
+                        }
+                    });
             });
         }
 
@@ -808,8 +1087,11 @@
             setManualMode();
         }
         syncInitialGroups();
+        syncInitialEvaluations();
         renderKeywordList();
+        renderEvaluationTable();
         updateGroupsInput();
+        updateEvaluationPayload();
     })();
 </script>
 
@@ -1065,6 +1347,7 @@
             const row = document.createElement("tr");
             const sourceCell = document.createElement("td");
             const targetCell = document.createElement("td");
+            const keywordCell = document.createElement("td");
 
             const sourceLink = document.createElement("a");
             sourceLink.href = result.source_url;
@@ -1081,8 +1364,12 @@
             sourceCell.appendChild(sourceLink);
             targetCell.appendChild(targetLink);
 
+            const matches = Array.isArray(result.matched_keywords) ? result.matched_keywords : [];
+            keywordCell.textContent = matches.length > 0 ? matches[0] : "–";
+
             row.appendChild(sourceCell);
             row.appendChild(targetCell);
+            row.appendChild(keywordCell);
 
             resultsTableBody.appendChild(row);
         });
@@ -1340,6 +1627,47 @@
                     body.appendChild(groupList);
                 }
 
+                if (Array.isArray(entry.keyword_evaluations) && entry.keyword_evaluations.length > 0) {
+                    const evalWrapper = document.createElement("div");
+                    evalWrapper.className = "table-responsive mb-3";
+                    const evalTable = document.createElement("table");
+                    evalTable.className = "table table-sm";
+                    const evalHead = document.createElement("thead");
+                    const evalHeadRow = document.createElement("tr");
+                    ["Suchwort", "Wie gut?", "Bessere Suchbegriffe"].forEach(text => {
+                        const th = document.createElement("th");
+                        th.textContent = text;
+                        evalHeadRow.appendChild(th);
+                    });
+                    evalHead.appendChild(evalHeadRow);
+                    evalTable.appendChild(evalHead);
+                    const evalBody = document.createElement("tbody");
+                    entry.keyword_evaluations.forEach(item => {
+                        if (!item || typeof item !== "object") {
+                            return;
+                        }
+                        const keyword = typeof item.keyword === "string" ? item.keyword : "";
+                        const quality = typeof item.quality === "string" ? item.quality : "";
+                        const better = Array.isArray(item.better_keywords)
+                            ? item.better_keywords.filter(value => typeof value === "string" && value.trim().length > 0)
+                            : [];
+                        const tr = document.createElement("tr");
+                        const keywordCell = document.createElement("td");
+                        keywordCell.textContent = keyword || "–";
+                        tr.appendChild(keywordCell);
+                        const qualityCell = document.createElement("td");
+                        qualityCell.textContent = quality || "–";
+                        tr.appendChild(qualityCell);
+                        const betterCell = document.createElement("td");
+                        betterCell.textContent = better.length > 0 ? better.join(", ") : "–";
+                        tr.appendChild(betterCell);
+                        evalBody.appendChild(tr);
+                    });
+                    evalTable.appendChild(evalBody);
+                    evalWrapper.appendChild(evalTable);
+                    body.appendChild(evalWrapper);
+                }
+
                 const statusP = document.createElement("p");
                 statusP.className = "mb-3";
                 const statusLabel = document.createElement("strong");
@@ -1360,7 +1688,7 @@
                 table.className = "table table-sm";
                 const thead = document.createElement("thead");
                 const headerRow = document.createElement("tr");
-                ["Ursprungs-URL", "Gefundene URL", "Stichwörter"].forEach(text => {
+                ["Ursprungs-URL", "Gefundene URL", "Suchbegriff"].forEach(text => {
                     const th = document.createElement("th");
                     th.textContent = text;
                     headerRow.appendChild(th);
@@ -1370,42 +1698,47 @@
 
                 const tbody = document.createElement("tbody");
                 (entry.results || []).forEach(result => {
-                    const row = document.createElement("tr");
+                    const matches = Array.isArray(result.matched_keywords) && result.matched_keywords.length > 0
+                        ? result.matched_keywords
+                        : [null];
+                    matches.forEach(matchValue => {
+                        const row = document.createElement("tr");
 
-                    const sourceCell = document.createElement("td");
-                    const sourceUrl = typeof result.source_url === "string" ? result.source_url : "";
-                    if (sourceUrl) {
-                        const sourceLink = document.createElement("a");
-                        sourceLink.href = sourceUrl;
-                        sourceLink.textContent = sourceUrl;
-                        sourceLink.target = "_blank";
-                        sourceLink.rel = "noopener";
-                        sourceCell.appendChild(sourceLink);
-                    } else {
-                        sourceCell.textContent = "–";
-                    }
-                    row.appendChild(sourceCell);
+                        const sourceCell = document.createElement("td");
+                        const sourceUrl = typeof result.source_url === "string" ? result.source_url : "";
+                        if (sourceUrl) {
+                            const sourceLink = document.createElement("a");
+                            sourceLink.href = sourceUrl;
+                            sourceLink.textContent = sourceUrl;
+                            sourceLink.target = "_blank";
+                            sourceLink.rel = "noopener";
+                            sourceCell.appendChild(sourceLink);
+                        } else {
+                            sourceCell.textContent = "–";
+                        }
+                        row.appendChild(sourceCell);
 
-                    const targetCell = document.createElement("td");
-                    const targetUrl = typeof result.target_url === "string" ? result.target_url : "";
-                    if (targetUrl) {
-                        const targetLink = document.createElement("a");
-                        targetLink.href = targetUrl;
-                        targetLink.textContent = targetUrl;
-                        targetLink.target = "_blank";
-                        targetLink.rel = "noopener";
-                        targetCell.appendChild(targetLink);
-                    } else {
-                        targetCell.textContent = "–";
-                    }
-                    row.appendChild(targetCell);
+                        const targetCell = document.createElement("td");
+                        const targetUrl = typeof result.target_url === "string" ? result.target_url : "";
+                        if (targetUrl) {
+                            const targetLink = document.createElement("a");
+                            targetLink.href = targetUrl;
+                            targetLink.textContent = targetUrl;
+                            targetLink.target = "_blank";
+                            targetLink.rel = "noopener";
+                            targetCell.appendChild(targetLink);
+                        } else {
+                            targetCell.textContent = "–";
+                        }
+                        row.appendChild(targetCell);
 
-                    const keywordsCell = document.createElement("td");
-                    const matched = Array.isArray(result.matched_keywords) ? result.matched_keywords.join(", ") : "";
-                    keywordsCell.textContent = matched;
-                    row.appendChild(keywordsCell);
+                        const keywordCell = document.createElement("td");
+                        const keywordText = typeof matchValue === "string" && matchValue.trim().length > 0 ? matchValue : "–";
+                        keywordCell.textContent = keywordText;
+                        row.appendChild(keywordCell);
 
-                    tbody.appendChild(row);
+                        tbody.appendChild(row);
+                    });
                 });
                 table.appendChild(tbody);
                 tableWrapper.appendChild(table);
