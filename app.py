@@ -454,6 +454,9 @@ class CrawlJob:
     id: str
     start_urls: List[str]
     keywords: List[str]
+    max_pages: int
+    concurrency: int
+    total_start_urls: int
     original_keywords: List[str] = field(default_factory=list)
     expanded_keywords: List[str] = field(default_factory=list)
     keyword_groups: List[Dict[str, List[str]]] = field(default_factory=list)
@@ -461,9 +464,6 @@ class CrawlJob:
     synonyms_enabled: bool = False
     synonyms_expanded: bool = False
     synonym_status: str = "deaktiviert"
-    max_pages: int
-    concurrency: int
-    total_start_urls: int
     start_date: Optional[date] = None
     end_date: Optional[date] = None
     respect_robots: bool = DEFAULT_RESPECT_ROBOTS
