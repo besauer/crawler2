@@ -91,6 +91,7 @@
                                 –
                             {% endif %}
                         </td>
+                        <td>{{ 'Ja' if record.get('aktiv', True) else 'Nein' }}</td>
                     </tr>
                 {% endfor %}
                 </tbody>

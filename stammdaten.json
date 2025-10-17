@@ -6,7 +6,8 @@
     "ort": "Stuttgart",
     "anzahl_schueler": 3523,
     "anzahl_klassen": 150,
-    "homepage": "https://ks1-stuttgart.org/"
+    "homepage": "https://ks1-stuttgart.org/",
+    "aktiv": true
   },
   {
     "schul_id": "72450",
@@ -15,7 +16,8 @@
     "ort": "Biberach an der Riss",
     "anzahl_schueler": 3319,
     "anzahl_klassen": 157,
-    "homepage": "https://www.kas-bc.de/"
+    "homepage": "https://www.kas-bc.de/",
+    "aktiv": true
   },
   {
     "schul_id": "72909",
@@ -24,7 +26,8 @@
     "ort": "Ulm",
     "anzahl_schueler": 3285,
     "anzahl_klassen": 148,
-    "homepage": "https://www.rbs-ulm.de/"
+    "homepage": "https://www.rbs-ulm.de/",
+    "aktiv": true
   },
   {
     "schul_id": "68853",
@@ -33,7 +36,8 @@
     "ort": "Aalen",
     "anzahl_schueler": 3170,
     "anzahl_klassen": 141,
-    "homepage": "https://ts-aalen.de/"
+    "homepage": "https://ts-aalen.de/",
+    "aktiv": true
   },
   {
     "schul_id": "69363",
@@ -42,7 +46,8 @@
     "ort": "Leonberg",
     "anzahl_schueler": 3128,
     "anzahl_klassen": 123,
-    "homepage": "https://www.bszleo.de/aktuelles/aktuelle-meldungen"
+    "homepage": "https://www.bszleo.de/aktuelles/aktuelle-meldungen",
+    "aktiv": true
   },
   {
     "schul_id": "69474",
@@ -51,7 +56,8 @@
     "ort": "Neckarsulm",
     "anzahl_schueler": 3022,
     "anzahl_klassen": 142,
-    "homepage": "https://www.css-nsu.de/"
+    "homepage": "https://www.css-nsu.de/",
+    "aktiv": true
   },
   {
     "schul_id": "69549",
@@ -60,7 +66,8 @@
     "ort": "Schorndorf",
     "anzahl_schueler": 2864,
     "anzahl_klassen": 117,
-    "homepage": "https://gsso.de/"
+    "homepage": "https://gsso.de/",
+    "aktiv": true
   },
   {
     "schul_id": "102468",
@@ -69,7 +76,8 @@
     "ort": "Offenburg",
     "anzahl_schueler": 2835,
     "anzahl_klassen": 120,
-    "homepage": "https://www.gs-offenburg.de/"
+    "homepage": "https://www.gs-offenburg.de/",
+    "aktiv": true
   },
   {
     "schul_id": "72870",
@@ -78,6 +86,7 @@
     "ort": "Tübingen",
     "anzahl_schueler": 2766,
     "anzahl_klassen": 123,
-    "homepage": "https://www.gs-tuebingen.de/willkommen"
+    "homepage": "https://www.gs-tuebingen.de/willkommen",
+    "aktiv": true
   }
 ]

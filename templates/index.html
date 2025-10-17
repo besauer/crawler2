@@ -119,6 +119,7 @@
                             <th scope="col">Anzahl Schüler</th>
                             <th scope="col">Anzahl Klassen</th>
                             <th scope="col">Homepage</th>
+                            <th scope="col">Aktiv</th>
                         </tr>
                         </thead>
                         <tbody>
@@ -129,7 +130,11 @@
                                         <input class="form-check-input school-checkbox" type="checkbox" value="{{ record.homepage }}" id="school-{{ loop.index }}" name="start_urls"
                                                {% if record.homepage in selected_homepages %}checked{% endif %}
                                                {% for field in stammdaten_fields %}
-                                                   data-{{ field.key|replace('_', '-') }}="{{ record[field.key]|default('', true) }}"
+                                                   {% if field.key == 'aktiv' %}
+                                                       data-aktiv="{{ 'ja' if record.get(field.key, True) else 'nein' }}"
+                                                   {% else %}
+                                                       data-{{ field.key|replace('_', '-') }}="{{ record.get(field.key, '') }}"
+                                                   {% endif %}
                                                {% endfor %}>
                                         <label class="form-check-label small" for="school-{{ loop.index }}">&nbsp;</label>
                                     </div>
@@ -147,6 +152,7 @@
                                         –
                                     {% endif %}
                                 </td>
+                                <td>{{ 'Ja' if record.get('aktiv', True) else 'Nein' }}</td>
                             </tr>
                         {% endfor %}
                         </tbody>

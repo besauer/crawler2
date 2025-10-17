@@ -22,7 +22,7 @@ Ein lokaler Web-Crawler mit HTML-Oberfläche zum Durchsuchen von Schul-Webseiten
    Alternativ kann `python app.py` verwendet werden, um den integrierten Entwicklungsserver zu starten.
 
 2. Im Browser `http://127.0.0.1:5000` öffnen.
-3. Über das Menü „Stammdaten“ eine Excel-Datei (`.xlsx`) mit den Schulstammdaten hochladen. Erwartete Spalten: Schul ID, Träger, Name, Ort, Anzahl Schüler, Anzahl Klassen, Homepage. Die importierten Daten werden lokal in `stammdaten.json` abgelegt.
+3. Über das Menü „Stammdaten“ eine Excel-Datei (`.xlsx`) mit den Schulstammdaten hochladen. Erwartete Spalten: Schul ID, Träger, Name, Ort, Anzahl Schüler, Anzahl Klassen, Homepage, Aktiv. Die importierten Daten werden lokal in `stammdaten.json` abgelegt; nur als „Aktiv“ markierte Schulen stehen später in der Suche zur Auswahl.
 4. Unter „Einstellungen → API-Schlüssel“ optional den OpenAI-API-Schlüssel hinterlegen und testen. Der Schlüssel wird nur im laufenden Prozess gespeichert und ausschließlich für die Synonymerweiterung verwendet.
 5. Zurück auf der Seite „Suche“ die gewünschten Schulen per Checkbox auswählen (Alle/Keine sowie Feldfilter „Wert enthält …“ stehen als Hilfen zur Verfügung) und die Stichwörter (ein Suchbegriff pro Zeile) eintragen.
 6. Optional die maximale Seitenanzahl pro Start-URL, die Anzahl paralleler Seitenabrufe (bis zu 150 gleichzeitig), ob `robots.txt` respektiert wird, sowie ein Veröffentlichungszeitfenster auswählen. Der Schalter „Synonyme automatisch erweitern (KI)“ ergänzt die Stichwörter – sofern ein Schlüssel hinterlegt ist – um passende Synonyme und Kurzformen. Seiten ohne Datum werden – mit Ausnahme der Startseite – übersprungen, wenn ein Zeitraum gesetzt ist.

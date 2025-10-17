@@ -48,6 +48,7 @@ STAMMDATEN_FIELDS = [
     {"key": "anzahl_schueler", "label": "Anzahl Schüler", "type": "numeric"},
     {"key": "anzahl_klassen", "label": "Anzahl Klassen", "type": "numeric"},
     {"key": "homepage", "label": "Homepage"},
+    {"key": "aktiv", "label": "Aktiv"},
 ]
 
 
@@ -347,6 +348,25 @@ def _coerce_int(value: object) -> Optional[int]:
             return None
 
 
+def _coerce_bool(value: object, *, default: bool = True) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        if isinstance(value, float) and math.isnan(value):
+            return default
+        return bool(int(value))
+    text = str(value).strip().lower()
+    if not text:
+        return default
+    if text in {"1", "true", "wahr", "ja", "j", "y", "aktiv", "active", "x"}:
+        return True
+    if text in {"0", "false", "falsch", "nein", "n", "inactive", "inaktiv"}:
+        return False
+    return default
+
+
 def load_stammdaten() -> List[Dict[str, object]]:
     with stammdaten_lock:
         if not STAMMDATEN_PATH.exists():
@@ -370,6 +390,7 @@ def load_stammdaten() -> List[Dict[str, object]]:
                     "anzahl_schueler": _coerce_int(entry.get("anzahl_schueler")),
                     "anzahl_klassen": _coerce_int(entry.get("anzahl_klassen")),
                     "homepage": _coerce_str(entry.get("homepage")),
+                    "aktiv": _coerce_bool(entry.get("aktiv"), default=True),
                 }
                 if record["homepage"]:
                     records.append(record)
@@ -418,8 +439,8 @@ def parse_stammdaten_excel(file_storage) -> List[Dict[str, object]]:
             column_map[key] = header_map[normalized]
 
     if len(column_map) < len(STAMMDATEN_FIELDS):
-        for idx, field in enumerate(STAMMDATEN_FIELDS):
-            column_map.setdefault(field["key"], idx)
+        for field in STAMMDATEN_FIELDS:
+            column_map.setdefault(field["key"], None)
 
     records: List[Dict[str, object]] = []
     for raw_row in rows[1:]:
@@ -435,6 +456,8 @@ def parse_stammdaten_excel(file_storage) -> List[Dict[str, object]]:
             cell_value = values[column_index] if column_index is not None and column_index < len(values) else None
             if field["key"] in {"anzahl_schueler", "anzahl_klassen"}:
                 record[field["key"]] = _coerce_int(cell_value)
+            elif field["key"] == "aktiv":
+                record[field["key"]] = _coerce_bool(cell_value, default=True)
             else:
                 record[field["key"]] = _coerce_str(cell_value)
 
@@ -637,7 +660,8 @@ def run_crawl_job(job: CrawlJob) -> None:
 
 @app.route("/", methods=["GET", "POST"])
 def index():
-    stammdaten_records = load_stammdaten()
+    all_stammdaten_records = load_stammdaten()
+    stammdaten_records = [record for record in all_stammdaten_records if record.get("aktiv", True)]
     keywords_input = ""
     selected_homepages: List[str] = []
     max_pages = MAX_PAGES_DEFAULT
@@ -684,7 +708,7 @@ def index():
         end_date_value: Optional[date] = None
 
         if not stammdaten_records:
-            error = "Es sind keine Stammdaten vorhanden. Bitte importieren Sie zuerst Schulen."
+            error = "Es sind keine aktiven Stammdaten vorhanden. Bitte importieren oder aktivieren Sie Schulen."
         elif not selected_homepages:
             error = "Bitte wählen Sie mindestens eine Schule aus den Stammdaten aus."
         elif not keywords:
