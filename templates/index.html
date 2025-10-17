@@ -162,7 +162,18 @@
         </div>
         <div class="mb-3">
             <label for="keywords" class="form-label">Suchstichwörter (ein Wort pro Zeile)</label>
-            <textarea class="form-control" id="keywords" name="keywords" required>{{ keywords_input }}</textarea>
+            <textarea class="form-control" id="keywords" name="keywords" rows="4" required>{{ keywords_input }}</textarea>
+            <div class="form-text">Ein Begriff pro Zeile. Mit „Suchbegriff erweitern“ können Sie passende Synonyme hinzufügen oder entfernen.</div>
+            <div class="mt-3" id="keyword-manager">
+                <div class="d-flex justify-content-between align-items-center mb-2">
+                    <span class="fw-semibold">Verwaltete Stichwörter</span>
+                    <span class="small text-muted">Optionen aktiv, wenn die Synonymerweiterung eingeschaltet ist.</span>
+                </div>
+                <div id="keyword-empty" class="text-muted small">Fügen Sie oben mindestens einen Suchbegriff hinzu, um Synonyme zu verwalten.</div>
+                <div class="list-group" id="keyword-list"></div>
+            </div>
+            <input type="hidden" id="keyword-groups-payload" name="keyword_groups_payload" value="{{ keyword_groups|tojson|e }}">
+            <input type="hidden" id="keyword-groups-mode" name="keyword_groups_mode" value="{{ 'manual' if synonym_groups_manual else '' }}">
         </div>
         <div class="mb-3">
             <label for="max_pages" class="form-label">Maximale Seitenanzahl pro Start-URL</label>
@@ -283,6 +294,524 @@
         <div class="accordion" id="saved-searches-accordion"></div>
     </div>
 </main>
+
+<div class="modal fade" id="synonymModal" tabindex="-1" aria-labelledby="synonymModalLabel" aria-hidden="true">
+    <div class="modal-dialog modal-lg modal-dialog-scrollable">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title" id="synonymModalLabel">Synonyme erweitern</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Schließen"></button>
+            </div>
+            <div class="modal-body">
+                <p class="mb-3">Ausgangsbegriff: <strong id="synonym-modal-keyword">–</strong></p>
+                <div class="mb-3">
+                    <label for="synonym-modal-prompt" class="form-label">Prompt für die Synonymerweiterung</label>
+                    <textarea class="form-control" id="synonym-modal-prompt" rows="6"></textarea>
+                    <div class="form-text">Passe den Prompt an, bevor die Anfrage gesendet wird. Mit Strg+Enter bzw. Cmd+Enter senden.</div>
+                </div>
+                <div id="synonym-modal-error" class="alert alert-danger d-none" role="alert"></div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal" id="synonym-modal-cancel">Abbrechen</button>
+                <button type="button" class="btn btn-primary" id="synonym-modal-submit">
+                    <span class="spinner-border spinner-border-sm me-2 d-none" role="status" aria-hidden="true"></span>
+                    Synonyme abrufen
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+    window.DEFAULT_SYNONYM_PROMPT = {{ default_synonym_prompt|tojson }};
+    window.INITIAL_KEYWORD_GROUPS = {{ keyword_groups|tojson }};
+    window.SYNONYM_GROUPS_MANUAL = {{ 'true' if synonym_groups_manual else 'false' }};
+</script>
+
+<script>
+    (function () {
+        const keywordsTextarea = document.getElementById('keywords');
+        const keywordList = document.getElementById('keyword-list');
+        const keywordEmpty = document.getElementById('keyword-empty');
+        const useSynonymsCheckbox = document.getElementById('use_synonyms');
+        const groupsInput = document.getElementById('keyword-groups-payload');
+        const groupsModeInput = document.getElementById('keyword-groups-mode');
+        const modalElement = document.getElementById('synonymModal');
+        const modalKeyword = document.getElementById('synonym-modal-keyword');
+        const modalPrompt = document.getElementById('synonym-modal-prompt');
+        const modalError = document.getElementById('synonym-modal-error');
+        const modalSubmit = document.getElementById('synonym-modal-submit');
+        let modalInstance = null;
+        if (modalElement && typeof bootstrap !== 'undefined') {
+            modalInstance = new bootstrap.Modal(modalElement);
+        }
+
+        const defaultPrompt = window.DEFAULT_SYNONYM_PROMPT || '';
+        const initialGroups = Array.isArray(window.INITIAL_KEYWORD_GROUPS) ? window.INITIAL_KEYWORD_GROUPS : [];
+        const keywordState = new Map();
+        let currentKeywords = [];
+        let keywordSetLower = new Set();
+        let activeModalKeyword = null;
+
+        function setManualMode() {
+            if (groupsModeInput) {
+                groupsModeInput.value = 'manual';
+            }
+        }
+
+        function getKeywordsFromTextarea() {
+            if (!keywordsTextarea) {
+                return [];
+            }
+            const lines = keywordsTextarea.value.split(/\r?\n/);
+            const result = [];
+            const seenLower = new Set();
+            lines.forEach(line => {
+                const trimmed = line.trim();
+                if (!trimmed) {
+                    return;
+                }
+                const lowered = trimmed.toLowerCase();
+                if (seenLower.has(lowered)) {
+                    return;
+                }
+                seenLower.add(lowered);
+                result.push(trimmed);
+            });
+            return result;
+        }
+
+        function ensureKeywordState(keyword) {
+            if (!keywordState.has(keyword)) {
+                keywordState.set(keyword, {
+                    synonyms: [],
+                    synonymSet: new Set(),
+                    lastPrompt: defaultPrompt,
+                });
+            }
+            return keywordState.get(keyword);
+        }
+
+        function syncInitialGroups() {
+            if (!Array.isArray(initialGroups) || initialGroups.length === 0) {
+                return;
+            }
+            initialGroups.forEach(group => {
+                if (!group || typeof group !== 'object') {
+                    return;
+                }
+                const original = typeof group.original === 'string' ? group.original.trim() : '';
+                if (!original || !keywordSetLower.has(original.toLowerCase())) {
+                    return;
+                }
+                const entry = ensureKeywordState(original);
+                const additional = Array.isArray(group.additional) ? group.additional : [];
+                additional.forEach(value => {
+                    const text = typeof value === 'string' ? value.trim() : '';
+                    if (!text) {
+                        return;
+                    }
+                    const lowered = text.toLowerCase();
+                    if (entry.synonymSet.has(lowered) || keywordSetLower.has(lowered)) {
+                        return;
+                    }
+                    entry.synonymSet.add(lowered);
+                    entry.synonyms.push(text);
+                });
+            });
+        }
+
+        function renderKeywordList() {
+            if (!keywordList) {
+                return;
+            }
+            keywordList.innerHTML = '';
+            if (keywordEmpty) {
+                keywordEmpty.style.display = currentKeywords.length === 0 ? '' : 'none';
+            }
+            if (currentKeywords.length === 0) {
+                return;
+            }
+            const synonymsEnabled = useSynonymsCheckbox ? useSynonymsCheckbox.checked : false;
+            currentKeywords.forEach(keyword => {
+                const entry = ensureKeywordState(keyword);
+                const listItem = document.createElement('div');
+                listItem.className = 'list-group-item';
+                listItem.dataset.keyword = keyword;
+
+                const header = document.createElement('div');
+                header.className = 'd-flex justify-content-between align-items-start flex-wrap gap-2';
+
+                const title = document.createElement('div');
+                title.className = 'me-2';
+                const strong = document.createElement('strong');
+                strong.textContent = keyword;
+                title.appendChild(strong);
+                header.appendChild(title);
+
+                const expandButton = document.createElement('button');
+                expandButton.type = 'button';
+                expandButton.className = 'btn btn-link btn-sm p-0';
+                expandButton.dataset.action = 'expand';
+                expandButton.dataset.keyword = keyword;
+                expandButton.textContent = 'Suchbegriff erweitern';
+                if (!synonymsEnabled) {
+                    expandButton.classList.add('disabled');
+                    expandButton.disabled = true;
+                }
+                header.appendChild(expandButton);
+
+                listItem.appendChild(header);
+
+                const synonymsWrapper = document.createElement('div');
+                synonymsWrapper.className = 'mt-2';
+
+                if (entry.synonyms.length === 0) {
+                    const emptyText = document.createElement('div');
+                    emptyText.className = 'text-muted small';
+                    emptyText.textContent = 'Keine Synonyme hinzugefügt.';
+                    synonymsWrapper.appendChild(emptyText);
+                } else {
+                    const synonymsList = document.createElement('div');
+                    synonymsList.className = 'd-flex flex-wrap gap-2';
+                    entry.synonyms.forEach(value => {
+                        const badge = document.createElement('span');
+                        badge.className = 'badge bg-secondary d-flex align-items-center';
+                        const textSpan = document.createElement('span');
+                        textSpan.textContent = value;
+                        badge.appendChild(textSpan);
+                        const removeButton = document.createElement('button');
+                        removeButton.type = 'button';
+                        removeButton.className = 'btn btn-sm btn-link text-white ms-2 p-0 remove-synonym';
+                        removeButton.dataset.synonym = value;
+                        removeButton.setAttribute('aria-label', `Synonym „${value}“ entfernen`);
+                        removeButton.innerHTML = '&times;';
+                        if (!synonymsEnabled) {
+                            removeButton.classList.add('disabled');
+                            removeButton.disabled = true;
+                        }
+                        badge.appendChild(removeButton);
+                        synonymsList.appendChild(badge);
+                    });
+                    synonymsWrapper.appendChild(synonymsList);
+                }
+
+                const addGroup = document.createElement('div');
+                addGroup.className = 'input-group input-group-sm mt-2';
+                const addInput = document.createElement('input');
+                addInput.type = 'text';
+                addInput.className = 'form-control';
+                addInput.placeholder = 'Synonym hinzufügen';
+                addInput.dataset.role = 'synonym-input';
+                const addButton = document.createElement('button');
+                addButton.type = 'button';
+                addButton.className = 'btn btn-outline-secondary';
+                addButton.dataset.role = 'synonym-add';
+                addButton.textContent = 'Hinzufügen';
+                if (!synonymsEnabled) {
+                    addInput.disabled = true;
+                    addButton.disabled = true;
+                }
+                addGroup.appendChild(addInput);
+                addGroup.appendChild(addButton);
+                synonymsWrapper.appendChild(addGroup);
+
+                listItem.appendChild(synonymsWrapper);
+                keywordList.appendChild(listItem);
+            });
+        }
+
+        function updateGroupsInput() {
+            if (!groupsInput) {
+                return;
+            }
+            const payload = currentKeywords.map(keyword => {
+                const entry = keywordState.get(keyword);
+                return {
+                    original: keyword,
+                    additional: entry ? entry.synonyms.slice() : [],
+                };
+            });
+            groupsInput.value = JSON.stringify(payload);
+        }
+
+        function addSynonym(keyword, synonym) {
+            const trimmed = typeof synonym === 'string' ? synonym.trim() : '';
+            if (!trimmed) {
+                return false;
+            }
+            const lowered = trimmed.toLowerCase();
+            if (keywordSetLower.has(lowered)) {
+                return false;
+            }
+            const entry = ensureKeywordState(keyword);
+            if (entry.synonymSet.has(lowered)) {
+                return false;
+            }
+            entry.synonymSet.add(lowered);
+            entry.synonyms.push(trimmed);
+            setManualMode();
+            updateGroupsInput();
+            renderKeywordList();
+            return true;
+        }
+
+        function removeSynonym(keyword, synonym) {
+            const entry = keywordState.get(keyword);
+            if (!entry) {
+                return;
+            }
+            const lowered = synonym.toLowerCase();
+            if (!entry.synonymSet.has(lowered)) {
+                return;
+            }
+            entry.synonymSet.delete(lowered);
+            entry.synonyms = entry.synonyms.filter(value => value.toLowerCase() !== lowered);
+            setManualMode();
+            updateGroupsInput();
+            renderKeywordList();
+        }
+
+        function openModal(keyword) {
+            if (!modalInstance || !modalKeyword || !modalPrompt) {
+                return;
+            }
+            const entry = ensureKeywordState(keyword);
+            activeModalKeyword = keyword;
+            modalKeyword.textContent = keyword;
+            modalPrompt.value = entry.lastPrompt || defaultPrompt;
+            if (modalError) {
+                modalError.classList.add('d-none');
+                modalError.textContent = '';
+            }
+            if (modalSubmit) {
+                modalSubmit.disabled = false;
+                modalSubmit.innerHTML = '<span class="spinner-border spinner-border-sm me-2 d-none" role="status" aria-hidden="true"></span>Synonyme abrufen';
+            }
+            modalInstance.show();
+        }
+
+        function showModalError(message) {
+            if (!modalError) {
+                return;
+            }
+            modalError.textContent = message;
+            modalError.classList.remove('d-none');
+        }
+
+        function setSubmitLoading(loading) {
+            if (!modalSubmit) {
+                return;
+            }
+            const spinner = modalSubmit.querySelector('.spinner-border');
+            if (loading) {
+                modalSubmit.disabled = true;
+                if (spinner) {
+                    spinner.classList.remove('d-none');
+                }
+            } else {
+                modalSubmit.disabled = false;
+                if (spinner) {
+                    spinner.classList.add('d-none');
+                }
+            }
+        }
+
+        function handleModalSubmit() {
+            if (!activeModalKeyword || !modalPrompt) {
+                return;
+            }
+            if (!useSynonymsCheckbox || !useSynonymsCheckbox.checked) {
+                showModalError('Aktivieren Sie zuerst die Synonymerweiterung.');
+                return;
+            }
+            const keyword = activeModalKeyword;
+            const promptValue = modalPrompt.value || '';
+            if (modalError) {
+                modalError.classList.add('d-none');
+                modalError.textContent = '';
+            }
+            setSubmitLoading(true);
+            fetch('/synonyms', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({ keyword, prompt: promptValue }),
+            })
+                .then(response => {
+                    if (!response.ok) {
+                        return response.json().catch(() => ({ error: `Fehler ${response.status}` }));
+                    }
+                    return response.json();
+                })
+                .then(data => {
+                    if (!data) {
+                        showModalError('Unbekannte Antwort von der Synonym-API.');
+                        return;
+                    }
+                    if (data.error) {
+                        showModalError(data.error);
+                        return;
+                    }
+                    const entry = ensureKeywordState(keyword);
+                    entry.lastPrompt = promptValue || defaultPrompt;
+                    const synonyms = Array.isArray(data.synonyms) ? data.synonyms : [];
+                    let added = 0;
+                    synonyms.forEach(value => {
+                        if (addSynonym(keyword, value)) {
+                            added += 1;
+                        }
+                    });
+                    if (added === 0) {
+                        showModalError('Keine neuen Synonyme hinzugefügt.');
+                        return;
+                    }
+                    setManualMode();
+                    if (modalInstance) {
+                        modalInstance.hide();
+                    }
+                })
+                .catch(() => {
+                    showModalError('Synonyme konnten nicht abgerufen werden.');
+                })
+                .finally(() => {
+                    setSubmitLoading(false);
+                });
+        }
+
+        if (modalSubmit) {
+            modalSubmit.addEventListener('click', event => {
+                event.preventDefault();
+                handleModalSubmit();
+            });
+        }
+
+        if (modalPrompt) {
+            modalPrompt.addEventListener('keydown', event => {
+                if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'enter') {
+                    event.preventDefault();
+                    handleModalSubmit();
+                }
+            });
+        }
+
+        if (modalElement) {
+            modalElement.addEventListener('hidden.bs.modal', () => {
+                activeModalKeyword = null;
+                setSubmitLoading(false);
+            });
+        }
+
+        if (keywordList) {
+            keywordList.addEventListener('click', event => {
+                const expandButton = event.target.closest('[data-action="expand"]');
+                if (expandButton) {
+                    const keyword = expandButton.dataset.keyword;
+                    if (keyword && useSynonymsCheckbox && useSynonymsCheckbox.checked) {
+                        openModal(keyword);
+                    }
+                    event.preventDefault();
+                    return;
+                }
+                const removeButton = event.target.closest('.remove-synonym');
+                if (removeButton) {
+                    const listItem = removeButton.closest('.list-group-item');
+                    if (listItem) {
+                        const keyword = listItem.dataset.keyword;
+                        const synonym = removeButton.dataset.synonym || removeButton.textContent || '';
+                        if (keyword && synonym) {
+                            removeSynonym(keyword, synonym);
+                        }
+                    }
+                    event.preventDefault();
+                }
+            });
+
+            keywordList.addEventListener('click', event => {
+                const addButton = event.target.closest('[data-role="synonym-add"]');
+                if (!addButton) {
+                    return;
+                }
+                const listItem = addButton.closest('.list-group-item');
+                if (!listItem) {
+                    return;
+                }
+                const keyword = listItem.dataset.keyword;
+                const input = listItem.querySelector('[data-role="synonym-input"]');
+                if (!keyword || !input) {
+                    return;
+                }
+                const value = input.value.trim();
+                if (value) {
+                    const added = addSynonym(keyword, value);
+                    if (added) {
+                        input.value = '';
+                    }
+                }
+            });
+
+            keywordList.addEventListener('keydown', event => {
+                if (event.key !== 'Enter') {
+                    return;
+                }
+                const input = event.target.closest('[data-role="synonym-input"]');
+                if (!input) {
+                    return;
+                }
+                event.preventDefault();
+                const listItem = input.closest('.list-group-item');
+                if (!listItem) {
+                    return;
+                }
+                const keyword = listItem.dataset.keyword;
+                const value = input.value.trim();
+                if (keyword && value) {
+                    const added = addSynonym(keyword, value);
+                    if (added) {
+                        input.value = '';
+                    }
+                }
+            });
+        }
+
+        function rebuildFromTextarea() {
+            const keywords = getKeywordsFromTextarea();
+            currentKeywords = keywords;
+            keywordSetLower = new Set(keywords.map(kw => kw.toLowerCase()));
+            Array.from(keywordState.keys()).forEach(key => {
+                if (!keywordSetLower.has(key.toLowerCase())) {
+                    keywordState.delete(key);
+                }
+            });
+            keywords.forEach(keyword => {
+                ensureKeywordState(keyword);
+            });
+            renderKeywordList();
+            updateGroupsInput();
+        }
+
+        if (keywordsTextarea) {
+            keywordsTextarea.addEventListener('input', () => {
+                rebuildFromTextarea();
+            });
+        }
+
+        if (useSynonymsCheckbox) {
+            useSynonymsCheckbox.addEventListener('change', () => {
+                renderKeywordList();
+            });
+        }
+
+        rebuildFromTextarea();
+        if (window.SYNONYM_GROUPS_MANUAL === true || window.SYNONYM_GROUPS_MANUAL === 'true') {
+            setManualMode();
+        }
+        syncInitialGroups();
+        renderKeywordList();
+        updateGroupsInput();
+    })();
+</script>
 
 <script>
     (function () {

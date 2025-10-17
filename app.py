@@ -14,6 +14,7 @@ from typing import Dict, List, Optional, Set, Tuple
 
 import requests
 from flask import Flask, jsonify, render_template, request
+from flask.typing import ResponseReturnValue
 from openpyxl import load_workbook
 
 from crawler import (
@@ -36,6 +37,12 @@ OPENAI_CHAT_COMPLETIONS_URL = "https://api.openai.com/v1/chat/completions"
 OPENAI_MODELS_URL = "https://api.openai.com/v1/models?limit=1"
 OPENAI_MODEL_NAME = "gpt-4o-mini"
 OPENAI_TIMEOUT = 20
+DEFAULT_SYNONYM_PROMPT = (
+    "Du bist ein Synonym-Generator für deutschsprachige Websuche. "
+    "Gib ausschließlich eine JSON-Liste mit gebräuchlichen Synonymen, "
+    "nahen Begriffen und typischen Kurzformen des folgenden Begriffs zurück. "
+    "Keine Erklärungen, keine weiteren Wörter. Vermeide Homonyme und irrelevante Bedeutungen."
+)
 
 api_key_lock = threading.Lock()
 _api_key_value: Optional[str] = None
@@ -88,23 +95,22 @@ def has_api_key() -> bool:
     return get_api_key() is not None
 
 
-def fetch_synonyms_from_openai(keyword: str, api_key: str) -> List[str]:
+def fetch_synonyms_from_openai(
+    keyword: str,
+    api_key: str,
+    prompt: Optional[str] = None,
+) -> List[str]:
     """Request synonyms for a single keyword from the OpenAI API."""
 
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
     }
-    prompt = (
-        "Du bist ein Synonym-Generator für deutschsprachige Websuche. "
-        "Gib ausschließlich eine JSON-Liste mit gebräuchlichen Synonymen, "
-        "nahen Begriffen und typischen Kurzformen des folgenden Begriffs zurück. "
-        "Keine Erklärungen, keine weiteren Wörter. Vermeide Homonyme und irrelevante Bedeutungen."
-    )
+    prompt_text = (prompt or "").strip() or DEFAULT_SYNONYM_PROMPT
     payload = {
         "model": OPENAI_MODEL_NAME,
         "messages": [
-            {"role": "system", "content": prompt},
+            {"role": "system", "content": prompt_text},
             {"role": "user", "content": f'Begriff: "{keyword}"'},
         ],
         "temperature": 0.2,
@@ -275,6 +281,30 @@ def test_openai_api_key(api_key: str) -> None:
         raise OpenAIIntegrationError(
             f"OpenAI-API meldet einen Fehler (Status {response.status_code})."
         )
+
+
+@app.post("/synonyms")
+def generate_synonyms() -> ResponseReturnValue:
+    api_key = get_api_key()
+    if not api_key:
+        return jsonify({"error": "OpenAI-Schlüssel erforderlich."}), 400
+
+    payload = request.get_json(silent=True) or {}
+    if not isinstance(payload, dict):
+        return jsonify({"error": "Ungültige Anfrage."}), 400
+
+    keyword = str(payload.get("keyword", "")).strip()
+    prompt = payload.get("prompt")
+
+    if not keyword:
+        return jsonify({"error": "Bitte geben Sie einen Suchbegriff an."}), 400
+
+    try:
+        synonyms = fetch_synonyms_from_openai(keyword, api_key, prompt=prompt)
+    except OpenAIIntegrationError as exc:
+        return jsonify({"error": str(exc)}), 502
+
+    return jsonify({"keyword": keyword, "synonyms": synonyms})
 
 
 
@@ -486,6 +516,7 @@ class CrawlJob:
     synonym_messages: List[Dict[str, str]] = field(default_factory=list)
     synonyms_enabled: bool = False
     synonyms_expanded: bool = False
+    synonyms_manual: bool = False
     synonym_status: str = "deaktiviert"
     start_date: Optional[date] = None
     end_date: Optional[date] = None
@@ -541,6 +572,7 @@ class CrawlJob:
                 "synonym_messages": list(self.synonym_messages),
                 "synonyms_enabled": self.synonyms_enabled,
                 "synonyms_expanded": self.synonyms_expanded,
+                "synonyms_manual": self.synonyms_manual,
                 "synonym_status": self.synonym_status,
                 "results": [
                     {
@@ -674,6 +706,7 @@ def index():
     expanded_keywords: List[str] = []
     synonym_messages: List[Dict[str, str]] = []
     synonyms_expanded = False
+    synonym_groups_manual = False
     synonym_status = "deaktiviert"
     error: Optional[str] = None
     job_id: Optional[str] = None
@@ -704,6 +737,32 @@ def index():
         keywords = [kw.strip() for kw in raw_keywords.splitlines() if kw.strip()]
         expanded_keywords = list(keywords)
         keyword_groups = [{"original": kw, "additional": []} for kw in keywords]
+        manual_payload_mode = request.form.get("keyword_groups_mode", "").strip().lower()
+        manual_groups_raw = request.form.get("keyword_groups_payload", "").strip()
+        manual_groups_data: Optional[List[Dict[str, object]]] = None
+        if synonyms_enabled and manual_payload_mode == "manual":
+            if not manual_groups_raw:
+                manual_groups_data = []
+            else:
+                try:
+                    loaded_groups = json.loads(manual_groups_raw)
+                except json.JSONDecodeError:
+                    synonym_messages.append(
+                        {
+                            "category": "warning",
+                            "text": "Synonymerweiterung: Die übermittelten Anpassungen konnten nicht gelesen werden.",
+                        }
+                    )
+                else:
+                    if isinstance(loaded_groups, list):
+                        manual_groups_data = loaded_groups
+                    else:
+                        synonym_messages.append(
+                            {
+                                "category": "warning",
+                                "text": "Synonymerweiterung: Die übermittelten Anpassungen waren ungültig.",
+                            }
+                        )
         start_date_value: Optional[date] = None
         end_date_value: Optional[date] = None
 
@@ -746,20 +805,89 @@ def index():
             elif concurrency > MAX_CONCURRENCY:
                 concurrency = MAX_CONCURRENCY
 
-            expanded_keywords, keyword_groups, additional_messages, synonyms_expanded = expand_keywords_with_ai(
-                keywords,
-                enabled=synonyms_enabled,
-                api_key=get_api_key(),
-            )
-            synonym_messages.extend(additional_messages)
+            if manual_groups_data is not None:
+                synonym_groups_manual = True
+                manual_map: Dict[str, List[str]] = {}
+                for entry in manual_groups_data:
+                    if not isinstance(entry, dict):
+                        continue
+                    original_value = str(entry.get("original", "")).strip()
+                    if not original_value or original_value not in keywords:
+                        continue
+                    additional_raw = entry.get("additional", [])
+                    if not isinstance(additional_raw, list):
+                        additional_raw = []
+                    cleaned_values: List[str] = []
+                    seen_local: Set[str] = set()
+                    for candidate in additional_raw:
+                        text = str(candidate).strip()
+                        if not text:
+                            continue
+                        lowered_candidate = text.lower()
+                        if lowered_candidate in seen_local:
+                            continue
+                        seen_local.add(lowered_candidate)
+                        cleaned_values.append(text)
+                    existing = manual_map.setdefault(original_value, [])
+                    existing.extend(cleaned_values)
 
-            if synonyms_enabled:
-                if synonyms_expanded:
-                    synonym_status = "aktiv (mit zusätzlichen Begriffen)"
+                seen_lower: Set[str] = set()
+                expanded_keywords = []
+                keyword_groups = []
+                synonyms_expanded = False
+
+                for kw in keywords:
+                    expanded_keywords.append(kw)
+                    seen_lower.add(kw.lower())
+                    additional_clean: List[str] = []
+                    for candidate in manual_map.get(kw, []):
+                        text = str(candidate).strip()
+                        if not text:
+                            continue
+                        lowered = text.lower()
+                        if lowered in seen_lower:
+                            continue
+                        seen_lower.add(lowered)
+                        expanded_keywords.append(text)
+                        additional_clean.append(text)
+                    if additional_clean:
+                        synonyms_expanded = True
+                    keyword_groups.append({"original": kw, "additional": additional_clean})
+
+                if synonyms_enabled:
+                    if synonyms_expanded:
+                        synonym_status = "aktiv (manuelle Auswahl)"
+                        synonym_messages.append(
+                            {
+                                "category": "info",
+                                "text": "Synonyme wurden manuell ausgewählt.",
+                            }
+                        )
+                    else:
+                        synonym_status = "aktiv (manuelle Auswahl, nur Originalbegriffe)"
+                        synonym_messages.append(
+                            {
+                                "category": "info",
+                                "text": "Synonymerweiterung aktiv, es wurden keine zusätzlichen Begriffe ausgewählt.",
+                            }
+                        )
                 else:
-                    synonym_status = "aktiv (nur Originalbegriffe)"
+                    synonym_status = "deaktiviert"
             else:
-                synonym_status = "deaktiviert"
+                expanded_keywords, keyword_groups, additional_messages, synonyms_expanded = expand_keywords_with_ai(
+                    keywords,
+                    enabled=synonyms_enabled,
+                    api_key=get_api_key(),
+                )
+                synonym_messages.extend(additional_messages)
+
+                if synonyms_enabled:
+                    if synonyms_expanded:
+                        synonym_status = "aktiv (mit zusätzlichen Begriffen)"
+                    else:
+                        synonym_status = "aktiv (nur Originalbegriffe)"
+                else:
+                    synonym_status = "deaktiviert"
 
             job_id = uuid.uuid4().hex
             job = CrawlJob(
@@ -779,6 +907,7 @@ def index():
                 synonyms_enabled=synonyms_enabled,
                 synonyms_expanded=synonyms_expanded,
                 synonym_status=synonym_status,
+                synonyms_manual=synonym_groups_manual,
                 max_pages=max_pages,
                 concurrency=concurrency,
                 total_start_urls=len(selected_homepages),
@@ -807,6 +936,8 @@ def index():
         synonym_messages=synonym_messages,
         synonyms_expanded=synonyms_expanded,
         synonym_status=synonym_status,
+        synonym_groups_manual=synonym_groups_manual,
+        default_synonym_prompt=DEFAULT_SYNONYM_PROMPT,
         has_api_key=has_key,
         error=error,
         submitted=submitted,
@@ -949,6 +1080,7 @@ def save_search(job_id: str):
             "synonym_messages": list(job.synonym_messages),
             "synonyms_enabled": job.synonyms_enabled,
             "synonyms_expanded": job.synonyms_expanded,
+            "synonyms_manual": job.synonyms_manual,
             "synonym_status": job.synonym_status,
             "start_date": job.start_date.isoformat() if job.start_date else None,
             "end_date": job.end_date.isoformat() if job.end_date else None,
