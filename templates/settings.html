@@ -40,9 +40,9 @@
     </div>
 </nav>
 <main class="container py-4">
-    <h1 class="mb-4">API-Schlüssel verwalten</h1>
-    <p class="text-muted">Zur KI-gestützten Synonymerweiterung wird ein OpenAI-API-Schlüssel benötigt. Der Schlüssel wird nur
-        lokal gespeichert und nicht weitergegeben.</p>
+    <h1 class="mb-4">Einstellungen</h1>
+    <p class="text-muted">Hier verwalten Sie alle API-Schlüssel sowie Standardwerte für Synonyme, verwandte Keywords und den Crawl. Alle Daten
+        werden ausschließlich lokal gespeichert und in regelmäßigen Abständen automatisch gesichert.</p>
 
     {% if message %}
         <div class="alert alert-{{ message_category or 'info' }}" role="alert">{{ message }}</div>
@@ -50,6 +50,8 @@
 
     <div class="card mb-3">
         <div class="card-body">
+            <h2 class="h5">OpenAI-API-Schlüssel</h2>
+            <p class="text-muted">Erforderlich für Synonymerweiterung und Keyword-Bewertungen.</p>
             <p class="mb-3"><strong>Status:</strong> {{ 'Schlüssel gespeichert' if key_present else 'Kein Schlüssel hinterlegt' }}</p>
             <form method="post" class="row g-3">
                 <input type="hidden" name="form_id" value="api">
@@ -62,6 +64,26 @@
                     <button type="submit" name="action" value="save" class="btn btn-primary">Speichern</button>
                     <button type="submit" name="action" value="test" class="btn btn-outline-secondary">Verbindung prüfen</button>
                     <button type="submit" name="action" value="remove" class="btn btn-outline-danger" {% if not key_present %}disabled{% endif %}>Entfernen</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <div class="card mb-3">
+        <div class="card-body">
+            <h2 class="h5">Keyword-Planner-Schlüssel</h2>
+            <p class="text-muted">Wird für die Funktion „Verwandte &amp; semantische Keywords finden“ benötigt.</p>
+            <p class="mb-3"><strong>Status:</strong> {{ 'Schlüssel gespeichert' if keyword_planner_key_present else 'Kein Schlüssel hinterlegt' }}</p>
+            <form method="post" class="row g-3">
+                <input type="hidden" name="form_id" value="google-key">
+                <div class="col-12">
+                    <label for="google_api_key" class="form-label">Google Keyword Planner API-Key</label>
+                    <input type="password" class="form-control" id="google_api_key" name="google_api_key" placeholder="AIza..." autocomplete="off">
+                    <div class="form-text">Der Schlüssel wird nicht protokolliert und ausschließlich lokal gespeichert.</div>
+                </div>
+                <div class="col-12 d-flex flex-wrap gap-2">
+                    <button type="submit" name="action" value="save" class="btn btn-primary">Speichern</button>
+                    <button type="submit" name="action" value="remove" class="btn btn-outline-danger" {% if not keyword_planner_key_present %}disabled{% endif %}>Entfernen</button>
                 </div>
             </form>
         </div>
@@ -90,7 +112,7 @@
         </div>
     </div>
 
-    <div class="card mb-4">
+    <div class="card mb-3">
         <div class="card-body">
             <h2 class="h5">Synonym-Standardwerte</h2>
             <p class="text-muted">Diese Werte werden beim Öffnen des Synonym-Dialogs vorausgefüllt und können dort pro Abruf angepasst werden.</p>
@@ -99,16 +121,17 @@
                 <div class="col-12">
                     <label for="synonym_prompt" class="form-label">Standard-Prompt</label>
                     <textarea class="form-control" id="synonym_prompt" name="synonym_prompt" rows="5" required>{{ synonym_defaults.prompt }}</textarea>
-                    <div class="form-text">Wird dem Modell als Systemprompt übergeben. Platzhalter sind nicht erforderlich.</div>
+                    <div class="form-text">Wird dem Modell als Systemprompt übergeben.</div>
                 </div>
                 <div class="col-md-4 col-12">
                     <label for="synonym_model" class="form-label">Standard-Sprachmodell</label>
                     <input type="text" class="form-control" id="synonym_model" name="synonym_model" list="model-options" value="{{ synonym_defaults.model }}" required>
-                    <div class="form-text">Beliebiges Chat-Completions-Modell von OpenAI.</div>
+                    <div class="form-text">Z. B. gpt-4o-mini, gpt-4o oder gpt-4.1.</div>
                     <datalist id="model-options">
                         {% for option in available_models %}
                             <option value="{{ option }}"></option>
                         {% endfor %}
+                        <option value="llama-3.1-70b"></option>
                     </datalist>
                 </div>
                 <div class="col-md-4 col-12">
@@ -123,6 +146,39 @@
                 </div>
                 <div class="col-12">
                     <button type="submit" class="btn btn-primary">Standardwerte speichern</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <div class="card mb-4">
+        <div class="card-body">
+            <h2 class="h5">Keyword-Finder-Standardwerte</h2>
+            <p class="text-muted">Steuert die Verarbeitung der Keyword-Planner-Ergebnisse vor dem Hinzufügen verwandter Begriffe.</p>
+            <form method="post" class="row g-3">
+                <input type="hidden" name="form_id" value="keyword-finder-defaults">
+                <div class="col-12">
+                    <label for="finder_prompt" class="form-label">Standard-Prompt</label>
+                    <textarea class="form-control" id="finder_prompt" name="finder_prompt" rows="5" required>{{ keyword_finder_defaults.prompt }}</textarea>
+                    <div class="form-text">Beschreibt, wie die KI die Keyword-Planner-Ergebnisse gruppieren und bewerten soll.</div>
+                </div>
+                <div class="col-md-6 col-12">
+                    <label for="finder_model" class="form-label">Standard-Sprachmodell</label>
+                    <input type="text" class="form-control" id="finder_model" name="finder_model" list="model-options" value="{{ keyword_finder_defaults.model }}" required>
+                    <div class="form-text">Z. B. gpt-4o-mini, gpt-4o, gpt-4.1 oder kompatible Alternativen.</div>
+                </div>
+                <div class="col-md-3 col-12">
+                    <label for="finder_max_results" class="form-label">Max. Keywords</label>
+                    <input type="number" class="form-control" id="finder_max_results" name="finder_max_results" min="1" max="{{ keyword_finder_max_results }}" value="{{ keyword_finder_defaults.max_results }}" required>
+                    <div class="form-text">Höchstens {{ keyword_finder_max_results }} Vorschläge pro Anfrage.</div>
+                </div>
+                <div class="col-md-3 col-12">
+                    <label for="finder_temperature" class="form-label">Temperatur</label>
+                    <input type="number" step="0.1" min="0" max="2" class="form-control" id="finder_temperature" name="finder_temperature" value="{{ '%.2f'|format(keyword_finder_defaults.temperature|default(0.3)) }}" required>
+                    <div class="form-text">Steuert die Kreativität der Cluster-Beschreibungen.</div>
+                </div>
+                <div class="col-12">
+                    <button type="submit" class="btn btn-primary">Keyword-Finder-Standardwerte speichern</button>
                 </div>
             </form>
         </div>

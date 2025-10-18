@@ -38,16 +38,31 @@ SETTINGS_PATH = Path("settings.json")
 settings_lock = threading.Lock()
 SYNONYM_CACHE_PATH = Path("synonym_cache.json")
 synonym_cache_lock = threading.Lock()
+KEYWORD_FINDER_CACHE_PATH = Path("keyword_finder_cache.json")
+keyword_finder_cache_lock = threading.Lock()
 OPENAI_CHAT_COMPLETIONS_URL = "https://api.openai.com/v1/chat/completions"
 OPENAI_MODELS_URL = "https://api.openai.com/v1/models?limit=1"
 OPENAI_MODEL_NAME = "gpt-4o-mini"
 OPENAI_TIMEOUT = 20
 DEFAULT_SYNONYM_PROMPT = (
-    "Du bist ein Synonym-Experte für deutschsprachige Websuche und spezialisiert auf Synonyme, "
-    "die sich auf Webseiten von Schulen in Baden Württemberg finden. "
-    "Gib ausschließlich eine JSON-Liste mit gebräuchlichen Synonymen, nahen Begriffen und typischen Kurzformen des "
-    "folgenden Begriffs zurück. Keine Erklärungen, keine weiteren Wörter. Vermeide Homonyme und irrelevante Bedeutungen."
+    "Du bist ein Synonym-Experte für deutschsprachige Websuche und spezialisiert auf Synonyme, die sich auf Webseiten "
+    "von Schulen in Baden Württemberg finden. Denke dabei vor allem an Keywords, die so banal sind, dass man sie schnell "
+    "vergisst. Die aber häufig vorkommen. Gib ausschließlich eine JSON-Liste mit gebräuchlichen Synonymen, nahen Begriffen "
+    "und typischen Kurzformen des folgenden Begriffs zurück. Keine Erklärungen, keine weiteren Wörter. Vermeide Homonyme "
+    "und irrelevante Bedeutungen."
 )
+DEFAULT_KEYWORD_FINDER_PROMPT = (
+    "Du kombinierst Vorschläge des Google Keyword Planner mit zusätzlicher Analyse. Du erhältst ein JSON-Objekt mit "
+    "Keyword-Vorschlägen (einschließlich Suchvolumen, Wettbewerb und Relevanz). Gruppiere die Begriffe semantisch in "
+    "3–8 Themencluster, entferne irrelevante oder doppelte Begriffe und gib pro Cluster die drei bis fünf relevantesten "
+    "Begriffe zurück. Nutze kurze, aussagekräftige Cluster-Namen. Antworte ausschließlich im folgenden JSON-Format: "
+    "{\"clusters\": [{\"label\": \"<Cluster>\", \"keywords\": [{\"term\": \"<Begriff>\", \"search_volume\": <Zahl|null>, "
+    "\"competition\": \"<niedrig/mittel/hoch/null>\", \"relevance\": <Zahl|null>}]}]}}. Keine weiteren Texte."
+)
+DEFAULT_KEYWORD_FINDER_MAX_RESULTS = 150
+DEFAULT_KEYWORD_FINDER_TEMPERATURE = 0.3
+GOOGLE_KEYWORD_TIMEOUT = 20
+GOOGLE_KEYWORD_API_URL = "https://keywordsearch.googleapis.com/v1beta1/suggestKeywords"
 DEFAULT_KEYWORD_EVALUATION_PROMPT = (
     "Du bewertest deutsche Suchbegriffe für eine Websuche. "
     "Antworte ausschließlich mit einem JSON-Objekt mit den Schlüsseln "
@@ -64,10 +79,18 @@ AVAILABLE_OPENAI_MODELS = [
     "gpt-4.1",
     "o4-mini",
     "gpt-3.5-turbo",
+    "llama-3.1-70b",
 ]
 
 api_key_lock = threading.Lock()
 _api_key_value: Optional[str] = None
+google_api_key_lock = threading.Lock()
+_google_api_key_value: Optional[str] = None
+
+BACKUP_DIR = Path("backups")
+BACKUP_FILE = BACKUP_DIR / "auto_backup.json"
+BACKUP_INTERVAL_SECONDS = 300
+_backup_thread_started = False
 
 STAMMDATEN_PRIMARY_FIELDS = [
     {"key": "jahr", "label": "Jahr", "type": "numeric"},
@@ -124,6 +147,10 @@ LEGACY_STAMMDATEN_ALIASES = {
 
 class OpenAIIntegrationError(Exception):
     """Raised when the OpenAI integration cannot provide synonyms."""
+
+
+class KeywordPlannerError(Exception):
+    """Raised when keyword planner suggestions cannot be fetched."""
 
 
 def _default_synonym_settings() -> Dict[str, object]:
@@ -223,6 +250,72 @@ def update_synonym_defaults(values: Dict[str, object]) -> Dict[str, object]:
     return current["synonym_defaults"]
 
 
+def _default_keyword_finder_settings() -> Dict[str, object]:
+    return {
+        "prompt": DEFAULT_KEYWORD_FINDER_PROMPT,
+        "max_results": DEFAULT_KEYWORD_FINDER_MAX_RESULTS,
+        "temperature": DEFAULT_KEYWORD_FINDER_TEMPERATURE,
+        "model": OPENAI_MODEL_NAME,
+    }
+
+
+def get_keyword_finder_defaults() -> Dict[str, object]:
+    data = load_settings_data()
+    defaults = _default_keyword_finder_settings()
+    result = dict(defaults)
+    if isinstance(data, dict):
+        stored = data.get("keyword_finder_defaults")
+        if isinstance(stored, dict):
+            prompt = str(stored.get("prompt", "")).strip()
+            if prompt:
+                result["prompt"] = prompt
+            max_results = stored.get("max_results")
+            if isinstance(max_results, int):
+                result["max_results"] = max(1, min(max_results, DEFAULT_KEYWORD_FINDER_MAX_RESULTS))
+            temperature = stored.get("temperature")
+            try:
+                temp_value = float(temperature)
+            except (TypeError, ValueError):
+                temp_value = result["temperature"]
+            else:
+                temp_value = max(0.0, min(temp_value, 2.0))
+            result["temperature"] = temp_value
+            model_value = str(stored.get("model", "")).strip()
+            if model_value:
+                result["model"] = model_value
+    return result
+
+
+def update_keyword_finder_defaults(values: Dict[str, object]) -> Dict[str, object]:
+    current = load_settings_data()
+    defaults = _default_keyword_finder_settings()
+
+    prompt = str(values.get("prompt", "")).strip() or defaults["prompt"]
+    try:
+        max_results = int(values.get("max_results", defaults["max_results"]))
+    except (TypeError, ValueError):
+        max_results = defaults["max_results"]
+    max_results = max(1, min(max_results, DEFAULT_KEYWORD_FINDER_MAX_RESULTS))
+
+    try:
+        temperature = float(values.get("temperature", defaults["temperature"]))
+    except (TypeError, ValueError):
+        temperature = defaults["temperature"]
+    temperature = max(0.0, min(temperature, 2.0))
+
+    model = str(values.get("model", "")).strip() or defaults["model"]
+
+    current.setdefault("keyword_finder_defaults", {})
+    current["keyword_finder_defaults"] = {
+        "prompt": prompt,
+        "max_results": max_results,
+        "temperature": temperature,
+        "model": model,
+    }
+    save_settings_data(current)
+    return current["keyword_finder_defaults"]
+
+
 def _default_crawl_settings() -> Dict[str, int]:
     return {
         "max_pages": MAX_PAGES_DEFAULT,
@@ -307,6 +400,12 @@ def update_synonym_cache_entry(key: str, synonyms: List[str]) -> None:
         _write_synonym_cache_unlocked(cache)
 
 
+def replace_synonym_cache(data: Dict[str, object]) -> None:
+    with synonym_cache_lock:
+        payload = data if isinstance(data, dict) else {}
+        _write_synonym_cache_unlocked(payload)
+
+
 def get_synonyms_from_cache(key: str) -> Optional[List[str]]:
     cache = load_synonym_cache()
     entry = cache.get(key) if isinstance(cache, dict) else None
@@ -328,6 +427,75 @@ def synonym_cache_key(keyword: str, prompt: str, model: str, temperature: float)
         "prompt": prompt.strip(),
         "model": model.strip(),
         "temperature": round(float(temperature), 3),
+    }
+    return json.dumps(payload, ensure_ascii=False, sort_keys=True)
+
+
+def _read_keyword_finder_cache_unlocked() -> Dict[str, object]:
+    if not KEYWORD_FINDER_CACHE_PATH.exists():
+        return {}
+    try:
+        with KEYWORD_FINDER_CACHE_PATH.open("r", encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (json.JSONDecodeError, OSError):
+        return {}
+    if isinstance(data, dict):
+        return data
+    return {}
+
+
+def _write_keyword_finder_cache_unlocked(data: Dict[str, object]) -> None:
+    try:
+        with KEYWORD_FINDER_CACHE_PATH.open("w", encoding="utf-8") as handle:
+            json.dump(data, handle, ensure_ascii=False, indent=2)
+    except OSError:
+        pass
+
+
+def load_keyword_finder_cache() -> Dict[str, object]:
+    with keyword_finder_cache_lock:
+        return dict(_read_keyword_finder_cache_unlocked())
+
+
+def update_keyword_finder_cache_entry(key: str, payload: Dict[str, object]) -> None:
+    with keyword_finder_cache_lock:
+        cache = _read_keyword_finder_cache_unlocked()
+        cache[key] = {
+            "data": payload,
+            "updated_at": datetime.utcnow().isoformat() + "Z",
+        }
+        _write_keyword_finder_cache_unlocked(cache)
+
+
+def replace_keyword_finder_cache(data: Dict[str, object]) -> None:
+    with keyword_finder_cache_lock:
+        payload = data if isinstance(data, dict) else {}
+        _write_keyword_finder_cache_unlocked(payload)
+
+
+def get_keyword_finder_cache_entry(key: str) -> Optional[Dict[str, object]]:
+    cache = load_keyword_finder_cache()
+    entry = cache.get(key) if isinstance(cache, dict) else None
+    if isinstance(entry, dict):
+        data = entry.get("data")
+        if isinstance(data, dict):
+            return data
+    return None
+
+
+def keyword_finder_cache_key(
+    keyword: str,
+    prompt: str,
+    model: str,
+    temperature: float,
+    max_results: int,
+) -> str:
+    payload = {
+        "keyword": keyword.strip().lower(),
+        "prompt": prompt.strip(),
+        "model": model.strip(),
+        "temperature": round(float(temperature), 3),
+        "max_results": int(max_results),
     }
     return json.dumps(payload, ensure_ascii=False, sort_keys=True)
 
@@ -362,6 +530,38 @@ def get_api_key() -> Optional[str]:
 
 def has_api_key() -> bool:
     return get_api_key() is not None
+
+
+def set_keyword_planner_key(value: str) -> None:
+    sanitized = value.strip()
+    with google_api_key_lock:
+        global _google_api_key_value
+        _google_api_key_value = sanitized or None
+        if sanitized:
+            os.environ["GOOGLE_KEYWORD_PLANNER_KEY"] = sanitized
+        else:
+            os.environ.pop("GOOGLE_KEYWORD_PLANNER_KEY", None)
+
+
+def clear_keyword_planner_key() -> None:
+    with google_api_key_lock:
+        global _google_api_key_value
+        _google_api_key_value = None
+        os.environ.pop("GOOGLE_KEYWORD_PLANNER_KEY", None)
+
+
+def get_keyword_planner_key() -> Optional[str]:
+    with google_api_key_lock:
+        env_value = os.environ.get("GOOGLE_KEYWORD_PLANNER_KEY", "").strip()
+        if env_value:
+            global _google_api_key_value
+            _google_api_key_value = env_value
+            return env_value
+        return _google_api_key_value
+
+
+def has_keyword_planner_key() -> bool:
+    return get_keyword_planner_key() is not None
 
 
 def fetch_synonyms_from_openai(
@@ -481,6 +681,273 @@ def fetch_synonyms_from_openai(
             break
 
     return synonyms
+
+
+def fetch_keyword_planner_suggestions(
+    keyword: str,
+    api_key: str,
+    *,
+    max_results: int = DEFAULT_KEYWORD_FINDER_MAX_RESULTS,
+) -> List[Dict[str, object]]:
+    """Fetch keyword suggestions from the Google Keyword Planner."""
+
+    if not api_key:
+        raise KeywordPlannerError("Kein Keyword-Planner-Schlüssel hinterlegt. Bitte in den Einstellungen speichern.")
+
+    try:
+        max_value = int(max_results)
+    except (TypeError, ValueError):
+        max_value = DEFAULT_KEYWORD_FINDER_MAX_RESULTS
+    max_value = max(1, min(max_value, DEFAULT_KEYWORD_FINDER_MAX_RESULTS))
+
+    params = {"key": api_key}
+    payload = {
+        "query": keyword,
+        "languageCode": "de-DE",
+        "maxSuggestions": max_value,
+        "regionCode": "DE",
+    }
+
+    try:
+        response = requests.post(
+            GOOGLE_KEYWORD_API_URL,
+            params=params,
+            json=payload,
+            timeout=GOOGLE_KEYWORD_TIMEOUT,
+        )
+    except requests.RequestException as exc:
+        raise KeywordPlannerError("Keyword-Planner-Anfrage fehlgeschlagen (Netzwerkfehler).") from exc
+
+    if response.status_code >= 400:
+        raise KeywordPlannerError(
+            f"Keyword-Planner-Anfrage fehlgeschlagen (Status {response.status_code}). Bitte Schlüssel und Berechtigungen prüfen."
+        )
+
+    try:
+        data = response.json()
+    except ValueError as exc:
+        raise KeywordPlannerError("Keyword-Planner-Antwort konnte nicht gelesen werden.") from exc
+
+    suggestions_raw: List[Dict[str, object]] = []
+    if isinstance(data, dict):
+        for key in ("suggestions", "results", "keywordIdeas", "ideas", "items"):
+            values = data.get(key)
+            if isinstance(values, list):
+                for item in values:
+                    if isinstance(item, dict):
+                        suggestions_raw.append(item)
+        # Some APIs nest results deeper
+        if not suggestions_raw:
+            keyword_ideas = data.get("keyword_ideas")
+            if isinstance(keyword_ideas, list):
+                for item in keyword_ideas:
+                    if isinstance(item, dict):
+                        suggestions_raw.append(item)
+
+    if not suggestions_raw:
+        raise KeywordPlannerError("Keyword-Planner lieferte keine Vorschläge.")
+
+    suggestions: List[Dict[str, object]] = []
+    seen: Set[str] = set()
+    for item in suggestions_raw:
+        term = str(
+            item.get("keyword")
+            or item.get("text")
+            or item.get("term")
+            or item.get("phrase")
+            or ""
+        ).strip()
+        if not term:
+            continue
+        lowered = term.lower()
+        if lowered in seen:
+            continue
+        seen.add(lowered)
+        search_volume = item.get("searchVolume") or item.get("search_volume") or item.get("avgMonthlySearches")
+        competition = item.get("competition") or item.get("competitionIndex") or item.get("competition_index")
+        relevance = item.get("relevance") or item.get("relevanceScore") or item.get("relevance_score")
+        suggestions.append(
+            {
+                "term": term,
+                "search_volume": search_volume,
+                "competition": competition,
+                "relevance": relevance,
+            }
+        )
+        if len(suggestions) >= max_value:
+            break
+
+    if not suggestions:
+        raise KeywordPlannerError("Keyword-Planner lieferte keine verwertbaren Begriffe.")
+
+    return suggestions
+
+
+def _normalise_competition(value: object) -> Optional[str]:
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        if value <= 0:
+            return "niedrig"
+        if value < 0.5:
+            return "niedrig"
+        if value < 0.8:
+            return "mittel"
+        return "hoch"
+    text = str(value).strip().lower()
+    if not text:
+        return None
+    if text in {"low", "niedrig"}:
+        return "niedrig"
+    if text in {"medium", "mittel"}:
+        return "mittel"
+    if text in {"high", "hoch"}:
+        return "hoch"
+    return None
+
+
+def _build_fallback_clusters(suggestions: List[Dict[str, object]]) -> Dict[str, object]:
+    cleaned = []
+    for item in suggestions:
+        term = str(item.get("term", "")).strip()
+        if not term:
+            continue
+        cleaned.append(
+            {
+                "term": term,
+                "search_volume": item.get("search_volume"),
+                "competition": _normalise_competition(item.get("competition")),
+                "relevance": item.get("relevance"),
+            }
+        )
+    return {
+        "clusters": [
+            {
+                "label": "Weitere Vorschläge",
+                "keywords": cleaned,
+            }
+        ]
+    }
+
+
+def analyse_keyword_clusters_with_openai(
+    keyword: str,
+    suggestions: List[Dict[str, object]],
+    api_key: str,
+    *,
+    prompt: Optional[str] = None,
+    model: Optional[str] = None,
+    temperature: Optional[float] = None,
+) -> Dict[str, object]:
+    if not suggestions:
+        return {"clusters": []}
+
+    prompt_text = (prompt or "").strip() or DEFAULT_KEYWORD_FINDER_PROMPT
+    model_name = (model or "").strip() or OPENAI_MODEL_NAME
+    try:
+        temperature_value = float(temperature) if temperature is not None else DEFAULT_KEYWORD_FINDER_TEMPERATURE
+    except (TypeError, ValueError):
+        temperature_value = DEFAULT_KEYWORD_FINDER_TEMPERATURE
+
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+    user_payload = {
+        "keyword": keyword,
+        "suggestions": suggestions,
+    }
+    request_payload = {
+        "model": model_name,
+        "messages": [
+            {"role": "system", "content": prompt_text},
+            {"role": "user", "content": json.dumps(user_payload, ensure_ascii=False)},
+        ],
+        "temperature": temperature_value,
+        "max_tokens": 600,
+    }
+
+    try:
+        response = requests.post(
+            OPENAI_CHAT_COMPLETIONS_URL,
+            headers=headers,
+            json=request_payload,
+            timeout=OPENAI_TIMEOUT,
+        )
+    except requests.RequestException as exc:
+        raise OpenAIIntegrationError("LLM-Auswertung der Keyword-Vorschläge fehlgeschlagen (Netzwerkfehler).") from exc
+
+    if response.status_code >= 400:
+        raise OpenAIIntegrationError(
+            f"LLM-Auswertung der Keyword-Vorschläge fehlgeschlagen (Status {response.status_code})."
+        )
+
+    try:
+        data = response.json()
+    except ValueError as exc:
+        raise OpenAIIntegrationError("LLM-Antwort konnte nicht gelesen werden.") from exc
+
+    content = ""
+    choices = data.get("choices") if isinstance(data, dict) else None
+    if isinstance(choices, list) and choices:
+        message = choices[0].get("message") if isinstance(choices[0], dict) else None
+        if isinstance(message, dict):
+            content = message.get("content", "")
+
+    if not content:
+        raise OpenAIIntegrationError("LLM lieferte keine verwertbaren Daten.")
+
+    content = content.strip()
+    parsed: Optional[Dict[str, object]] = None
+    try:
+        parsed_obj = json.loads(content)
+    except json.JSONDecodeError:
+        start_idx = content.find("{")
+        end_idx = content.rfind("}")
+        if start_idx != -1 and end_idx != -1 and end_idx > start_idx:
+            try:
+                parsed_obj = json.loads(content[start_idx : end_idx + 1])
+            except json.JSONDecodeError as exc:
+                raise OpenAIIntegrationError("LLM-Antwort war nicht im JSON-Format.") from exc
+        else:
+            raise OpenAIIntegrationError("LLM-Antwort war nicht im JSON-Format.")
+    else:
+        parsed = parsed_obj if isinstance(parsed_obj, dict) else None
+
+    if parsed is None:
+        raise OpenAIIntegrationError("LLM-Antwort enthielt keine strukturierten Daten.")
+
+    clusters_raw = parsed.get("clusters") if isinstance(parsed, dict) else None
+    clusters: List[Dict[str, object]] = []
+    if isinstance(clusters_raw, list):
+        for cluster in clusters_raw:
+            if not isinstance(cluster, dict):
+                continue
+            label = str(cluster.get("label", "")).strip() or "Weitere Vorschläge"
+            keywords_raw = cluster.get("keywords")
+            keywords: List[Dict[str, object]] = []
+            if isinstance(keywords_raw, list):
+                for keyword_entry in keywords_raw:
+                    if not isinstance(keyword_entry, dict):
+                        continue
+                    term = str(keyword_entry.get("term", "")).strip()
+                    if not term:
+                        continue
+                    keywords.append(
+                        {
+                            "term": term,
+                            "search_volume": keyword_entry.get("search_volume"),
+                            "competition": _normalise_competition(keyword_entry.get("competition")),
+                            "relevance": keyword_entry.get("relevance"),
+                        }
+                    )
+            if keywords:
+                clusters.append({"label": label, "keywords": keywords})
+
+    if not clusters:
+        return _build_fallback_clusters(suggestions)
+
+    return {"clusters": clusters}
 
 
 def expand_keywords_with_ai(
@@ -766,6 +1233,124 @@ def generate_synonyms() -> ResponseReturnValue:
     )
 
 
+@app.post("/related-keywords")
+def generate_related_keywords() -> ResponseReturnValue:
+    payload = request.get_json(silent=True) or {}
+    keyword = str(payload.get("keyword", "")).strip()
+    if not keyword:
+        return jsonify({"error": "Bitte geben Sie ein Suchwort an."}), 400
+
+    defaults = get_keyword_finder_defaults()
+    prompt = str(payload.get("prompt", "")).strip() or defaults.get("prompt", DEFAULT_KEYWORD_FINDER_PROMPT)
+    model = str(payload.get("model", "")).strip() or defaults.get("model", OPENAI_MODEL_NAME)
+
+    try:
+        temperature = float(payload.get("temperature", defaults.get("temperature", DEFAULT_KEYWORD_FINDER_TEMPERATURE)))
+    except (TypeError, ValueError):
+        temperature = defaults.get("temperature", DEFAULT_KEYWORD_FINDER_TEMPERATURE)
+    temperature = max(0.0, min(temperature, 2.0))
+
+    try:
+        max_results = int(payload.get("max_results", defaults.get("max_results", DEFAULT_KEYWORD_FINDER_MAX_RESULTS)))
+    except (TypeError, ValueError):
+        max_results = defaults.get("max_results", DEFAULT_KEYWORD_FINDER_MAX_RESULTS)
+    max_results = max(1, min(max_results, DEFAULT_KEYWORD_FINDER_MAX_RESULTS))
+
+    google_key = get_keyword_planner_key()
+    if not google_key:
+        return jsonify({"error": "Kein Keyword-Planner-Schlüssel hinterlegt. Bitte in den Einstellungen speichern."}), 400
+
+    try:
+        suggestions = fetch_keyword_planner_suggestions(keyword, google_key, max_results=max_results)
+    except KeywordPlannerError as exc:
+        return jsonify({"error": str(exc)}), 502
+
+    cache_key = keyword_finder_cache_key(keyword, prompt, model, temperature, max_results)
+    cached_entry = get_keyword_finder_cache_entry(cache_key)
+    current_terms = [item.get("term", "").strip().lower() for item in suggestions]
+    messages: List[str] = []
+
+    if cached_entry and isinstance(cached_entry, dict):
+        cached_suggestions = cached_entry.get("suggestions")
+        if isinstance(cached_suggestions, list):
+            cached_terms = [
+                str(item.get("term", "")).strip().lower()
+                for item in cached_suggestions
+                if isinstance(item, dict)
+            ]
+            if cached_terms != current_terms:
+                cached_entry = None
+        else:
+            cached_entry = None
+
+    if cached_entry:
+        clusters = cached_entry.get("clusters") if isinstance(cached_entry.get("clusters"), list) else []
+        analysis = cached_entry.get("analysis") if isinstance(cached_entry.get("analysis"), str) else "cache"
+        return jsonify(
+            {
+                "keyword": keyword,
+                "clusters": clusters,
+                "suggestions": suggestions,
+                "analysis": analysis,
+                "cached": True,
+                "messages": messages,
+                "defaults": {
+                    "prompt": prompt,
+                    "model": model,
+                    "temperature": temperature,
+                    "max_results": max_results,
+                },
+            }
+        )
+
+    openai_key = get_api_key()
+    analysis_mode = "fallback"
+    if not openai_key:
+        messages.append("OpenAI-Schlüssel fehlt – Vorschläge werden ohne KI-Gruppierung angezeigt.")
+        clusters_payload = _build_fallback_clusters(suggestions)
+    else:
+        try:
+            clusters_payload = analyse_keyword_clusters_with_openai(
+                keyword,
+                suggestions,
+                openai_key,
+                prompt=prompt,
+                model=model,
+                temperature=temperature,
+            )
+        except OpenAIIntegrationError as exc:
+            messages.append(str(exc))
+            clusters_payload = _build_fallback_clusters(suggestions)
+        else:
+            analysis_mode = "llm"
+
+    clusters = clusters_payload.get("clusters", []) if isinstance(clusters_payload, dict) else []
+
+    cache_payload = {
+        "clusters": clusters,
+        "suggestions": suggestions,
+        "analysis": analysis_mode,
+    }
+    update_keyword_finder_cache_entry(cache_key, cache_payload)
+
+    return jsonify(
+        {
+            "keyword": keyword,
+            "clusters": clusters,
+            "suggestions": suggestions,
+            "analysis": analysis_mode,
+            "cached": False,
+            "messages": messages,
+            "defaults": {
+                "prompt": prompt,
+                "model": model,
+                "temperature": temperature,
+                "max_results": max_results,
+            },
+        }
+    )
+
+
 @app.post("/evaluate-keywords")
 def evaluate_keywords() -> ResponseReturnValue:
     api_key = get_api_key()
@@ -844,6 +1429,15 @@ def append_saved_search(entry: Dict[str, object]) -> None:
                 json.dump(data, handle, ensure_ascii=False, indent=2)
         except OSError:
             # If persisting fails we silently ignore to avoid breaking the crawl UI.
+            pass
+
+
+def replace_saved_searches(entries: List[Dict[str, object]]) -> None:
+    with saved_search_lock:
+        try:
+            with SAVED_SEARCHES_PATH.open("w", encoding="utf-8") as handle:
+                json.dump(entries, handle, ensure_ascii=False, indent=2)
+        except OSError:
             pass
 
 
@@ -1037,6 +1631,88 @@ def parse_stammdaten_excel(file_storage) -> List[Dict[str, object]]:
     return records
 
 
+def collect_backup_snapshot() -> Dict[str, object]:
+    return {
+        "timestamp": datetime.utcnow().isoformat() + "Z",
+        "settings": load_settings_data(),
+        "stammdaten": load_stammdaten(),
+        "saved_searches": load_saved_searches(),
+        "synonym_cache": load_synonym_cache(),
+        "keyword_finder_cache": load_keyword_finder_cache(),
+    }
+
+
+def perform_backup() -> None:
+    snapshot = collect_backup_snapshot()
+    BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+    try:
+        with BACKUP_FILE.open("w", encoding="utf-8") as handle:
+            json.dump(snapshot, handle, ensure_ascii=False, indent=2)
+    except OSError:
+        pass
+
+
+def restore_from_backup() -> None:
+    if not BACKUP_FILE.exists():
+        return
+    try:
+        with BACKUP_FILE.open("r", encoding="utf-8") as handle:
+            snapshot = json.load(handle)
+    except (json.JSONDecodeError, OSError):
+        return
+    if not isinstance(snapshot, dict):
+        return
+
+    settings_data = snapshot.get("settings")
+    if settings_data and (not SETTINGS_PATH.exists() or SETTINGS_PATH.stat().st_size == 0):
+        if isinstance(settings_data, dict):
+            save_settings_data(settings_data)
+
+    stammdaten_data = snapshot.get("stammdaten")
+    if stammdaten_data and (not STAMMDATEN_PATH.exists() or STAMMDATEN_PATH.stat().st_size == 0):
+        if isinstance(stammdaten_data, list):
+            save_stammdaten(stammdaten_data)
+
+    saved_searches_data = snapshot.get("saved_searches")
+    if saved_searches_data and (not SAVED_SEARCHES_PATH.exists() or SAVED_SEARCHES_PATH.stat().st_size == 0):
+        if isinstance(saved_searches_data, list):
+            replace_saved_searches(saved_searches_data)
+
+    synonym_cache_data = snapshot.get("synonym_cache")
+    if synonym_cache_data and (not SYNONYM_CACHE_PATH.exists() or SYNONYM_CACHE_PATH.stat().st_size == 0):
+        if isinstance(synonym_cache_data, dict):
+            replace_synonym_cache(synonym_cache_data)
+
+    keyword_finder_cache_data = snapshot.get("keyword_finder_cache")
+    if keyword_finder_cache_data and (
+        not KEYWORD_FINDER_CACHE_PATH.exists() or KEYWORD_FINDER_CACHE_PATH.stat().st_size == 0
+    ):
+        if isinstance(keyword_finder_cache_data, dict):
+            replace_keyword_finder_cache(keyword_finder_cache_data)
+
+
+def _backup_worker() -> None:
+    while True:
+        try:
+            perform_backup()
+        except Exception:
+            pass
+        time.sleep(BACKUP_INTERVAL_SECONDS)
+
+
+def ensure_backup_thread() -> None:
+    global _backup_thread_started
+    if _backup_thread_started:
+        return
+    _backup_thread_started = True
+    thread = threading.Thread(target=_backup_worker, daemon=True)
+    thread.start()
+
+
+restore_from_backup()
+ensure_backup_thread()
+
+
 @dataclass
 class CrawlJob:
     """Container for the state of a running crawl job."""
@@ -1049,7 +1725,7 @@ class CrawlJob:
     total_start_urls: int
     original_keywords: List[str] = field(default_factory=list)
     expanded_keywords: List[str] = field(default_factory=list)
-    keyword_groups: List[Dict[str, List[str]]] = field(default_factory=list)
+    keyword_groups: List[Dict[str, object]] = field(default_factory=list)
     keyword_evaluations: List[Dict[str, object]] = field(default_factory=list)
     synonym_messages: List[Dict[str, str]] = field(default_factory=list)
     synonyms_enabled: bool = True
@@ -1104,6 +1780,19 @@ class CrawlJob:
                     {
                         "original": group.get("original"),
                         "additional": list(group.get("additional", [])),
+                        "synonyms": list(group.get("synonyms", [])),
+                        "related": list(group.get("related", [])),
+                        "related_details": [
+                            {
+                                "term": detail.get("term"),
+                                "cluster": detail.get("cluster"),
+                                "search_volume": detail.get("search_volume"),
+                                "competition": detail.get("competition"),
+                                "relevance": detail.get("relevance"),
+                            }
+                            for detail in group.get("related_details", [])
+                            if isinstance(detail, dict)
+                        ],
                     }
                     for group in self.keyword_groups
                 ],
@@ -1262,7 +1951,9 @@ def index():
     job_id: Optional[str] = None
     submitted = False
     has_key = has_api_key()
+    has_planner_key = has_keyword_planner_key()
     synonym_defaults = get_synonym_defaults()
+    keyword_finder_defaults = get_keyword_finder_defaults()
 
     if request.method == "POST":
         submitted = True
@@ -1357,29 +2048,72 @@ def index():
 
             if manual_groups_data is not None:
                 synonym_groups_manual = True
-                manual_map: Dict[str, List[str]] = {}
+                manual_map: Dict[str, Dict[str, object]] = {}
                 for entry in manual_groups_data:
                     if not isinstance(entry, dict):
                         continue
                     original_value = str(entry.get("original", "")).strip()
                     if not original_value or original_value not in keywords:
                         continue
-                    additional_raw = entry.get("additional", [])
-                    if not isinstance(additional_raw, list):
-                        additional_raw = []
-                    cleaned_values: List[str] = []
-                    seen_local: Set[str] = set()
-                    for candidate in additional_raw:
-                        text = str(candidate).strip()
-                        if not text:
-                            continue
-                        lowered_candidate = text.lower()
-                        if lowered_candidate in seen_local:
-                            continue
-                        seen_local.add(lowered_candidate)
-                        cleaned_values.append(text)
-                    existing = manual_map.setdefault(original_value, [])
-                    existing.extend(cleaned_values)
+                    store = manual_map.setdefault(
+                        original_value,
+                        {
+                            "synonyms": [],
+                            "related": [],
+                            "related_details": [],
+                            "_synonym_set": set(),
+                            "_related_set": set(),
+                            "_related_detail_map": {},
+                        },
+                    )
+
+                    synonyms_raw = entry.get("synonyms")
+                    if not isinstance(synonyms_raw, list):
+                        synonyms_raw = entry.get("additional", [])
+                    if isinstance(synonyms_raw, list):
+                        for candidate in synonyms_raw:
+                            text = str(candidate).strip()
+                            if not text:
+                                continue
+                            lowered_candidate = text.lower()
+                            synonym_set: Set[str] = store["_synonym_set"]  # type: ignore[assignment]
+                            related_set: Set[str] = store["_related_set"]  # type: ignore[assignment]
+                            if lowered_candidate in synonym_set or lowered_candidate in related_set:
+                                continue
+                            synonym_set.add(lowered_candidate)
+                            store["synonyms"].append(text)
+
+                    related_raw = entry.get("related")
+                    if isinstance(related_raw, list):
+                        for candidate in related_raw:
+                            text = str(candidate).strip()
+                            if not text:
+                                continue
+                            lowered_candidate = text.lower()
+                            synonym_set = store["_synonym_set"]  # type: ignore[assignment]
+                            related_set = store["_related_set"]  # type: ignore[assignment]
+                            if lowered_candidate in related_set or lowered_candidate in synonym_set:
+                                continue
+                            related_set.add(lowered_candidate)
+                            store["related"].append(text)
+
+                    details_raw = entry.get("related_details")
+                    if isinstance(details_raw, list):
+                        detail_map: Dict[str, Dict[str, object]] = store["_related_detail_map"]  # type: ignore[assignment]
+                        for item in details_raw:
+                            if not isinstance(item, dict):
+                                continue
+                            term_text = str(item.get("term", "")).strip()
+                            if not term_text:
+                                continue
+                            lowered_term = term_text.lower()
+                            detail_map[lowered_term] = {
+                                "term": term_text,
+                                "cluster": str(item.get("cluster", "")).strip() or None,
+                                "search_volume": item.get("search_volume"),
+                                "competition": (str(item.get("competition", "")).strip() or None),
+                                "relevance": item.get("relevance"),
+                            }
 
                 seen_lower: Set[str] = set()
                 expanded_keywords = []
@@ -1389,27 +2123,79 @@ def index():
                 for kw in keywords:
                     expanded_keywords.append(kw)
                     seen_lower.add(kw.lower())
+                    store = manual_map.get(kw, {})
+                    synonyms_list = [str(value).strip() for value in store.get("synonyms", []) if str(value).strip()]
+                    related_list = [str(value).strip() for value in store.get("related", []) if str(value).strip()]
+                    detail_map = store.get("_related_detail_map", {})
+                    if not isinstance(detail_map, dict):
+                        detail_map = {}
+
                     additional_clean: List[str] = []
-                    for candidate in manual_map.get(kw, []):
-                        text = str(candidate).strip()
-                        if not text:
-                            continue
-                        lowered = text.lower()
+                    synonyms_clean: List[str] = []
+                    related_clean: List[str] = []
+
+                    for candidate in synonyms_list:
+                        lowered = candidate.lower()
                         if lowered in seen_lower:
                             continue
                         seen_lower.add(lowered)
-                        expanded_keywords.append(text)
-                        additional_clean.append(text)
+                        expanded_keywords.append(candidate)
+                        additional_clean.append(candidate)
+                        synonyms_clean.append(candidate)
+
+                    for candidate in related_list:
+                        lowered = candidate.lower()
+                        if lowered in seen_lower:
+                            continue
+                        seen_lower.add(lowered)
+                        expanded_keywords.append(candidate)
+                        additional_clean.append(candidate)
+                        related_clean.append(candidate)
+
+                    related_details: List[Dict[str, object]] = []
+                    for candidate in related_clean:
+                        lowered = candidate.lower()
+                        detail_entry = detail_map.get(lowered)
+                        if isinstance(detail_entry, dict):
+                            related_details.append(
+                                {
+                                    "term": candidate,
+                                    "cluster": detail_entry.get("cluster"),
+                                    "search_volume": detail_entry.get("search_volume"),
+                                    "competition": detail_entry.get("competition"),
+                                    "relevance": detail_entry.get("relevance"),
+                                }
+                            )
+                        else:
+                            related_details.append(
+                                {
+                                    "term": candidate,
+                                    "cluster": None,
+                                    "search_volume": None,
+                                    "competition": None,
+                                    "relevance": None,
+                                }
+                            )
+
                     if additional_clean:
                         synonyms_expanded = True
-                    keyword_groups.append({"original": kw, "additional": additional_clean})
+
+                    keyword_groups.append(
+                        {
+                            "original": kw,
+                            "additional": additional_clean,
+                            "synonyms": synonyms_clean,
+                            "related": related_clean,
+                            "related_details": related_details,
+                        }
+                    )
 
                 if synonyms_expanded:
-                    synonym_status = "Synonymerweiterung aktiv (manuelle Auswahl)"
+                    synonym_status = "Zusätzliche Begriffe aktiv (manuelle Auswahl)"
                     synonym_messages.append(
                         {
                             "category": "info",
-                            "text": "Synonyme wurden manuell ausgewählt.",
+                            "text": "Synonyme und verwandte Keywords wurden manuell ausgewählt.",
                         }
                     )
                 else:
@@ -1422,7 +2208,16 @@ def index():
                     )
             else:
                 expanded_keywords = list(keywords)
-                keyword_groups = [{"original": kw, "additional": []} for kw in keywords]
+                keyword_groups = [
+                    {
+                        "original": kw,
+                        "additional": [],
+                        "synonyms": [],
+                        "related": [],
+                        "related_details": [],
+                    }
+                    for kw in keywords
+                ]
                 synonyms_expanded = False
                 synonym_status = "Synonymerweiterung bereit (keine Auswahl)"
                 synonym_messages.append(
@@ -1499,6 +2294,19 @@ def index():
                     {
                         "original": group.get("original"),
                         "additional": list(group.get("additional", [])),
+                        "synonyms": list(group.get("synonyms", [])),
+                        "related": list(group.get("related", [])),
+                        "related_details": [
+                            {
+                                "term": detail.get("term"),
+                                "cluster": detail.get("cluster"),
+                                "search_volume": detail.get("search_volume"),
+                                "competition": detail.get("competition"),
+                                "relevance": detail.get("relevance"),
+                            }
+                            for detail in group.get("related_details", [])
+                            if isinstance(detail, dict)
+                        ],
                     }
                     for group in keyword_groups
                 ],
@@ -1550,8 +2358,10 @@ def index():
         keyword_evaluations=keyword_evaluations,
         default_synonym_prompt=synonym_defaults.get("prompt", DEFAULT_SYNONYM_PROMPT),
         synonym_defaults=synonym_defaults,
+        keyword_finder_defaults=keyword_finder_defaults,
         available_models=AVAILABLE_OPENAI_MODELS,
         has_api_key=has_key,
+        has_keyword_planner_key=has_planner_key,
         error=error,
         submitted=submitted,
         job_id=job_id,
@@ -1599,7 +2409,9 @@ def settings():
     message: Optional[str] = None
     message_category: Optional[str] = None
     key_present = has_api_key()
+    planner_key_present = has_keyword_planner_key()
     synonym_defaults = get_synonym_defaults()
+    keyword_finder_defaults = get_keyword_finder_defaults()
     crawl_defaults = get_crawl_defaults()
 
     if request.method == "POST":
@@ -1623,6 +2435,37 @@ def settings():
             crawl_defaults = update_crawl_defaults(values)
             message = "Die Standardwerte für den Crawl wurden gespeichert."
             message_category = "success"
+        elif form_id == "keyword-finder-defaults":
+            values = {
+                "prompt": request.form.get("finder_prompt", ""),
+                "max_results": request.form.get("finder_max_results"),
+                "temperature": request.form.get("finder_temperature"),
+                "model": request.form.get("finder_model", ""),
+            }
+            keyword_finder_defaults = update_keyword_finder_defaults(values)
+            message = "Die Standardwerte für den Keyword-Finder wurden gespeichert."
+            message_category = "success"
+        elif form_id == "google-key":
+            action = request.form.get("action", "save")
+            if action == "remove":
+                if planner_key_present:
+                    clear_keyword_planner_key()
+                    planner_key_present = False
+                    message = "Der Keyword-Planner-Schlüssel wurde entfernt."
+                    message_category = "success"
+                else:
+                    message = "Es ist kein Keyword-Planner-Schlüssel hinterlegt."
+                    message_category = "info"
+            else:
+                key_value = request.form.get("google_api_key", "").strip()
+                if not key_value:
+                    message = "Bitte geben Sie einen gültigen Keyword-Planner-Schlüssel ein."
+                    message_category = "danger"
+                else:
+                    set_keyword_planner_key(key_value)
+                    planner_key_present = True
+                    message = "Der Keyword-Planner-Schlüssel wurde gespeichert."
+                    message_category = "success"
         else:
             action = request.form.get("action", "save")
             if action == "remove":
@@ -1666,6 +2509,8 @@ def settings():
                     message_category = "success"
 
     key_present = has_api_key()
+    planner_key_present = has_keyword_planner_key()
+    keyword_finder_defaults = get_keyword_finder_defaults()
     crawl_defaults = get_crawl_defaults()
 
     return render_template(
@@ -1673,11 +2518,14 @@ def settings():
         message=message,
         message_category=message_category,
         key_present=key_present,
+        keyword_planner_key_present=planner_key_present,
         synonym_defaults=synonym_defaults,
         available_models=AVAILABLE_OPENAI_MODELS,
         crawl_defaults=crawl_defaults,
         max_concurrency=MAX_CONCURRENCY,
         max_max_pages=MAX_MAX_PAGES,
+        keyword_finder_defaults=keyword_finder_defaults,
+        keyword_finder_max_results=DEFAULT_KEYWORD_FINDER_MAX_RESULTS,
         active_page="settings",
     )
 
@@ -1718,6 +2566,19 @@ def save_search(job_id: str):
                 {
                     "original": group.get("original"),
                     "additional": list(group.get("additional", [])),
+                    "synonyms": list(group.get("synonyms", [])),
+                    "related": list(group.get("related", [])),
+                    "related_details": [
+                        {
+                            "term": detail.get("term"),
+                            "cluster": detail.get("cluster"),
+                            "search_volume": detail.get("search_volume"),
+                            "competition": detail.get("competition"),
+                            "relevance": detail.get("relevance"),
+                        }
+                        for detail in group.get("related_details", [])
+                        if isinstance(detail, dict)
+                    ],
                 }
                 for group in job.keyword_groups
             ],

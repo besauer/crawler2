@@ -287,10 +287,40 @@
                     {% for group in keyword_groups %}
                         <li class="list-group-item">
                             <strong>{{ group.original }}</strong>
-                            {% if group.additional %}
-                                <span class="badge bg-primary ms-2">+{{ group.additional|length }}</span>
-                                <div class="small text-muted mt-1">Zusätzliche Begriffe: {{ group.additional|join(', ') }}</div>
-                            {% else %}
+                            {% set synonyms = (group.synonyms or []) | list %}
+                            {% set related = (group.related or []) | list %}
+                            {% set additional = (group.additional or []) | list %}
+                            {% if synonyms|length == 0 and related|length == 0 and additional|length > 0 %}
+                                {% set synonyms = additional %}
+                            {% endif %}
+                            {% set details = (group.related_details or []) | list %}
+                            {% if synonyms %}
+                                <span class="badge bg-secondary ms-2">{{ synonyms|length }} Synonyme</span>
+                            {% endif %}
+                            {% if related %}
+                                <span class="badge bg-success ms-2">{{ related|length }} Verwandte</span>
+                            {% endif %}
+                            {% if synonyms %}
+                                <div class="small text-muted mt-1"><span class="fw-semibold">Synonyme:</span> {{ synonyms|join(', ') }}</div>
+                            {% endif %}
+                            {% if related %}
+                                <div class="small text-muted mt-1">
+                                    <span class="fw-semibold d-block">Verwandte Begriffe:</span>
+                                    <ul class="list-unstyled ms-3 mb-0">
+                                        {% for term in related %}
+                                            {% set matches = details | selectattr('term', 'equalto', term) | list %}
+                                            {% set info = matches[0] if matches else none %}
+                                            {% set meta = [] %}
+                                            {% if info and info.cluster %}{% set meta = meta + ['Cluster: ' ~ info.cluster] %}{% endif %}
+                                            {% if info and info.search_volume is not none %}{% set meta = meta + ['Suchvolumen: ' ~ info.search_volume] %}{% endif %}
+                                            {% if info and info.competition %}{% set meta = meta + ['Wettbewerb: ' ~ info.competition] %}{% endif %}
+                                            {% if info and info.relevance is not none %}{% set meta = meta + ['Relevanz: ' ~ info.relevance] %}{% endif %}
+                                            <li>{{ term }}{% if meta %} <span class="text-muted">({{ meta|join(' • ') }})</span>{% endif %}</li>
+                                        {% endfor %}
+                                    </ul>
+                                </div>
+                            {% endif %}
+                            {% if not synonyms and not related %}
                                 <div class="small text-muted mt-1">Keine zusätzlichen Begriffe ermittelt.</div>
                             {% endif %}
                         </li>
@@ -413,13 +443,68 @@
     </div>
 </div>
 
+<div class="modal fade" id="keywordFinderModal" tabindex="-1" aria-labelledby="keywordFinderModalLabel" aria-hidden="true">
+    <div class="modal-dialog modal-xl modal-dialog-scrollable">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title" id="keywordFinderModalLabel">Verwandte &amp; semantische Keywords</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Schließen"></button>
+            </div>
+            <div class="modal-body">
+                <p class="mb-1">Ausgangsbegriff: <strong id="finder-modal-keyword">–</strong></p>
+                <p class="text-muted small mb-3">Die Suche kombiniert Ergebnisse des Google Keyword Planner mit einer
+                    KI-Auswertung. Sie können Prompt, Modell und Parameter vor jedem Abruf anpassen.</p>
+                <div class="mb-3">
+                    <label for="finder-modal-prompt" class="form-label">Prompt für die Analyse</label>
+                    <textarea class="form-control" id="finder-modal-prompt" rows="5"></textarea>
+                    <div class="form-text">Der Prompt wird pro Abruf an das Sprachmodell übergeben. Strg+Enter bzw. Cmd+Enter
+                        startet ebenfalls die Suche.</div>
+                </div>
+                <div class="row g-3">
+                    <div class="col-md-4 col-12">
+                        <label for="finder-modal-model" class="form-label">Sprachmodell</label>
+                        <input type="text" class="form-control" id="finder-modal-model" list="modal-model-options">
+                    </div>
+                    <div class="col-md-4 col-12">
+                        <label for="finder-modal-max" class="form-label">Max. Anzahl Keywords</label>
+                        <input type="number" class="form-control" id="finder-modal-max" min="1" max="150">
+                    </div>
+                    <div class="col-md-4 col-12">
+                        <label for="finder-modal-temperature" class="form-label">Temperatur</label>
+                        <input type="number" class="form-control" id="finder-modal-temperature" min="0" max="2" step="0.1">
+                    </div>
+                </div>
+                <div id="finder-modal-warning" class="alert alert-warning d-none mt-3" role="alert"></div>
+                <div class="d-flex align-items-center justify-content-between flex-wrap gap-2 mt-3">
+                    <div class="btn-group btn-group-sm" role="group">
+                        <button type="button" class="btn btn-outline-secondary" id="finder-modal-select-all">Alle auswählen</button>
+                        <button type="button" class="btn btn-outline-secondary" id="finder-modal-select-none">Keine</button>
+                    </div>
+                    <input type="search" class="form-control form-control-sm" id="finder-modal-filter"
+                           placeholder="Vorschläge filtern" style="max-width: 260px;">
+                </div>
+                <div id="finder-modal-status" class="small text-muted mt-2"></div>
+                <div id="finder-modal-messages" class="mt-2"></div>
+                <div id="finder-modal-results" class="mt-3"></div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Abbrechen</button>
+                <button type="button" class="btn btn-outline-secondary" id="finder-modal-start">Suche starten</button>
+                <button type="button" class="btn btn-primary" id="finder-modal-apply" disabled>Hinzufügen</button>
+            </div>
+        </div>
+    </div>
+</div>
+
 <script>
     window.SYNONYM_DEFAULTS = {{ synonym_defaults|tojson }};
+    window.KEYWORD_FINDER_DEFAULTS = {{ keyword_finder_defaults|tojson }};
     window.AVAILABLE_MODELS = {{ available_models|tojson }};
     window.INITIAL_KEYWORD_GROUPS = {{ keyword_groups|tojson }};
     window.INITIAL_KEYWORD_EVALUATIONS = {{ keyword_evaluations|tojson }};
     window.INITIAL_KEYWORDS_TEXT = {{ keywords_input|tojson }};
     window.SYNONYM_GROUPS_MANUAL = 'true';
+    window.HAS_KEYWORD_PLANNER_KEY = {{ 'true' if has_keyword_planner_key else 'false' }};
 </script>
 
 <script>
@@ -453,7 +538,24 @@
         const modalRefresh = document.getElementById('synonym-modal-refresh');
         const modalApply = document.getElementById('synonym-modal-apply');
 
+        const finderModalElement = document.getElementById('keywordFinderModal');
+        const finderModalKeyword = document.getElementById('finder-modal-keyword');
+        const finderModalPrompt = document.getElementById('finder-modal-prompt');
+        const finderModalModel = document.getElementById('finder-modal-model');
+        const finderModalMax = document.getElementById('finder-modal-max');
+        const finderModalTemperature = document.getElementById('finder-modal-temperature');
+        const finderModalWarning = document.getElementById('finder-modal-warning');
+        const finderModalStatus = document.getElementById('finder-modal-status');
+        const finderModalMessages = document.getElementById('finder-modal-messages');
+        const finderModalResults = document.getElementById('finder-modal-results');
+        const finderModalFilter = document.getElementById('finder-modal-filter');
+        const finderModalSelectAll = document.getElementById('finder-modal-select-all');
+        const finderModalSelectNone = document.getElementById('finder-modal-select-none');
+        const finderModalStart = document.getElementById('finder-modal-start');
+        const finderModalApply = document.getElementById('finder-modal-apply');
+
         const synonymDefaults = window.SYNONYM_DEFAULTS || {};
+        const keywordFinderDefaults = window.KEYWORD_FINDER_DEFAULTS || {};
         const initialGroups = Array.isArray(window.INITIAL_KEYWORD_GROUPS) ? window.INITIAL_KEYWORD_GROUPS : [];
         const initialEvaluations = Array.isArray(window.INITIAL_KEYWORD_EVALUATIONS) ? window.INITIAL_KEYWORD_EVALUATIONS : [];
         const initialText = typeof window.INITIAL_KEYWORDS_TEXT === 'string' ? window.INITIAL_KEYWORDS_TEXT : '';
@@ -463,9 +565,21 @@
         const defaultMax = Number.isInteger(synonymDefaults.max_results) ? synonymDefaults.max_results : 50;
         const defaultTemperature = typeof synonymDefaults.temperature === 'number' ? synonymDefaults.temperature : 0.2;
 
+        const defaultFinderPrompt = typeof keywordFinderDefaults.prompt === 'string' ? keywordFinderDefaults.prompt : '';
+        const defaultFinderModel = typeof keywordFinderDefaults.model === 'string' ? keywordFinderDefaults.model : '';
+        const defaultFinderMax = Number.isInteger(keywordFinderDefaults.max_results)
+            ? keywordFinderDefaults.max_results
+            : 150;
+        const defaultFinderTemperature = typeof keywordFinderDefaults.temperature === 'number'
+            ? keywordFinderDefaults.temperature
+            : 0.3;
+
+        const hasKeywordPlannerKey = String(window.HAS_KEYWORD_PLANNER_KEY || '').toLowerCase() === 'true';
+
         const evaluationButtonLabel = evaluationButton ? evaluationButton.textContent : '';
 
         let modalInstance = null;
+        let finderModalInstance = null;
 
         function ensureModalInstance() {
             if (!modalElement) {
@@ -485,6 +599,24 @@
             return null;
         }
 
+        function ensureFinderModalInstance() {
+            if (!finderModalElement) {
+                return null;
+            }
+            if (finderModalInstance && typeof finderModalInstance.show === 'function') {
+                return finderModalInstance;
+            }
+            if (typeof bootstrap !== 'undefined' && bootstrap && typeof bootstrap.Modal === 'function') {
+                if (typeof bootstrap.Modal.getOrCreateInstance === 'function') {
+                    finderModalInstance = bootstrap.Modal.getOrCreateInstance(finderModalElement);
+                } else {
+                    finderModalInstance = new bootstrap.Modal(finderModalElement);
+                }
+                return finderModalInstance;
+            }
+            return null;
+        }
+
         const state = {
             entries: [],
             entryMap: new Map(),
@@ -496,6 +628,16 @@
                 selected: new Set(),
                 loading: false,
                 cached: false,
+            },
+            finder: {
+                context: null,
+                clusters: [],
+                items: new Map(),
+                selected: new Set(),
+                loading: false,
+                cached: false,
+                messages: [],
+                analysis: null,
             },
         };
 
@@ -559,6 +701,22 @@
                     options && Number.isFinite(options.lastTemperature)
                         ? options.lastTemperature
                         : defaultTemperature,
+                finderPrompt:
+                    options && typeof options.finderPrompt === 'string' && options.finderPrompt.trim()
+                        ? options.finderPrompt
+                        : defaultFinderPrompt,
+                finderModel:
+                    options && typeof options.finderModel === 'string' && options.finderModel.trim()
+                        ? options.finderModel
+                        : defaultFinderModel,
+                finderMaxResults:
+                    options && Number.isFinite(options.finderMaxResults)
+                        ? options.finderMaxResults
+                        : defaultFinderMax,
+                finderTemperature:
+                    options && Number.isFinite(options.finderTemperature)
+                        ? options.finderTemperature
+                        : defaultFinderTemperature,
             };
         }
 
@@ -585,8 +743,23 @@
             if (options && Array.isArray(options.synonyms)) {
                 addSynonyms(normalized, options.synonyms, { silent: true });
             }
+            if (options && Array.isArray(options.related)) {
+                addSynonyms(normalized, options.related, { silent: true, kind: 'related' });
+            }
             if (options && options.evaluation) {
                 entry.evaluation = options.evaluation;
+            }
+            if (options && typeof options.finderPrompt === 'string') {
+                entry.finderPrompt = options.finderPrompt;
+            }
+            if (options && typeof options.finderModel === 'string') {
+                entry.finderModel = options.finderModel;
+            }
+            if (options && Number.isFinite(options.finderMaxResults)) {
+                entry.finderMaxResults = options.finderMaxResults;
+            }
+            if (options && Number.isFinite(options.finderTemperature)) {
+                entry.finderTemperature = options.finderTemperature;
             }
             return true;
         }
@@ -601,7 +774,16 @@
             state.entries = state.entries.filter(item => item !== entry);
             state.usedTerms.delete(key);
             entry.synonyms.forEach(value => {
-                state.usedTerms.delete(lower(value));
+                let termValue = '';
+                if (typeof value === 'string') {
+                    termValue = value;
+                } else if (value && typeof value === 'object') {
+                    termValue = value.value || value.term || value.keyword || '';
+                }
+                const normalized = normalizeTerm(termValue);
+                if (normalized) {
+                    state.usedTerms.delete(lower(normalized));
+                }
             });
             return true;
         }
@@ -609,26 +791,48 @@
         function addSynonyms(parentKeyword, synonyms, options) {
             const entry = getEntry(parentKeyword);
             if (!entry) {
-                return [];
+                return;
             }
             const values = Array.isArray(synonyms) ? synonyms : [synonyms];
+            const kind = options && typeof options.kind === 'string' ? options.kind : 'synonym';
             const added = [];
-            values.forEach(value => {
-                const normalized = normalizeTerm(value);
-                if (!normalized) {
+            values.forEach(item => {
+                const payload = item && typeof item === 'object' ? item : { term: item };
+                const termCandidate = normalizeTerm(
+                    typeof payload.term === 'string'
+                        ? payload.term
+                        : typeof payload.value === 'string'
+                        ? payload.value
+                        : typeof payload.keyword === 'string'
+                        ? payload.keyword
+                        : ''
+                );
+                if (!termCandidate) {
                     return;
                 }
-                const lowered = lower(normalized);
+                const lowered = lower(termCandidate);
                 if (state.usedTerms.has(lowered) || entry.synonymsSet.has(lowered)) {
                     return;
                 }
-                entry.synonyms.push(normalized);
+                const entryPayload = {
+                    value: termCandidate,
+                    kind: kind === 'related' ? 'related' : 'synonym',
+                    cluster: payload.cluster || null,
+                    searchVolume: payload.search_volume ?? payload.searchVolume ?? null,
+                    competition: payload.competition ?? null,
+                    relevance: payload.relevance ?? null,
+                };
+                entry.synonyms.push(entryPayload);
                 entry.synonymsSet.add(lowered);
                 state.usedTerms.add(lowered);
-                added.push(normalized);
+                added.push(termCandidate);
             });
             if (added.length && (!options || !options.silent)) {
-                showFeedback(`${added.length} Synonym${added.length === 1 ? '' : 'e'} hinzugefügt.`, 'success');
+                const descriptor = kind === 'related' ? 'Begriff' : 'Synonym';
+                showFeedback(
+                    `${added.length} ${descriptor}${added.length === 1 ? '' : 'e'} hinzugefügt.`,
+                    'success'
+                );
             }
             return added;
         }
@@ -647,7 +851,19 @@
                 return false;
             }
             entry.synonymsSet.delete(lowered);
-            entry.synonyms = entry.synonyms.filter(value => lower(value) !== lowered);
+            entry.synonyms = entry.synonyms.filter(item => {
+                if (!item) {
+                    return false;
+                }
+                if (typeof item === 'string') {
+                    return lower(item) !== lowered;
+                }
+                const termValue = normalizeTerm(item.value || item.term || item.keyword || '');
+                if (!termValue) {
+                    return false;
+                }
+                return lower(termValue) !== lowered;
+            });
             state.usedTerms.delete(lowered);
             return true;
         }
@@ -664,10 +880,46 @@
             if (!groupsInput) {
                 return;
             }
-            const payload = state.entries.map(entry => ({
-                original: entry.keyword,
-                additional: entry.synonyms.slice(),
-            }));
+            const payload = state.entries.map(entry => {
+                const synonyms = [];
+                const related = [];
+                const relatedDetails = [];
+                entry.synonyms.forEach(item => {
+                    if (!item) {
+                        return;
+                    }
+                    if (typeof item === 'string') {
+                        const term = normalizeTerm(item);
+                        if (term) {
+                            synonyms.push(term);
+                        }
+                        return;
+                    }
+                    const termValue = normalizeTerm(item.value || item.term || item.keyword || '');
+                    if (!termValue) {
+                        return;
+                    }
+                    if (item.kind === 'related') {
+                        related.push(termValue);
+                        relatedDetails.push({
+                            term: termValue,
+                            cluster: item.cluster || null,
+                            search_volume: item.searchVolume ?? item.search_volume ?? null,
+                            competition: item.competition ?? null,
+                            relevance: item.relevance ?? null,
+                        });
+                    } else {
+                        synonyms.push(termValue);
+                    }
+                });
+                return {
+                    original: entry.keyword,
+                    additional: synonyms.concat(related),
+                    synonyms,
+                    related,
+                    related_details: relatedDetails,
+                };
+            });
             groupsInput.value = JSON.stringify(payload);
         }
 
@@ -776,18 +1028,52 @@
                 if (entry.synonyms.length === 0) {
                     const empty = document.createElement('div');
                     empty.className = 'text-muted small';
-                    empty.textContent = 'Keine Synonyme hinzugefügt.';
+                    empty.textContent = 'Keine zusätzlichen Begriffe hinzugefügt.';
                     synonymsWrapper.appendChild(empty);
                 } else {
-                    entry.synonyms.forEach(value => {
+                    entry.synonyms.forEach(item => {
+                        if (!item) {
+                            return;
+                        }
+                        const data = typeof item === 'object'
+                            ? item
+                            : { value: item, kind: 'synonym' };
+                        const term = normalizeTerm(data.value || data.term || data.keyword || '');
+                        if (!term) {
+                            return;
+                        }
+                        const kind = data.kind === 'related' ? 'related' : 'synonym';
                         const synonymChip = document.createElement('button');
                         synonymChip.type = 'button';
-                        synonymChip.className = 'btn btn-sm btn-outline-secondary rounded-pill keyword-chip';
+                        synonymChip.className = 'btn btn-sm rounded-pill keyword-chip';
                         synonymChip.dataset.role = 'chip';
-                        synonymChip.dataset.kind = 'synonym';
+                        synonymChip.dataset.kind = kind;
                         synonymChip.dataset.parent = entry.keyword;
-                        synonymChip.dataset.value = value;
-                        synonymChip.textContent = value;
+                        synonymChip.dataset.value = term;
+                        if (kind === 'related') {
+                            synonymChip.classList.add('btn-outline-success');
+                            const parts = [];
+                            if (data.cluster) {
+                                parts.push(`Cluster: ${data.cluster}`);
+                            }
+                            const volume = data.searchVolume ?? data.search_volume;
+                            if (volume !== undefined && volume !== null && `${volume}`.trim().length > 0) {
+                                parts.push(`Suchvolumen: ${volume}`);
+                            }
+                            if (data.competition) {
+                                parts.push(`Wettbewerb: ${data.competition}`);
+                            }
+                            const relevance = data.relevance;
+                            if (relevance !== undefined && relevance !== null && `${relevance}`.trim().length > 0) {
+                                parts.push(`Relevanz: ${relevance}`);
+                            }
+                            if (parts.length > 0) {
+                                synonymChip.title = parts.join(' • ');
+                            }
+                        } else {
+                            synonymChip.classList.add('btn-outline-secondary');
+                        }
+                        synonymChip.textContent = term;
                         synonymsWrapper.appendChild(synonymChip);
                     });
                 }
@@ -829,6 +1115,12 @@
             expand.dataset.action = 'expand';
             expand.textContent = '＋ Synonyme finden';
             menu.appendChild(expand);
+            const related = document.createElement('button');
+            related.type = 'button';
+            related.className = 'dropdown-item';
+            related.dataset.action = 'related';
+            related.textContent = '🆕 Verwandte & semantische Keywords finden';
+            menu.appendChild(related);
             const remove = document.createElement('button');
             remove.type = 'button';
             remove.className = 'dropdown-item text-danger';
@@ -855,6 +1147,8 @@
                 event.preventDefault();
                 if (action === 'expand') {
                     openModal({ parentKeyword, term: value });
+                } else if (action === 'related') {
+                    openFinderModal({ parentKeyword, term: value, kind });
                 } else if (action === 'remove') {
                     if (kind === 'keyword') {
                         if (removeKeyword(value)) {
@@ -956,6 +1250,479 @@
             }
             modalStatus.textContent = text;
             modalStatus.className = category ? `small text-${category}` : 'small text-muted';
+        }
+
+        function setFinderModalLoading(loading) {
+            state.finder.loading = loading;
+            if (finderModalStart) {
+                finderModalStart.disabled = loading || !hasKeywordPlannerKey;
+                finderModalStart.innerHTML = loading
+                    ? '<span class="spinner-border spinner-border-sm me-2" role="status" aria-hidden="true"></span>Suche läuft …'
+                    : 'Suche starten';
+            }
+            if (finderModalApply) {
+                finderModalApply.disabled = loading || state.finder.selected.size === 0;
+            }
+        }
+
+        function setFinderStatus(text, category) {
+            if (!finderModalStatus) {
+                return;
+            }
+            finderModalStatus.textContent = text;
+            finderModalStatus.className = category ? `small text-${category}` : 'small text-muted';
+        }
+
+        function renderFinderMessages(messages) {
+            if (!finderModalMessages) {
+                return;
+            }
+            finderModalMessages.innerHTML = '';
+            const items = Array.isArray(messages) ? messages : [];
+            items.forEach(message => {
+                if (typeof message !== 'string' || !message.trim()) {
+                    return;
+                }
+                const alert = document.createElement('div');
+                alert.className = 'alert alert-info py-2 mb-2';
+                alert.textContent = message.trim();
+                finderModalMessages.appendChild(alert);
+            });
+        }
+
+        function renderFinderResults() {
+            if (!finderModalResults) {
+                return;
+            }
+            finderModalResults.innerHTML = '';
+            const filterValue = finderModalFilter ? finderModalFilter.value.trim().toLowerCase() : '';
+            if (!state.finder.clusters || state.finder.clusters.length === 0) {
+                const empty = document.createElement('div');
+                empty.className = 'text-muted small';
+                empty.textContent = state.finder.loading
+                    ? 'Suche läuft …'
+                    : 'Keine Vorschläge verfügbar.';
+                finderModalResults.appendChild(empty);
+                if (finderModalApply && !state.finder.loading) {
+                    finderModalApply.disabled = true;
+                }
+                return;
+            }
+            state.finder.clusters.forEach(cluster => {
+                if (!cluster || typeof cluster !== 'object') {
+                    return;
+                }
+                const label = typeof cluster.label === 'string' && cluster.label.trim()
+                    ? cluster.label.trim()
+                    : 'Weitere Vorschläge';
+                const container = document.createElement('div');
+                container.className = 'border rounded p-2 mb-3';
+                const header = document.createElement('div');
+                header.className = 'd-flex align-items-center justify-content-between flex-wrap gap-2 mb-2';
+                const title = document.createElement('strong');
+                title.textContent = label;
+                header.appendChild(title);
+                container.appendChild(header);
+
+                const list = document.createElement('div');
+                list.className = 'list-group list-group-flush';
+                const keywords = Array.isArray(cluster.keywords) ? cluster.keywords : [];
+                let visibleCount = 0;
+                keywords.forEach(entry => {
+                    if (!entry || typeof entry !== 'object') {
+                        return;
+                    }
+                    const term = normalizeTerm(entry.term || entry.keyword || entry.value || '');
+                    if (!term) {
+                        return;
+                    }
+                    const lowered = lower(term);
+                    if (filterValue && !lowered.includes(filterValue)) {
+                        return;
+                    }
+                    visibleCount += 1;
+                    const item = document.createElement('label');
+                    item.className = 'list-group-item d-flex align-items-start gap-2';
+                    item.dataset.termLower = lowered;
+                    item.dataset.termOriginal = term;
+                    const checkbox = document.createElement('input');
+                    checkbox.type = 'checkbox';
+                    checkbox.className = 'form-check-input mt-1';
+                    checkbox.value = term;
+                    checkbox.checked = state.finder.selected.has(lowered);
+                    checkbox.dataset.termLower = lowered;
+                    checkbox.dataset.termOriginal = term;
+                    item.appendChild(checkbox);
+                    const body = document.createElement('div');
+                    const headline = document.createElement('div');
+                    headline.textContent = term;
+                    body.appendChild(headline);
+                    const parts = [];
+                    const volume = entry.search_volume ?? entry.searchVolume;
+                    if (volume !== undefined && volume !== null && `${volume}`.trim().length > 0) {
+                        parts.push(`Suchvolumen: ${volume}`);
+                    }
+                    if (entry.competition) {
+                        parts.push(`Wettbewerb: ${entry.competition}`);
+                    }
+                    const relevance = entry.relevance;
+                    if (relevance !== undefined && relevance !== null && `${relevance}`.trim().length > 0) {
+                        parts.push(`Relevanz: ${relevance}`);
+                    }
+                    if (parts.length > 0) {
+                        const meta = document.createElement('div');
+                        meta.className = 'small text-muted';
+                        meta.textContent = parts.join(' • ');
+                        body.appendChild(meta);
+                    }
+                    item.appendChild(body);
+                    list.appendChild(item);
+                });
+                if (visibleCount === 0) {
+                    const none = document.createElement('div');
+                    none.className = 'text-muted small';
+                    none.textContent = 'Keine passenden Vorschläge in diesem Cluster.';
+                    list.appendChild(none);
+                }
+                container.appendChild(list);
+                finderModalResults.appendChild(container);
+            });
+            if (finderModalApply && !state.finder.loading) {
+                finderModalApply.disabled = state.finder.selected.size === 0;
+            }
+        }
+
+        function openFinderModal(context) {
+            const instance = ensureFinderModalInstance();
+            if (!instance || !finderModalKeyword) {
+                return;
+            }
+            state.finder.context = context;
+            state.finder.selected.clear();
+            state.finder.clusters = [];
+            state.finder.items = new Map();
+            state.finder.messages = [];
+            state.finder.analysis = null;
+            state.finder.cached = false;
+
+            const entry = getEntry(context.parentKeyword);
+            const promptValue = entry ? entry.finderPrompt : defaultFinderPrompt;
+            const modelValue = entry ? entry.finderModel : defaultFinderModel;
+            const maxValue = entry && Number.isFinite(entry.finderMaxResults)
+                ? entry.finderMaxResults
+                : defaultFinderMax;
+            const temperatureValue = entry && Number.isFinite(entry.finderTemperature)
+                ? entry.finderTemperature
+                : defaultFinderTemperature;
+
+            finderModalKeyword.textContent = context.term;
+            if (finderModalPrompt) {
+                finderModalPrompt.value = promptValue || defaultFinderPrompt;
+            }
+            if (finderModalModel) {
+                finderModalModel.value = modelValue || defaultFinderModel;
+            }
+            if (finderModalMax) {
+                finderModalMax.value = Number.isFinite(maxValue) ? maxValue : defaultFinderMax;
+            }
+            if (finderModalTemperature) {
+                finderModalTemperature.value = Number.isFinite(temperatureValue)
+                    ? temperatureValue
+                    : defaultFinderTemperature;
+            }
+            if (finderModalFilter) {
+                finderModalFilter.value = '';
+            }
+            renderFinderMessages([]);
+            renderFinderResults();
+            setFinderStatus('Noch keine Vorschläge geladen.', 'muted');
+            setFinderModalLoading(false);
+            if (finderModalWarning) {
+                if (hasKeywordPlannerKey) {
+                    finderModalWarning.classList.add('d-none');
+                    finderModalWarning.textContent = '';
+                } else {
+                    finderModalWarning.textContent = 'Für diese Funktion ist ein Google Keyword Planner Schlüssel erforderlich. Bitte unter Einstellungen → Keyword-Finder-Einstellungen hinterlegen.';
+                    finderModalWarning.classList.remove('d-none');
+                }
+            }
+            if (finderModalApply) {
+                finderModalApply.disabled = true;
+            }
+            instance.show();
+        }
+
+        function fetchRelatedKeywords() {
+            if (!state.finder.context || !hasKeywordPlannerKey) {
+                return;
+            }
+            const keyword = state.finder.context.term;
+            const promptValue = finderModalPrompt ? finderModalPrompt.value : defaultFinderPrompt;
+            const modelValue = finderModalModel ? finderModalModel.value : defaultFinderModel;
+            const maxRaw = finderModalMax ? parseInt(finderModalMax.value, 10) : defaultFinderMax;
+            const maxValue = Number.isFinite(maxRaw) ? Math.max(1, Math.min(maxRaw, 150)) : defaultFinderMax;
+            const tempRaw = finderModalTemperature ? parseFloat(finderModalTemperature.value) : defaultFinderTemperature;
+            const temperatureValue = Number.isFinite(tempRaw) ? Math.max(0, Math.min(tempRaw, 2)) : defaultFinderTemperature;
+
+            if (finderModalWarning) {
+                finderModalWarning.classList.add('d-none');
+                finderModalWarning.textContent = '';
+            }
+            renderFinderMessages([]);
+            setFinderModalLoading(true);
+            setFinderStatus('Vorschläge werden geladen …', 'muted');
+            fetch('/related-keywords', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                    keyword,
+                    prompt: promptValue,
+                    model: modelValue,
+                    max_results: maxValue,
+                    temperature: temperatureValue,
+                }),
+            })
+                .then(response => response.json().then(data => ({ ok: response.ok, data })))
+                .then(({ ok, data }) => {
+                    if (!ok) {
+                        const message = data && typeof data.error === 'string'
+                            ? data.error
+                            : 'Vorschläge konnten nicht abgerufen werden.';
+                        if (finderModalWarning) {
+                            finderModalWarning.textContent = message;
+                            finderModalWarning.classList.remove('d-none');
+                        }
+                        state.finder.clusters = [];
+                        state.finder.items = new Map();
+                        state.finder.selected.clear();
+                        state.finder.messages = [];
+                        state.finder.analysis = null;
+                        state.finder.cached = false;
+                        renderFinderResults();
+                        setFinderStatus('Keine Vorschläge verfügbar.', 'danger');
+                        return;
+                    }
+                    const clusters = Array.isArray(data.clusters) ? data.clusters : [];
+                    const items = new Map();
+                    const sanitizedClusters = [];
+                    clusters.forEach(cluster => {
+                        if (!cluster || typeof cluster !== 'object') {
+                            return;
+                        }
+                        const label = typeof cluster.label === 'string' && cluster.label.trim()
+                            ? cluster.label.trim()
+                            : 'Weitere Vorschläge';
+                        const keywords = Array.isArray(cluster.keywords) ? cluster.keywords : [];
+                        const cleanedKeywords = [];
+                        keywords.forEach(entry => {
+                            if (!entry || typeof entry !== 'object') {
+                                return;
+                            }
+                            const term = normalizeTerm(entry.term || entry.keyword || entry.value || '');
+                            if (!term) {
+                                return;
+                            }
+                            const lowered = lower(term);
+                            if (!items.has(lowered)) {
+                                items.set(lowered, {
+                                    term,
+                                    cluster: label,
+                                    search_volume: entry.search_volume ?? entry.searchVolume ?? null,
+                                    competition: entry.competition ?? null,
+                                    relevance: entry.relevance ?? null,
+                                });
+                            }
+                            cleanedKeywords.push({
+                                term,
+                                search_volume: entry.search_volume ?? entry.searchVolume ?? null,
+                                competition: entry.competition ?? null,
+                                relevance: entry.relevance ?? null,
+                            });
+                        });
+                        if (cleanedKeywords.length > 0) {
+                            sanitizedClusters.push({
+                                label,
+                                keywords: cleanedKeywords,
+                            });
+                        }
+                    });
+                    state.finder.clusters = sanitizedClusters;
+                    state.finder.items = items;
+                    state.finder.selected.clear();
+                    state.finder.messages = Array.isArray(data.messages)
+                        ? data.messages.filter(message => typeof message === 'string' && message.trim())
+                        : [];
+                    state.finder.cached = Boolean(data && data.cached);
+                    state.finder.analysis = typeof data.analysis === 'string' ? data.analysis : null;
+                    renderFinderMessages(state.finder.messages);
+                    renderFinderResults();
+                    const clusterCount = state.finder.clusters.length;
+                    const suggestionCount = items.size;
+                    const cacheSuffix = state.finder.cached ? ' (Cache)' : '';
+                    let analysisSuffix = '';
+                    if (state.finder.analysis === 'llm') {
+                        analysisSuffix = ' • KI-Analyse aktiv';
+                    } else if (state.finder.analysis === 'fallback') {
+                        analysisSuffix = ' • Analyse im Fallback';
+                    } else if (state.finder.analysis === 'cache') {
+                        analysisSuffix = ' • Cache-Ergebnis';
+                    }
+                    setFinderStatus(
+                        `${clusterCount} Cluster mit ${suggestionCount} Vorschlägen${cacheSuffix}${analysisSuffix}.`,
+                        'success'
+                    );
+                })
+                .catch(() => {
+                    if (finderModalWarning) {
+                        finderModalWarning.textContent = 'Vorschläge konnten nicht abgerufen werden.';
+                        finderModalWarning.classList.remove('d-none');
+                    }
+                    state.finder.clusters = [];
+                    state.finder.items = new Map();
+                    state.finder.selected.clear();
+                    state.finder.messages = [];
+                    state.finder.analysis = null;
+                    state.finder.cached = false;
+                    renderFinderResults();
+                    setFinderStatus('Fehler beim Abruf der Vorschläge.', 'danger');
+                })
+                .finally(() => {
+                    setFinderModalLoading(false);
+                    if (finderModalApply) {
+                        finderModalApply.disabled = state.finder.selected.size === 0;
+                    }
+                });
+        }
+
+        if (finderModalResults) {
+            finderModalResults.addEventListener('change', event => {
+                const checkbox = event.target.closest('input[type="checkbox"]');
+                if (!checkbox) {
+                    return;
+                }
+                const lowered = checkbox.dataset.termLower || lower(checkbox.value || '');
+                if (!lowered) {
+                    return;
+                }
+                if (checkbox.checked) {
+                    state.finder.selected.add(lowered);
+                } else {
+                    state.finder.selected.delete(lowered);
+                }
+                if (finderModalApply && !state.finder.loading) {
+                    finderModalApply.disabled = state.finder.selected.size === 0;
+                }
+            });
+        }
+
+        if (finderModalFilter) {
+            finderModalFilter.addEventListener('input', () => {
+                renderFinderResults();
+            });
+        }
+
+        if (finderModalSelectAll) {
+            finderModalSelectAll.addEventListener('click', event => {
+                event.preventDefault();
+                const filterValue = finderModalFilter ? finderModalFilter.value.trim().toLowerCase() : '';
+                state.finder.items.forEach((item, key) => {
+                    if (filterValue && !key.includes(filterValue)) {
+                        return;
+                    }
+                    state.finder.selected.add(key);
+                });
+                renderFinderResults();
+            });
+        }
+
+        if (finderModalSelectNone) {
+            finderModalSelectNone.addEventListener('click', event => {
+                event.preventDefault();
+                state.finder.selected.clear();
+                renderFinderResults();
+            });
+        }
+
+        if (finderModalStart) {
+            finderModalStart.addEventListener('click', event => {
+                event.preventDefault();
+                fetchRelatedKeywords();
+            });
+        }
+
+        if (finderModalApply) {
+            finderModalApply.addEventListener('click', event => {
+                event.preventDefault();
+                if (!state.finder.context) {
+                    return;
+                }
+                const parentKeyword = state.finder.context.parentKeyword;
+                const entry = getEntry(parentKeyword);
+                if (!entry) {
+                    return;
+                }
+                const selected = [];
+                state.finder.selected.forEach(lowered => {
+                    const info = state.finder.items.get(lowered);
+                    if (!info) {
+                        return;
+                    }
+                    selected.push({
+                        term: info.term,
+                        cluster: info.cluster || null,
+                        search_volume: info.search_volume ?? null,
+                        competition: info.competition ?? null,
+                        relevance: info.relevance ?? null,
+                    });
+                });
+                if (selected.length === 0) {
+                    showFeedback('Bitte wählen Sie mindestens einen Vorschlag aus.', 'warning');
+                    return;
+                }
+                const promptValue = finderModalPrompt ? finderModalPrompt.value : defaultFinderPrompt;
+                const modelValue = finderModalModel ? finderModalModel.value : defaultFinderModel;
+                const maxRaw = finderModalMax ? parseInt(finderModalMax.value, 10) : defaultFinderMax;
+                const maxValue = Number.isFinite(maxRaw) ? Math.max(1, Math.min(maxRaw, 150)) : defaultFinderMax;
+                const tempRaw = finderModalTemperature ? parseFloat(finderModalTemperature.value) : defaultFinderTemperature;
+                const temperatureValue = Number.isFinite(tempRaw) ? Math.max(0, Math.min(tempRaw, 2)) : defaultFinderTemperature;
+
+                const added = addSynonyms(parentKeyword, selected, { silent: true, kind: 'related' }) || [];
+                if (added.length > 0) {
+                    entry.finderPrompt = promptValue || defaultFinderPrompt;
+                    entry.finderModel = modelValue || defaultFinderModel;
+                    entry.finderMaxResults = maxValue;
+                    entry.finderTemperature = temperatureValue;
+                    showFeedback(`${added.length} verwandte Begriff${added.length === 1 ? '' : 'e'} übernommen.`, 'success');
+                    updateAll();
+                } else {
+                    showFeedback('Alle ausgewählten Vorschläge sind bereits vorhanden.', 'warning');
+                }
+                const instance = ensureFinderModalInstance();
+                if (instance) {
+                    instance.hide();
+                }
+            });
+        }
+
+        if (finderModalElement) {
+            finderModalElement.addEventListener('hidden.bs.modal', () => {
+                state.finder.context = null;
+                state.finder.clusters = [];
+                state.finder.items = new Map();
+                state.finder.selected.clear();
+                state.finder.messages = [];
+                state.finder.analysis = null;
+                state.finder.cached = false;
+                if (finderModalFilter) {
+                    finderModalFilter.value = '';
+                }
+                setFinderModalLoading(false);
+                renderFinderMessages([]);
+                renderFinderResults();
+                setFinderStatus('Noch keine Vorschläge geladen.', 'muted');
+            });
         }
 
         function renderModalResults() {
@@ -1371,15 +2138,115 @@
                 if (!original) {
                     return;
                 }
-                const added = addKeyword(original, { silent: true });
-                const synonyms = Array.isArray(group.additional) ? group.additional : [];
+                const synonymsRaw = Array.isArray(group.synonyms) ? group.synonyms : [];
+                const relatedRaw = Array.isArray(group.related) ? group.related : [];
+                const additionalRaw = Array.isArray(group.additional) ? group.additional : [];
+                const detailsRaw = Array.isArray(group.related_details) ? group.related_details : [];
+
+                const detailMap = new Map();
+                detailsRaw.forEach(detail => {
+                    if (!detail || typeof detail !== 'object') {
+                        return;
+                    }
+                    const term = normalizeTerm(detail.term);
+                    if (!term) {
+                        return;
+                    }
+                    detailMap.set(lower(term), {
+                        term,
+                        cluster: detail.cluster || null,
+                        search_volume: detail.search_volume ?? null,
+                        competition: detail.competition ?? null,
+                        relevance: detail.relevance ?? null,
+                    });
+                });
+
+                const synonyms = [];
+                const seenSynonyms = new Set();
+                synonymsRaw.forEach(value => {
+                    const term = normalizeTerm(value);
+                    if (!term) {
+                        return;
+                    }
+                    const lowered = lower(term);
+                    if (seenSynonyms.has(lowered)) {
+                        return;
+                    }
+                    seenSynonyms.add(lowered);
+                    synonyms.push(term);
+                });
+
+                const seenRelated = new Set();
+                const relatedObjects = [];
+                relatedRaw.forEach(value => {
+                    const term = normalizeTerm(value);
+                    if (!term) {
+                        return;
+                    }
+                    const lowered = lower(term);
+                    if (seenRelated.has(lowered)) {
+                        return;
+                    }
+                    seenRelated.add(lowered);
+                    const detail = detailMap.get(lowered) || {};
+                    relatedObjects.push({
+                        term,
+                        cluster: detail.cluster || null,
+                        search_volume: detail.search_volume ?? null,
+                        competition: detail.competition ?? null,
+                        relevance: detail.relevance ?? null,
+                    });
+                });
+
+                additionalRaw.forEach(value => {
+                    const term = normalizeTerm(value);
+                    if (!term) {
+                        return;
+                    }
+                    const lowered = lower(term);
+                    if (seenSynonyms.has(lowered) || seenRelated.has(lowered)) {
+                        return;
+                    }
+                    seenSynonyms.add(lowered);
+                    synonyms.push(term);
+                });
+
+                detailMap.forEach((detail, lowered) => {
+                    if (seenRelated.has(lowered)) {
+                        return;
+                    }
+                    const term = normalizeTerm(detail.term);
+                    if (!term) {
+                        return;
+                    }
+                    seenRelated.add(lowered);
+                    relatedObjects.push({
+                        term,
+                        cluster: detail.cluster || null,
+                        search_volume: detail.search_volume ?? null,
+                        competition: detail.competition ?? null,
+                        relevance: detail.relevance ?? null,
+                    });
+                });
+
+                const options = { silent: true };
                 if (synonyms.length > 0) {
-                    addSynonyms(original, synonyms, { silent: true });
+                    options.synonyms = synonyms;
                 }
+                const normalizedRelated = relatedObjects.filter(item => normalizeTerm(item.term).length > 0);
+                if (normalizedRelated.length > 0) {
+                    options.related = normalizedRelated;
+                }
+                const added = addKeyword(original, options);
                 if (!added) {
                     const entry = getEntry(original);
                     if (entry) {
-                        addSynonyms(original, synonyms, { silent: true });
+                        if (synonyms.length > 0) {
+                            addSynonyms(original, synonyms, { silent: true });
+                        }
+                        if (normalizedRelated.length > 0) {
+                            addSynonyms(original, normalizedRelated, { silent: true, kind: 'related' });
+                        }
                     }
                 }
             });
@@ -1996,22 +2863,95 @@
                         const originalText = group && typeof group.original === "string" && group.original ? group.original : "–";
                         originalStrong.textContent = originalText;
                         li.appendChild(originalStrong);
-                        const additional = Array.isArray(group.additional) ? group.additional.filter(value => typeof value === "string" && value.trim().length > 0) : [];
-                        if (additional.length > 0) {
+
+                        let synonyms = Array.isArray(group.synonyms)
+                            ? group.synonyms.filter(value => typeof value === "string" && value.trim().length > 0)
+                            : [];
+                        let related = Array.isArray(group.related)
+                            ? group.related.filter(value => typeof value === "string" && value.trim().length > 0)
+                            : [];
+                        const additional = Array.isArray(group.additional)
+                            ? group.additional.filter(value => typeof value === "string" && value.trim().length > 0)
+                            : [];
+                        if (synonyms.length === 0 && related.length === 0 && additional.length > 0) {
+                            synonyms = additional.slice();
+                        }
+
+                        const details = Array.isArray(group.related_details)
+                            ? group.related_details.filter(detail => detail && typeof detail === "object")
+                            : [];
+                        const detailMap = new Map();
+                        details.forEach(detail => {
+                            const term = typeof detail.term === "string" ? detail.term.trim() : "";
+                            if (!term) {
+                                return;
+                            }
+                            detailMap.set(term.toLowerCase(), detail);
+                        });
+
+                        if (synonyms.length > 0) {
                             const badge = document.createElement("span");
-                            badge.className = "badge bg-primary ms-2";
-                            badge.textContent = `+${additional.length}`;
+                            badge.className = "badge bg-secondary ms-2";
+                            badge.textContent = `${synonyms.length} Synonyme`;
                             li.appendChild(badge);
-                            const extraDiv = document.createElement("div");
-                            extraDiv.className = "small text-muted mt-1";
-                            extraDiv.textContent = `Zusätzliche Begriffe: ${additional.join(", ")}`;
-                            li.appendChild(extraDiv);
-                        } else {
+                            const synonymDiv = document.createElement("div");
+                            synonymDiv.className = "small text-muted mt-1";
+                            synonymDiv.textContent = `Synonyme: ${synonyms.join(", ")}`;
+                            li.appendChild(synonymDiv);
+                        }
+
+                        if (related.length > 0) {
+                            const badge = document.createElement("span");
+                            badge.className = "badge bg-success ms-2";
+                            badge.textContent = `${related.length} Verwandte`;
+                            li.appendChild(badge);
+                            const relatedWrapper = document.createElement("div");
+                            relatedWrapper.className = "small text-muted mt-1";
+                            const title = document.createElement("span");
+                            title.className = "fw-semibold d-block";
+                            title.textContent = "Verwandte Begriffe:";
+                            relatedWrapper.appendChild(title);
+                            const list = document.createElement("ul");
+                            list.className = "list-unstyled ms-3 mb-0";
+                            related.forEach(term => {
+                                const item = document.createElement("li");
+                                const text = typeof term === "string" ? term : "";
+                                item.textContent = text || "–";
+                                const info = detailMap.get((text || "").toLowerCase());
+                                if (info) {
+                                    const parts = [];
+                                    if (info.cluster) {
+                                        parts.push(`Cluster: ${info.cluster}`);
+                                    }
+                                    if (info.search_volume !== undefined && info.search_volume !== null) {
+                                        parts.push(`Suchvolumen: ${info.search_volume}`);
+                                    }
+                                    if (info.competition) {
+                                        parts.push(`Wettbewerb: ${info.competition}`);
+                                    }
+                                    if (info.relevance !== undefined && info.relevance !== null) {
+                                        parts.push(`Relevanz: ${info.relevance}`);
+                                    }
+                                    if (parts.length > 0) {
+                                        const meta = document.createElement("span");
+                                        meta.className = "text-muted";
+                                        meta.textContent = ` (${parts.join(" • ")})`;
+                                        item.appendChild(meta);
+                                    }
+                                }
+                                list.appendChild(item);
+                            });
+                            relatedWrapper.appendChild(list);
+                            li.appendChild(relatedWrapper);
+                        }
+
+                        if (synonyms.length === 0 && related.length === 0) {
                             const noneDiv = document.createElement("div");
                             noneDiv.className = "small text-muted mt-1";
                             noneDiv.textContent = "Keine zusätzlichen Begriffe ermittelt.";
                             li.appendChild(noneDiv);
                         }
+
                         groupList.appendChild(li);
                     });
                     body.appendChild(groupList);
