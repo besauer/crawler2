@@ -6,7 +6,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from datetime import date
-from typing import Callable, Iterable, List, Optional, Pattern, Set, Tuple
+from typing import Callable, Dict, Iterable, List, Optional, Pattern, Set, Tuple
 from urllib.parse import urljoin, urldefrag, urlparse
 from urllib.robotparser import RobotFileParser
 
@@ -18,6 +18,9 @@ USER_AGENT = "LocalSchoolCrawler/1.0 (+https://example.com/contact)"
 REQUEST_TIMEOUT = 10  # seconds
 MAX_PAGES_DEFAULT = 100
 SLEEP_BETWEEN_REQUESTS = 0.5  # seconds
+REPEATED_SNIPPET_MIN_CHARS = 8
+REPEATED_SNIPPET_THRESHOLD = 1
+_WHITESPACE_RE = re.compile(r"\s+")
 
 
 @dataclass
@@ -153,6 +156,20 @@ def keyword_matches(text: str, patterns: Iterable[KeywordPattern]) -> Tuple[str,
     return tuple(matches)
 
 
+def _split_text_segments(soup: BeautifulSoup) -> List[str]:
+    raw_text = soup.get_text("\n", strip=True)
+    segments: List[str] = []
+    for line in raw_text.splitlines():
+        cleaned = _WHITESPACE_RE.sub(" ", line).strip()
+        if cleaned:
+            segments.append(cleaned)
+    return segments
+
+
+def _normalize_segment_key(segment: str) -> str:
+    return _WHITESPACE_RE.sub(" ", segment).strip().lower()
+
+
 def is_html_response(response: requests.Response) -> bool:
     content_type = response.headers.get("Content-Type", "").lower()
     return "text/html" in content_type
@@ -217,6 +234,28 @@ def crawl_site(
     allowed_urls: Set[str] = {normalized_start}
     results: List[CrawlResult] = []
     result_pairs: Set[Tuple[str, str, str]] = set()
+    snippet_counts: Dict[str, int] = {}
+    snippet_lock = threading.Lock()
+
+    def prepare_search_text(soup_obj: BeautifulSoup) -> str:
+        segments = _split_text_segments(soup_obj)
+        if not segments:
+            return ""
+        filtered_segments: List[str] = []
+        update_keys: Set[str] = set()
+        with snippet_lock:
+            for segment in segments:
+                qualifies = len(segment) >= REPEATED_SNIPPET_MIN_CHARS
+                if qualifies:
+                    key = _normalize_segment_key(segment)
+                    if key not in update_keys:
+                        update_keys.add(key)
+                    if snippet_counts.get(key, 0) >= REPEATED_SNIPPET_THRESHOLD:
+                        continue
+                filtered_segments.append(segment)
+            for key in update_keys:
+                snippet_counts[key] = snippet_counts.get(key, 0) + 1
+        return " ".join(filtered_segments)
 
     state_lock = threading.Lock()
     state = {
@@ -333,8 +372,12 @@ def crawl_site(
         )
     )
 
+    search_text = page_text
     if soup:
-        matches = keyword_matches(page_text, keyword_patterns)
+        search_text = prepare_search_text(soup)
+
+    if search_text:
+        matches = keyword_matches(search_text, keyword_patterns)
         for match in matches:
             result = CrawlResult(
                 source_url=normalized_start,
@@ -448,9 +491,13 @@ def crawl_site(
                 if end_date and publication_date > end_date:
                     within_range = False
 
+        filtered_text_local = page_text_local or ""
+        if soup_local:
+            filtered_text_local = prepare_search_text(soup_local)
+
         matches_local: Tuple[str, ...] = ()
-        if soup_local and within_range:
-            matches_local = keyword_matches(page_text_local, keyword_patterns)
+        if within_range and filtered_text_local:
+            matches_local = keyword_matches(filtered_text_local, keyword_patterns)
 
         with state_lock:
             visited.add(url)

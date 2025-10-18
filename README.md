@@ -43,6 +43,8 @@ Ein lokaler Web-Crawler mit HTML-Oberfläche zum Durchsuchen von Schul-Webseiten
 - Gesperrte Pfade laut `robots.txt` werden standardmäßig nicht besucht; über den Schalter „robots.txt respektieren“ kann die Vorgabe bei Bedarf aufgehoben werden.
 - Standardmäßig bleibt der Crawler innerhalb der Domain der Start-URL. Diese Einstellung kann im Code angepasst werden.
 - Pro Start-URL werden nur die Startseite und deren direkte internen Links durchsucht; weitere Ebenen werden übersprungen.
+- Wiederkehrende Seitenteile (z. B. Navigationsleisten oder Footer) werden nach der ersten Begegnung automatisch
+  aus der Stichwortsuche herausgefiltert, damit identische Strukturelemente keine mehrfachen Treffer erzeugen.
 - Über das Feld „Parallele Seitenabrufe“ lassen sich bis zu 150 Seiten gleichzeitig laden, um die Ausführung zu beschleunigen.
 - Gespeicherte Suchläufe werden als JSON-Datei unter `saved_searches.json` im Projektverzeichnis abgelegt.
 - Die Schulstammdaten liegen als JSON-Datei unter `stammdaten.json`. Ein erneuter Excel-Import überschreibt die vorhandenen Einträge vollständig.
