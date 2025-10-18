@@ -426,8 +426,23 @@
         const evaluationButtonLabel = evaluationButton ? evaluationButton.textContent : '';
 
         let modalInstance = null;
-        if (modalElement && typeof bootstrap !== 'undefined') {
-            modalInstance = new bootstrap.Modal(modalElement);
+
+        function ensureModalInstance() {
+            if (!modalElement) {
+                return null;
+            }
+            if (modalInstance && typeof modalInstance.show === 'function') {
+                return modalInstance;
+            }
+            if (typeof bootstrap !== 'undefined' && bootstrap && typeof bootstrap.Modal === 'function') {
+                if (typeof bootstrap.Modal.getOrCreateInstance === 'function') {
+                    modalInstance = bootstrap.Modal.getOrCreateInstance(modalElement);
+                } else {
+                    modalInstance = new bootstrap.Modal(modalElement);
+                }
+                return modalInstance;
+            }
+            return null;
         }
 
         const state = {
@@ -840,7 +855,8 @@
         }, true);
 
         function openModal(context) {
-            if (!modalInstance || !modalKeyword || !modalPrompt || !modalModel || !modalMax || !modalTemperature) {
+            const instance = ensureModalInstance();
+            if (!instance || !modalKeyword || !modalPrompt || !modalModel || !modalMax || !modalTemperature) {
                 return;
             }
             state.modal.context = context;
@@ -878,7 +894,7 @@
                 modalRefresh.disabled = false;
                 modalRefresh.innerHTML = 'Synonyme suchen';
             }
-            modalInstance.show();
+            instance.show();
         }
 
         function setModalLoading(loading) {

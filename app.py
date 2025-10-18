@@ -42,10 +42,10 @@ OPENAI_MODELS_URL = "https://api.openai.com/v1/models?limit=1"
 OPENAI_MODEL_NAME = "gpt-4o-mini"
 OPENAI_TIMEOUT = 20
 DEFAULT_SYNONYM_PROMPT = (
-    "Du bist ein Synonym-Generator für deutschsprachige Websuche. "
-    "Gib ausschließlich eine JSON-Liste mit gebräuchlichen Synonymen, "
-    "nahen Begriffen und typischen Kurzformen des folgenden Begriffs zurück. "
-    "Keine Erklärungen, keine weiteren Wörter. Vermeide Homonyme und irrelevante Bedeutungen."
+    "Du bist ein Synonym-Experte für deutschsprachige Websuche und spezialisiert auf Synonyme, "
+    "die sich auf Webseiten von Schulen in Baden Württemberg finden. "
+    "Gib ausschließlich eine JSON-Liste mit gebräuchlichen Synonymen, nahen Begriffen und typischen Kurzformen des "
+    "folgenden Begriffs zurück. Keine Erklärungen, keine weiteren Wörter. Vermeide Homonyme und irrelevante Bedeutungen."
 )
 DEFAULT_KEYWORD_EVALUATION_PROMPT = (
     "Du bewertest deutsche Suchbegriffe für eine Websuche. "
