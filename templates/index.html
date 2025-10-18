@@ -76,6 +76,7 @@
                 <div class="d-flex flex-wrap gap-2 mb-2">
                     <button type="button" class="btn btn-outline-primary btn-sm" id="select-all">Alle auswählen</button>
                     <button type="button" class="btn btn-outline-secondary btn-sm" id="select-none">Keine auswählen</button>
+                    <button type="button" class="btn btn-outline-danger btn-sm" id="reset-filters">Hard Reset (Filter)</button>
                 </div>
                 <div class="row g-3 mb-3">
                     {% for field in stammdaten_primary_fields %}
@@ -2322,6 +2323,7 @@
         const filterButtons = document.querySelectorAll('.filter-select');
         const filterInputs = document.querySelectorAll('.filter-input');
         const filterOperators = document.querySelectorAll('.filter-operator');
+        const resetFiltersButton = document.getElementById('reset-filters');
         const booleanFilterCheckboxes = Array.from(document.querySelectorAll('.boolean-filter'));
         const numericFields = new Set([
             {% for field in stammdaten_fields if field.type == 'numeric' %}
@@ -2355,6 +2357,24 @@
 
         function hasFiltersApplied() {
             return getActiveFilterKeys().length > 0 || getBooleanFilterKeys().length > 0;
+        }
+
+        function resetAllFilters() {
+            Object.keys(activeFilters).forEach(key => {
+                delete activeFilters[key];
+            });
+            filterInputs.forEach(input => {
+                input.value = '';
+                input.classList.remove('is-invalid');
+            });
+            filterOperators.forEach(select => {
+                if (select) {
+                    select.value = 'eq';
+                }
+            });
+            booleanFilterCheckboxes.forEach(cb => {
+                cb.checked = false;
+            });
         }
 
         function normalizeNumeric(value) {
@@ -2517,6 +2537,16 @@
                     cb.checked = false;
                 });
                 updateSelectionCount();
+            });
+        }
+
+        if (resetFiltersButton) {
+            resetFiltersButton.addEventListener('click', () => {
+                schoolCheckboxes.forEach(cb => {
+                    cb.checked = false;
+                });
+                resetAllFilters();
+                applyFilters();
             });
         }
 
