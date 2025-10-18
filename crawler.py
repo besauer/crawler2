@@ -13,6 +13,7 @@ from urllib.robotparser import RobotFileParser
 import requests
 from bs4 import BeautifulSoup
 from dateutil import parser as date_parser
+from bisect import bisect_right
 
 USER_AGENT = "LocalSchoolCrawler/1.0 (+https://example.com/contact)"
 REQUEST_TIMEOUT = 10  # seconds
@@ -20,7 +21,9 @@ MAX_PAGES_DEFAULT = 100
 SLEEP_BETWEEN_REQUESTS = 0.5  # seconds
 REPEATED_SNIPPET_MIN_CHARS = 8
 REPEATED_SNIPPET_THRESHOLD = 1
+CONTEXT_WINDOW_WORDS = 20
 _WHITESPACE_RE = re.compile(r"\s+")
+_WORD_RE = re.compile(r"\S+")
 
 
 @dataclass
@@ -28,6 +31,7 @@ class CrawlResult:
     source_url: str
     target_url: str
     matched_keywords: Tuple[str, ...]
+    context: Optional[str] = None
 
 
 @dataclass
@@ -148,12 +152,52 @@ def build_keyword_patterns(keywords: Iterable[str]) -> List[KeywordPattern]:
     return patterns
 
 
-def keyword_matches(text: str, patterns: Iterable[KeywordPattern]) -> Tuple[str, ...]:
-    matches: List[str] = []
+def _normalize_context_signature(context: str) -> str:
+    return _WHITESPACE_RE.sub(" ", context).strip().lower()
+
+
+def _build_word_index(text: str) -> Tuple[List[str], List[int]]:
+    tokens = list(_WORD_RE.finditer(text))
+    words = [match.group() for match in tokens]
+    positions = [match.start() for match in tokens]
+    return words, positions
+
+
+def _extract_context(words: List[str], positions: List[int], start: int, end: int) -> str:
+    if not words:
+        return ""
+
+    start_idx = bisect_right(positions, start) - 1
+    if start_idx < 0:
+        start_idx = 0
+
+    end_idx = bisect_right(positions, max(start, end - 1)) - 1
+    if end_idx < start_idx:
+        end_idx = start_idx
+
+    context_start = max(0, start_idx - CONTEXT_WINDOW_WORDS)
+    context_end = min(len(words), end_idx + 1 + CONTEXT_WINDOW_WORDS)
+    return " ".join(words[context_start:context_end])
+
+
+def keyword_matches_with_context(
+    text: str, patterns: Iterable[KeywordPattern]
+) -> List[Tuple[str, str]]:
+    if not text:
+        return []
+
+    words, positions = _build_word_index(text)
+    if not words:
+        return []
+
+    matches: List[Tuple[str, str]] = []
     for original, pattern in patterns:
-        if pattern.search(text):
-            matches.append(original)
-    return tuple(matches)
+        for match in pattern.finditer(text):
+            context = _extract_context(words, positions, match.start(), match.end())
+            if not context:
+                context = text[max(0, match.start() - 200) : match.end() + 200]
+            matches.append((original, context))
+    return matches
 
 
 def _split_text_segments(soup: BeautifulSoup) -> List[str]:
@@ -233,7 +277,7 @@ def crawl_site(
     visited: Set[str] = set()
     allowed_urls: Set[str] = {normalized_start}
     results: List[CrawlResult] = []
-    result_pairs: Set[Tuple[str, str, str]] = set()
+    result_pairs: Set[Tuple[str, str, str, str]] = set()
     snippet_counts: Dict[str, int] = {}
     snippet_lock = threading.Lock()
 
@@ -377,16 +421,24 @@ def crawl_site(
         search_text = prepare_search_text(soup)
 
     if search_text:
-        matches = keyword_matches(search_text, keyword_patterns)
-        for match in matches:
+        context_seen: Set[str] = set()
+        matches = keyword_matches_with_context(search_text, keyword_patterns)
+        for match, context in matches:
+            context_signature = _normalize_context_signature(context)
+            signature_key = (match.lower(), context_signature)
+            if signature_key in context_seen:
+                continue
+            context_seen.add(signature_key)
             result = CrawlResult(
                 source_url=normalized_start,
                 target_url=normalized_start,
                 matched_keywords=(match,),
+                context=context,
             )
             lowered_match = match.lower()
+            dedupe_signature = context_signature or lowered_match
             with state_lock:
-                key = (result.source_url, result.target_url, lowered_match)
+                key = (result.source_url, result.target_url, lowered_match, dedupe_signature)
                 if key not in result_pairs:
                     result_pairs.add(key)
                     results.append(result)
@@ -495,9 +547,11 @@ def crawl_site(
         if soup_local:
             filtered_text_local = prepare_search_text(soup_local)
 
-        matches_local: Tuple[str, ...] = ()
+        matches_local: List[Tuple[str, str]] = []
         if within_range and filtered_text_local:
-            matches_local = keyword_matches(filtered_text_local, keyword_patterns)
+            matches_local = keyword_matches_with_context(filtered_text_local, keyword_patterns)
+
+        local_context_seen: Set[Tuple[str, str]] = set()
 
         with state_lock:
             visited.add(url)
@@ -516,15 +570,22 @@ def crawl_site(
             )
         )
 
-        for match in matches_local:
+        for match, context in matches_local:
+            context_signature = _normalize_context_signature(context)
+            signature_key = (match.lower(), context_signature)
+            if signature_key in local_context_seen:
+                continue
+            local_context_seen.add(signature_key)
             result_local = CrawlResult(
                 source_url=normalized_start,
                 target_url=url,
                 matched_keywords=(match,),
+                context=context,
             )
             lowered_match = match.lower()
+            dedupe_signature = context_signature or lowered_match
             with state_lock:
-                key = (result_local.source_url, result_local.target_url, lowered_match)
+                key = (result_local.source_url, result_local.target_url, lowered_match, dedupe_signature)
                 if key not in result_pairs:
                     result_pairs.add(key)
                     results.append(result_local)

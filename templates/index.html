@@ -364,6 +364,7 @@
                     <th>Ursprungs-URL</th>
                     <th>Gefundene URL</th>
                     <th>Suchbegriff</th>
+                    <th>Kontext (±20 Wörter)</th>
                 </tr>
                 </thead>
                 <tbody>
@@ -2635,6 +2636,7 @@
             const sourceCell = document.createElement("td");
             const targetCell = document.createElement("td");
             const keywordCell = document.createElement("td");
+            const contextCell = document.createElement("td");
 
             const sourceLink = document.createElement("a");
             sourceLink.href = result.source_url;
@@ -2654,9 +2656,16 @@
             const matches = Array.isArray(result.matched_keywords) ? result.matched_keywords : [];
             keywordCell.textContent = matches.length > 0 ? matches[0] : "–";
 
+            const contextText = typeof result.context === "string" && result.context.trim().length > 0
+                ? result.context.trim()
+                : "–";
+            contextCell.classList.add("small");
+            contextCell.textContent = contextText;
+
             row.appendChild(sourceCell);
             row.appendChild(targetCell);
             row.appendChild(keywordCell);
+            row.appendChild(contextCell);
 
             resultsTableBody.appendChild(row);
         });
@@ -3048,7 +3057,7 @@
                 table.className = "table table-sm";
                 const thead = document.createElement("thead");
                 const headerRow = document.createElement("tr");
-                ["Ursprungs-URL", "Gefundene URL", "Suchbegriff"].forEach(text => {
+                ["Ursprungs-URL", "Gefundene URL", "Suchbegriff", "Kontext (±20 Wörter)"].forEach(text => {
                     const th = document.createElement("th");
                     th.textContent = text;
                     headerRow.appendChild(th);
@@ -3061,6 +3070,9 @@
                     const matches = Array.isArray(result.matched_keywords) && result.matched_keywords.length > 0
                         ? result.matched_keywords
                         : [null];
+                    const contextText = typeof result.context === "string" && result.context.trim().length > 0
+                        ? result.context.trim()
+                        : "–";
                     matches.forEach(matchValue => {
                         const row = document.createElement("tr");
 
@@ -3096,6 +3108,11 @@
                         const keywordText = typeof matchValue === "string" && matchValue.trim().length > 0 ? matchValue : "–";
                         keywordCell.textContent = keywordText;
                         row.appendChild(keywordCell);
+
+                        const contextCell = document.createElement("td");
+                        contextCell.classList.add("small");
+                        contextCell.textContent = contextText;
+                        row.appendChild(contextCell);
 
                         tbody.appendChild(row);
                     });

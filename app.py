@@ -1748,7 +1748,7 @@ class CrawlJob:
     progress_percent: int = 0
     started_at: float = field(default_factory=time.time)
     completed: bool = False
-    result_pairs: Set[Tuple[str, str, str]] = field(default_factory=set, repr=False, compare=False)
+    result_pairs: Set[Tuple[str, str, str, str]] = field(default_factory=set, repr=False, compare=False)
     cancel_event: threading.Event = field(default_factory=threading.Event, repr=False, compare=False)
     cancelled: bool = False
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False, compare=False)
@@ -1814,6 +1814,7 @@ class CrawlJob:
                         "source_url": result.source_url,
                         "target_url": result.target_url,
                         "matched_keywords": list(result.matched_keywords),
+                        "context": result.context,
                     }
                     for result in self.results
                 ],
@@ -1838,7 +1839,14 @@ class CrawlJob:
             if progress.event == "match" and progress.result:
                 keywords_tuple = tuple(progress.result.matched_keywords)
                 lowered = keywords_tuple[0].lower() if keywords_tuple else ""
-                key = (progress.result.source_url, progress.result.target_url, lowered)
+                context_signature = " ".join((progress.result.context or "").split()).lower()
+                dedupe_signature = context_signature or lowered
+                key = (
+                    progress.result.source_url,
+                    progress.result.target_url,
+                    lowered,
+                    dedupe_signature,
+                )
                 if key not in self.result_pairs:
                     self.results.append(progress.result)
                     self.result_pairs.add(key)

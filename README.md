@@ -34,7 +34,8 @@ Ein lokaler Web-Crawler mit HTML-Oberfläche zum Durchsuchen von Schul-Webseiten
    Treffer gefunden wurden, wie groß die verbleibende Warteschlange ist,
    zu wie viel Prozent der Crawl abgeschlossen ist und welche Begriffe
    inklusive Synonymen durchsucht werden. Treffer erscheinen
-   fortlaufend in der Tabelle mit Ursprungs- und Ziel-URL sowie dem jeweils passenden Suchbegriff.
+   fortlaufend in der Tabelle mit Ursprungs- und Ziel-URL, dem jeweils passenden Suchbegriff
+   sowie einem automatisch erzeugten Kontextfenster (20 Wörter davor und danach).
 10. Bei Bedarf kann der laufende Crawl per „Suche abbrechen“ gestoppt oder ein abgeschlossener Lauf über „Suche speichern“ lokal abgelegt werden. Der Button „Alte Suchen anzeigen“ öffnet ein Archiv mit allen gespeicherten Ergebnissen.
 
 ## Hinweise
@@ -45,6 +46,8 @@ Ein lokaler Web-Crawler mit HTML-Oberfläche zum Durchsuchen von Schul-Webseiten
 - Pro Start-URL werden nur die Startseite und deren direkte internen Links durchsucht; weitere Ebenen werden übersprungen.
 - Wiederkehrende Seitenteile (z. B. Navigationsleisten oder Footer) werden nach der ersten Begegnung automatisch
   aus der Stichwortsuche herausgefiltert, damit identische Strukturelemente keine mehrfachen Treffer erzeugen.
+- Für jede Fundstelle wird ein Kontextfenster mit 20 Wörtern vor und nach dem Treffer gespeichert. Identische
+  Wortfolgen auf derselben Seite werden ignoriert, damit Menü- oder Footer-Wiederholungen nicht mehrfach gemeldet werden.
 - Über das Feld „Parallele Seitenabrufe“ lassen sich bis zu 150 Seiten gleichzeitig laden, um die Ausführung zu beschleunigen.
 - Gespeicherte Suchläufe werden als JSON-Datei unter `saved_searches.json` im Projektverzeichnis abgelegt.
 - Die Schulstammdaten liegen als JSON-Datei unter `stammdaten.json`. Ein erneuter Excel-Import überschreibt die vorhandenen Einträge vollständig.
