@@ -4,5 +4,9 @@
     "max_results": 50,
     "temperature": 0.2,
     "model": "gpt-4o-mini"
+  },
+  "crawl_defaults": {
+    "max_pages": 100,
+    "concurrency": 5
   }
 }

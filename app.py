@@ -30,6 +30,7 @@ SAVED_SEARCHES_PATH = Path("saved_searches.json")
 saved_search_lock = threading.Lock()
 DEFAULT_CONCURRENCY = 5
 MAX_CONCURRENCY = 150
+MAX_MAX_PAGES = 1000
 DEFAULT_RESPECT_ROBOTS = True
 STAMMDATEN_PATH = Path("stammdaten.json")
 stammdaten_lock = threading.Lock()
@@ -68,16 +69,57 @@ AVAILABLE_OPENAI_MODELS = [
 api_key_lock = threading.Lock()
 _api_key_value: Optional[str] = None
 
-STAMMDATEN_FIELDS = [
+STAMMDATEN_PRIMARY_FIELDS = [
+    {"key": "jahr", "label": "Jahr", "type": "numeric"},
     {"key": "schul_id", "label": "Schul ID"},
-    {"key": "traeger", "label": "Träger"},
-    {"key": "name", "label": "Name"},
+    {"key": "status", "label": "Status"},
+    {"key": "anzahl_aussenstellen", "label": "Anzahl Außenstellen", "type": "numeric"},
+    {"key": "rb", "label": "RB"},
+    {"key": "kkz", "label": "KKZ"},
+    {"key": "rkz", "label": "RKZ"},
+    {"key": "schulname", "label": "Schulname"},
+    {"key": "strasse", "label": "Straße"},
+    {"key": "plz", "label": "PLZ"},
     {"key": "ort", "label": "Ort"},
-    {"key": "anzahl_schueler", "label": "Anzahl Schüler", "type": "numeric"},
-    {"key": "anzahl_klassen", "label": "Anzahl Klassen", "type": "numeric"},
-    {"key": "homepage", "label": "Homepage"},
-    {"key": "aktiv", "label": "Aktiv"},
+    {"key": "telefon", "label": "Telefon"},
+    {"key": "fax", "label": "Fax"},
+    {"key": "homepage", "label": "URL"},
+    {"key": "schueler_gesamt", "label": "Schüler/-innen insgesamt", "type": "numeric"},
+    {"key": "klassen_gesamt", "label": "Klassen insgesamt", "type": "numeric"},
 ]
+
+STAMMDATEN_BOOLEAN_FIELDS = [
+    {"key": "angebot_grundschulen", "label": "12 – Grundschulen", "type": "bool"},
+    {"key": "angebot_werkreal_hauptschulen", "label": "14 – Werkreal-/Hauptschulen", "type": "bool"},
+    {"key": "angebot_realschulen", "label": "15 – Realschulen", "type": "bool"},
+    {"key": "angebot_gymnasien", "label": "16 – Gymnasien", "type": "bool"},
+    {"key": "angebot_schulen_besonderer_art", "label": "17 – Schulen besonderer Art", "type": "bool"},
+    {"key": "angebot_freie_waldorfschulen", "label": "19 – Freie Waldorfschulen", "type": "bool"},
+    {"key": "angebot_gemeinschaftsschule_sek1", "label": "21 – Gemeinschaftsschulen – Sekundarstufe I", "type": "bool"},
+    {"key": "angebot_gemeinschaftsschule_sek2", "label": "21 – Gemeinschaftsschulen – Sekundarstufe II", "type": "bool"},
+    {"key": "angebot_berufsschulen", "label": "31 – Berufsschulen", "type": "bool"},
+    {"key": "angebot_berufsfachschulen", "label": "32 – Berufsfachschulen", "type": "bool"},
+    {"key": "angebot_berufskollegs", "label": "33 – Berufskollegs", "type": "bool"},
+    {"key": "angebot_berufsoberschulen", "label": "34 – Berufsoberschulen", "type": "bool"},
+    {"key": "angebot_fachschulen", "label": "35 – Fachschulen", "type": "bool"},
+    {"key": "angebot_gesundheitswesen", "label": "35 – Schulen für Berufe des Gesundheitswesens", "type": "bool"},
+    {"key": "angebot_berufliche_gymnasien", "label": "36 – Berufliche Gymnasien", "type": "bool"},
+    {"key": "angebot_sbbz", "label": "51 – Sonderpädagogische Bildungs- und Beratungszentren", "type": "bool"},
+    {"key": "angebot_sonderberufsschulen", "label": "52 – Sonderberufsschulen", "type": "bool"},
+    {"key": "angebot_zweiter_bildungsweg", "label": "Zweiter Bildungsweg", "type": "bool"},
+]
+
+STAMMDATEN_FIELDS = STAMMDATEN_PRIMARY_FIELDS + STAMMDATEN_BOOLEAN_FIELDS
+STAMMDATEN_NUMERIC_KEYS = {field["key"] for field in STAMMDATEN_FIELDS if field.get("type") == "numeric"}
+STAMMDATEN_BOOLEAN_KEYS = {field["key"] for field in STAMMDATEN_FIELDS if field.get("type") == "bool"}
+LEGACY_STAMMDATEN_ALIASES = {
+    "schulname": ["name"],
+    "schueler_gesamt": ["anzahl_schueler"],
+    "klassen_gesamt": ["anzahl_klassen"],
+    "homepage": ["homepage", "url"],
+    "status": ["traeger"],
+    "ort": ["ort"],
+}
 
 
 class OpenAIIntegrationError(Exception):
@@ -179,6 +221,54 @@ def update_synonym_defaults(values: Dict[str, object]) -> Dict[str, object]:
     }
     save_settings_data(current)
     return current["synonym_defaults"]
+
+
+def _default_crawl_settings() -> Dict[str, int]:
+    return {
+        "max_pages": MAX_PAGES_DEFAULT,
+        "concurrency": DEFAULT_CONCURRENCY,
+    }
+
+
+def get_crawl_defaults() -> Dict[str, int]:
+    data = load_settings_data()
+    defaults = _default_crawl_settings()
+    result = dict(defaults)
+    if isinstance(data, dict):
+        stored = data.get("crawl_defaults")
+        if isinstance(stored, dict):
+            max_pages = stored.get("max_pages")
+            if isinstance(max_pages, int):
+                result["max_pages"] = max(1, min(max_pages, MAX_MAX_PAGES))
+            concurrency = stored.get("concurrency")
+            if isinstance(concurrency, int):
+                result["concurrency"] = max(1, min(concurrency, MAX_CONCURRENCY))
+    return result
+
+
+def update_crawl_defaults(values: Dict[str, object]) -> Dict[str, int]:
+    current = load_settings_data()
+    defaults = _default_crawl_settings()
+
+    try:
+        max_pages = int(values.get("max_pages", defaults["max_pages"]))
+    except (TypeError, ValueError):
+        max_pages = defaults["max_pages"]
+    max_pages = max(1, min(max_pages, MAX_MAX_PAGES))
+
+    try:
+        concurrency = int(values.get("concurrency", defaults["concurrency"]))
+    except (TypeError, ValueError):
+        concurrency = defaults["concurrency"]
+    concurrency = max(1, min(concurrency, MAX_CONCURRENCY))
+
+    current.setdefault("crawl_defaults", {})
+    current["crawl_defaults"] = {
+        "max_pages": max_pages,
+        "concurrency": concurrency,
+    }
+    save_settings_data(current)
+    return current["crawl_defaults"]
 
 
 def _read_synonym_cache_unlocked() -> Dict[str, object]:
@@ -829,18 +919,38 @@ def load_stammdaten() -> List[Dict[str, object]]:
             for entry in raw_data:
                 if not isinstance(entry, dict):
                     continue
-                record = {
-                    "schul_id": _coerce_str(entry.get("schul_id")),
-                    "traeger": _coerce_str(entry.get("traeger")),
-                    "name": _coerce_str(entry.get("name")),
-                    "ort": _coerce_str(entry.get("ort")),
-                    "anzahl_schueler": _coerce_int(entry.get("anzahl_schueler")),
-                    "anzahl_klassen": _coerce_int(entry.get("anzahl_klassen")),
-                    "homepage": _coerce_str(entry.get("homepage")),
-                    "aktiv": _coerce_bool(entry.get("aktiv"), default=True),
-                }
-                if record["homepage"]:
-                    records.append(record)
+
+                record: Dict[str, object] = {}
+                for field in STAMMDATEN_FIELDS:
+                    key = field["key"]
+                    field_type = field.get("type", "text")
+                    value = entry.get(key)
+                    if value is None:
+                        for alias in LEGACY_STAMMDATEN_ALIASES.get(key, []):
+                            if alias in entry:
+                                value = entry.get(alias)
+                                if value is not None:
+                                    break
+                    if field_type == "numeric":
+                        record[key] = _coerce_int(value)
+                    elif field_type == "bool":
+                        record[key] = _coerce_bool(value, default=False)
+                    else:
+                        record[key] = _coerce_str(value)
+
+                homepage = _coerce_str(
+                    record.get("homepage")
+                    or entry.get("homepage")
+                    or entry.get("url")
+                )
+                if not homepage:
+                    continue
+                record["homepage"] = homepage
+
+                if not record.get("schulname"):
+                    record["schulname"] = _coerce_str(entry.get("name"))
+
+                records.append(record)
         return records
 
 
@@ -875,15 +985,20 @@ def parse_stammdaten_excel(file_storage) -> List[Dict[str, object]]:
         for index, cell in enumerate(header_row)
     }
 
-    expected_headers = {
-        field["key"]: _normalize_header(field["label"])
-        for field in STAMMDATEN_FIELDS
-    }
+    expected_headers: Dict[str, Set[str]] = {}
+    for field in STAMMDATEN_FIELDS:
+        key = field["key"]
+        variants = expected_headers.setdefault(key, set())
+        variants.add(_normalize_header(field["label"]))
+        for alias in LEGACY_STAMMDATEN_ALIASES.get(key, []):
+            variants.add(_normalize_header(str(alias)))
 
     column_map: Dict[str, int] = {}
-    for key, normalized in expected_headers.items():
-        if normalized in header_map:
-            column_map[key] = header_map[normalized]
+    for key, options in expected_headers.items():
+        for normalized in options:
+            if normalized in header_map:
+                column_map[key] = header_map[normalized]
+                break
 
     if len(column_map) < len(STAMMDATEN_FIELDS):
         for field in STAMMDATEN_FIELDS:
@@ -897,14 +1012,19 @@ def parse_stammdaten_excel(file_storage) -> List[Dict[str, object]]:
         if not any(cell not in (None, "") for cell in values):
             continue
 
-        record = {}
+        record: Dict[str, object] = {}
         for field in STAMMDATEN_FIELDS:
             column_index = column_map.get(field["key"])
-            cell_value = values[column_index] if column_index is not None and column_index < len(values) else None
-            if field["key"] in {"anzahl_schueler", "anzahl_klassen"}:
+            cell_value = (
+                values[column_index]
+                if column_index is not None and column_index < len(values)
+                else None
+            )
+            field_type = field.get("type", "text")
+            if field_type == "numeric":
                 record[field["key"]] = _coerce_int(cell_value)
-            elif field["key"] == "aktiv":
-                record[field["key"]] = _coerce_bool(cell_value, default=True)
+            elif field_type == "bool":
+                record[field["key"]] = _coerce_bool(cell_value, default=False)
             else:
                 record[field["key"]] = _coerce_str(cell_value)
 
@@ -1124,8 +1244,9 @@ def index():
     stammdaten_records = [record for record in all_stammdaten_records if record.get("aktiv", True)]
     keywords_input = ""
     selected_homepages: List[str] = []
-    max_pages = MAX_PAGES_DEFAULT
-    concurrency = DEFAULT_CONCURRENCY
+    crawl_defaults = get_crawl_defaults()
+    max_pages = crawl_defaults["max_pages"]
+    concurrency = crawl_defaults["concurrency"]
     start_date_input = ""
     end_date_input = ""
     respect_robots = DEFAULT_RESPECT_ROBOTS
@@ -1147,8 +1268,8 @@ def index():
         submitted = True
         raw_keywords = request.form.get("keywords", "")
         keywords_input = raw_keywords
-        max_pages = request.form.get("max_pages", type=int, default=MAX_PAGES_DEFAULT)
-        concurrency = request.form.get("concurrency", type=int, default=DEFAULT_CONCURRENCY)
+        max_pages = request.form.get("max_pages", type=int, default=crawl_defaults["max_pages"])
+        concurrency = request.form.get("concurrency", type=int, default=crawl_defaults["concurrency"])
         start_date_input = request.form.get("start_date", "").strip()
         end_date_input = request.form.get("end_date", "").strip()
         respect_robots = bool(request.form.get("respect_robots"))
@@ -1409,10 +1530,13 @@ def index():
         "index.html",
         stammdaten_records=stammdaten_records,
         stammdaten_fields=STAMMDATEN_FIELDS,
+        stammdaten_primary_fields=STAMMDATEN_PRIMARY_FIELDS,
+        stammdaten_boolean_fields=STAMMDATEN_BOOLEAN_FIELDS,
         selected_homepages=selected_homepages,
         keywords_input=keywords_input,
         max_pages=max_pages,
         concurrency=concurrency,
+        crawl_defaults=crawl_defaults,
         start_date_input=start_date_input,
         end_date_input=end_date_input,
         respect_robots=respect_robots,
@@ -1463,6 +1587,8 @@ def stammdaten():
         message=message,
         message_category=message_category,
         stammdaten_fields=STAMMDATEN_FIELDS,
+        stammdaten_primary_fields=STAMMDATEN_PRIMARY_FIELDS,
+        stammdaten_boolean_fields=STAMMDATEN_BOOLEAN_FIELDS,
         storage_file=STAMMDATEN_PATH.name,
         active_page="stammdaten",
     )
@@ -1474,6 +1600,7 @@ def settings():
     message_category: Optional[str] = None
     key_present = has_api_key()
     synonym_defaults = get_synonym_defaults()
+    crawl_defaults = get_crawl_defaults()
 
     if request.method == "POST":
         form_id = request.form.get("form_id", "api")
@@ -1487,6 +1614,14 @@ def settings():
             update_synonym_defaults(values)
             synonym_defaults = get_synonym_defaults()
             message = "Die Standardwerte für die Synonymsuche wurden gespeichert."
+            message_category = "success"
+        elif form_id == "crawl-defaults":
+            values = {
+                "max_pages": request.form.get("crawl_max_pages"),
+                "concurrency": request.form.get("crawl_concurrency"),
+            }
+            crawl_defaults = update_crawl_defaults(values)
+            message = "Die Standardwerte für den Crawl wurden gespeichert."
             message_category = "success"
         else:
             action = request.form.get("action", "save")
@@ -1531,6 +1666,7 @@ def settings():
                     message_category = "success"
 
     key_present = has_api_key()
+    crawl_defaults = get_crawl_defaults()
 
     return render_template(
         "settings.html",
@@ -1539,6 +1675,9 @@ def settings():
         key_present=key_present,
         synonym_defaults=synonym_defaults,
         available_models=AVAILABLE_OPENAI_MODELS,
+        crawl_defaults=crawl_defaults,
+        max_concurrency=MAX_CONCURRENCY,
+        max_max_pages=MAX_MAX_PAGES,
         active_page="settings",
     )
 

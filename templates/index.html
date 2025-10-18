@@ -77,9 +77,9 @@
                     <button type="button" class="btn btn-outline-primary btn-sm" id="select-all">Alle auswählen</button>
                     <button type="button" class="btn btn-outline-secondary btn-sm" id="select-none">Keine auswählen</button>
                 </div>
-                <div class="row g-2 mb-3">
-                    {% for field in stammdaten_fields %}
-                        <div class="col-md-4">
+                <div class="row g-3 mb-3">
+                    {% for field in stammdaten_primary_fields %}
+                        <div class="col-lg-3 col-md-4 col-sm-6">
                             <label class="form-label mb-1">{{ field.label }}</label>
                             <div class="input-group input-group-sm">
                                 {% if field.type == 'numeric' %}
@@ -106,20 +106,34 @@
                         </div>
                     {% endfor %}
                 </div>
+                <div class="mb-3">
+                    <label class="form-label mb-1">Schularten (müssen vorhanden sein)</label>
+                    <div class="border rounded p-2" style="max-height: 220px; overflow-y: auto;">
+                        {% for field in stammdaten_boolean_fields %}
+                            <div class="form-check form-check-sm">
+                                <input class="form-check-input boolean-filter" type="checkbox" value="{{ field.key }}" id="filter-{{ field.key }}-bool" data-field="{{ field.key }}">
+                                <label class="form-check-label small" for="filter-{{ field.key }}-bool">{{ field.label }}</label>
+                            </div>
+                        {% endfor %}
+                    </div>
+                    <div class="form-text">Wählen Sie Schularten aus, die zwingend vorhanden sein müssen. Nur Schulen mit allen markierten Angeboten bleiben sichtbar und werden automatisch ausgewählt.</div>
+                </div>
                 <div class="form-text mb-2">Ausgewählte Schulen: <span id="selection-count">0</span></div>
                 <div class="table-responsive" style="max-height: 320px; overflow-y: auto;">
                     <table class="table table-sm table-hover align-middle mb-0">
                         <thead class="table-light">
                         <tr>
                             <th scope="col" style="width: 60px;">Auswahl</th>
+                            <th scope="col">Jahr</th>
                             <th scope="col">Schul&nbsp;ID</th>
-                            <th scope="col">Träger</th>
-                            <th scope="col">Name</th>
+                            <th scope="col">Status</th>
+                            <th scope="col">Schulname</th>
                             <th scope="col">Ort</th>
-                            <th scope="col">Anzahl Schüler</th>
-                            <th scope="col">Anzahl Klassen</th>
-                            <th scope="col">Homepage</th>
-                            <th scope="col">Aktiv</th>
+                            <th scope="col">Schüler/-innen</th>
+                            <th scope="col">Klassen</th>
+                            <th scope="col">Schularten</th>
+                            <th scope="col">URL</th>
+                            <th scope="col">Kontakt</th>
                         </tr>
                         </thead>
                         <tbody>
@@ -130,21 +144,37 @@
                                         <input class="form-check-input school-checkbox" type="checkbox" value="{{ record.homepage }}" id="school-{{ loop.index }}" name="start_urls"
                                                {% if record.homepage in selected_homepages %}checked{% endif %}
                                                {% for field in stammdaten_fields %}
-                                                   {% if field.key == 'aktiv' %}
-                                                       data-aktiv="{{ 'ja' if record.get(field.key, True) else 'nein' }}"
+                                                   {% set attr_name = field.key|replace('_', '-') %}
+                                                   {% set value = record.get(field.key) %}
+                                                   {% if field.type == 'bool' %}
+                                                       data-{{ attr_name }}="{{ 'true' if value else 'false' }}"
                                                    {% else %}
-                                                       data-{{ field.key|replace('_', '-') }}="{{ record.get(field.key, '') }}"
+                                                       data-{{ attr_name }}="{{ value if value is not none else '' }}"
                                                    {% endif %}
                                                {% endfor %}>
                                         <label class="form-check-label small" for="school-{{ loop.index }}">&nbsp;</label>
                                     </div>
                                 </td>
+                                <td>{{ record.jahr if record.jahr is not none else "–" }}</td>
                                 <td>{{ record.schul_id or "–" }}</td>
-                                <td>{{ record.traeger or "–" }}</td>
-                                <td>{{ record.name or "–" }}</td>
+                                <td>{{ record.status or "–" }}</td>
+                                <td>{{ record.schulname or "–" }}</td>
                                 <td>{{ record.ort or "–" }}</td>
-                                <td>{{ record.anzahl_schueler if record.anzahl_schueler is not none else "–" }}</td>
-                                <td>{{ record.anzahl_klassen if record.anzahl_klassen is not none else "–" }}</td>
+                                <td>{{ record.schueler_gesamt if record.schueler_gesamt is not none else "–" }}</td>
+                                <td>{{ record.klassen_gesamt if record.klassen_gesamt is not none else "–" }}</td>
+                                <td>
+                                    {% set angebote = [] %}
+                                    {% for field in stammdaten_boolean_fields %}
+                                        {% if record.get(field.key) %}
+                                            {% set angebote = angebote + [field.label] %}
+                                        {% endif %}
+                                    {% endfor %}
+                                    {% if angebote %}
+                                        <span class="small">{{ angebote|join(', ') }}</span>
+                                    {% else %}
+                                        <span class="text-muted">–</span>
+                                    {% endif %}
+                                </td>
                                 <td>
                                     {% if record.homepage %}
                                         <a href="{{ record.homepage }}" target="_blank" rel="noopener">{{ record.homepage }}</a>
@@ -152,7 +182,17 @@
                                         –
                                     {% endif %}
                                 </td>
-                                <td>{{ 'Ja' if record.get('aktiv', True) else 'Nein' }}</td>
+                                <td>
+                                    {% if record.telefon %}
+                                        <div class="small">Tel.: {{ record.telefon }}</div>
+                                    {% endif %}
+                                    {% if record.fax %}
+                                        <div class="small text-muted">Fax: {{ record.fax }}</div>
+                                    {% endif %}
+                                    {% if not record.telefon and not record.fax %}
+                                        <span class="text-muted">–</span>
+                                    {% endif %}
+                                </td>
                             </tr>
                         {% endfor %}
                         </tbody>
@@ -204,13 +244,13 @@
             <label for="max_pages" class="form-label">Maximale Seitenanzahl pro Start-URL</label>
             <input type="number" class="form-control" id="max_pages" name="max_pages" min="1"
                    value="{{ max_pages }}">
-            <div class="form-text">Begrenzt die Anzahl der Seiten, die pro Start-URL analysiert werden (Standard: {{ max_pages }}).</div>
+            <div class="form-text">Begrenzt die Anzahl der Seiten, die pro Start-URL analysiert werden (Standard: {{ crawl_defaults.max_pages }}).</div>
         </div>
         <div class="mb-3">
             <label for="concurrency" class="form-label">Parallele Seitenabrufe</label>
             <input type="number" class="form-control" id="concurrency" name="concurrency" min="1" max="{{ max_concurrency }}"
                    value="{{ concurrency }}">
-            <div class="form-text">Anzahl der Seiten, die gleichzeitig geladen werden (maximal {{ max_concurrency }}).</div>
+            <div class="form-text">Anzahl der Seiten, die gleichzeitig geladen werden (Standard: {{ crawl_defaults.concurrency }}, maximal {{ max_concurrency }}).</div>
         </div>
         {% if not has_api_key %}
             <div class="alert alert-warning" role="alert">
@@ -1415,6 +1455,7 @@
         const filterButtons = document.querySelectorAll('.filter-select');
         const filterInputs = document.querySelectorAll('.filter-input');
         const filterOperators = document.querySelectorAll('.filter-operator');
+        const booleanFilterCheckboxes = Array.from(document.querySelectorAll('.boolean-filter'));
         const numericFields = new Set([
             {% for field in stammdaten_fields if field.type == 'numeric' %}
                 '{{ field.key }}',
@@ -1438,6 +1479,17 @@
             return Object.keys(activeFilters).filter(key => Boolean(activeFilters[key]));
         }
 
+        function getBooleanFilterKeys() {
+            return booleanFilterCheckboxes
+                .filter(cb => cb.checked)
+                .map(cb => cb.dataset.field)
+                .filter(Boolean);
+        }
+
+        function hasFiltersApplied() {
+            return getActiveFilterKeys().length > 0 || getBooleanFilterKeys().length > 0;
+        }
+
         function normalizeNumeric(value) {
             if (typeof value !== 'string') {
                 value = value == null ? '' : String(value);
@@ -1455,8 +1507,9 @@
 
         function applyFilters() {
             const keys = getActiveFilterKeys();
+            const booleanKeys = getBooleanFilterKeys();
 
-            if (keys.length === 0) {
+            if (keys.length === 0 && booleanKeys.length === 0) {
                 schoolCheckboxes.forEach(cb => {
                     const row = cb.closest('tr');
                     if (row) {
@@ -1500,6 +1553,17 @@
                         }
                     } else {
                         if (!rawValue.toLowerCase().includes(filter.value)) {
+                            matches = false;
+                            break;
+                        }
+                    }
+                }
+
+                if (matches && booleanKeys.length > 0) {
+                    for (const key of booleanKeys) {
+                        const datasetKey = toDatasetKey(key);
+                        const rawValue = (cb.dataset[datasetKey] || '').toString().trim().toLowerCase();
+                        if (rawValue !== 'true') {
                             matches = false;
                             break;
                         }
@@ -1569,8 +1633,7 @@
 
         if (selectAllButton) {
             selectAllButton.addEventListener('click', () => {
-                const hasFilters = getActiveFilterKeys().length > 0;
-                if (hasFilters) {
+                if (hasFiltersApplied()) {
                     applyFilters();
                 } else {
                     schoolCheckboxes.forEach(cb => {
@@ -1616,6 +1679,12 @@
                     return;
                 }
                 applyFilterForField(field);
+            });
+        });
+
+        booleanFilterCheckboxes.forEach(cb => {
+            cb.addEventListener('change', () => {
+                applyFilters();
             });
         });
     })();

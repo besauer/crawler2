@@ -67,6 +67,29 @@
         </div>
     </div>
 
+    <div class="card mb-3">
+        <div class="card-body">
+            <h2 class="h5">Crawl-Standardwerte</h2>
+            <p class="text-muted">Diese Werte werden im Suchformular vorausgefüllt und können dort pro Lauf angepasst werden.</p>
+            <form method="post" class="row g-3">
+                <input type="hidden" name="form_id" value="crawl-defaults">
+                <div class="col-md-6 col-12">
+                    <label for="crawl_max_pages" class="form-label">Maximale Seitenanzahl pro Start-URL</label>
+                    <input type="number" class="form-control" id="crawl_max_pages" name="crawl_max_pages" min="1" max="{{ max_max_pages }}" value="{{ crawl_defaults.max_pages }}" required>
+                    <div class="form-text">Standardwert für das Suchformular (maximal {{ max_max_pages }} Seiten pro Start-URL).</div>
+                </div>
+                <div class="col-md-6 col-12">
+                    <label for="crawl_concurrency" class="form-label">Parallele Seitenabrufe</label>
+                    <input type="number" class="form-control" id="crawl_concurrency" name="crawl_concurrency" min="1" max="{{ max_concurrency }}" value="{{ crawl_defaults.concurrency }}" required>
+                    <div class="form-text">Standard für gleichzeitige Abrufe im Suchformular (maximal {{ max_concurrency }}).</div>
+                </div>
+                <div class="col-12">
+                    <button type="submit" class="btn btn-primary">Crawl-Standardwerte speichern</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
     <div class="card mb-4">
         <div class="card-body">
             <h2 class="h5">Synonym-Standardwerte</h2>
