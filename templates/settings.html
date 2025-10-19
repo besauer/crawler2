@@ -31,6 +31,11 @@
                        href="{{ url_for('stammdaten') }}">Stammdaten</a>
                 </li>
                 <li class="nav-item">
+                    <a class="nav-link {% if active_page == 'data_quality' %}active{% endif %}"
+                       {% if active_page == 'data_quality' %}aria-current="page"{% endif %}
+                       href="{{ url_for('data_quality') }}">Datenqualität</a>
+                </li>
+                <li class="nav-item">
                     <a class="nav-link {% if active_page == 'settings' %}active{% endif %}"
                        {% if active_page == 'settings' %}aria-current="page"{% endif %}
                        href="{{ url_for('settings') }}">Einstellungen</a>
@@ -84,6 +89,83 @@
                 <div class="col-12 d-flex flex-wrap gap-2">
                     <button type="submit" name="action" value="save" class="btn btn-primary">Speichern</button>
                     <button type="submit" name="action" value="remove" class="btn btn-outline-danger" {% if not keyword_planner_key_present %}disabled{% endif %}>Entfernen</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <div class="card mb-3">
+        <div class="card-body">
+            <h2 class="h5">Google Search API</h2>
+            <p class="text-muted">Dient der zweiten Prüfphase auf der Seite „Datenqualität“, um alternative Schul-URLs vorzuschlagen.</p>
+            <p class="mb-3"><strong>Status:</strong> {{ 'Konfiguriert' if google_credentials.api_key and google_credentials.cx else 'Unvollständig' }}</p>
+            <form method="post" class="row g-3">
+                <input type="hidden" name="form_id" value="google-search">
+                <div class="col-12">
+                    <label for="google_search_api_key" class="form-label">Google API-Key</label>
+                    <input type="password" class="form-control" id="google_search_api_key" name="google_search_api_key"
+                           value="" placeholder="AIza…" autocomplete="off">
+                    <div class="form-text">Wird lokal gespeichert und nur für Anfragen an die Custom Search API verwendet.</div>
+                </div>
+                <div class="col-12">
+                    <label for="google_search_cx" class="form-label">Suchmaschinen-ID (CX)</label>
+                    <input type="text" class="form-control" id="google_search_cx" name="google_search_cx"
+                           value="" placeholder="custom-search-id">
+                </div>
+                <div class="col-12 d-flex flex-wrap gap-2">
+                    <button type="submit" name="action" value="save" class="btn btn-primary">Speichern</button>
+                    <button type="submit" name="action" value="test" class="btn btn-outline-secondary">Verbindung testen</button>
+                    <button type="submit" name="action" value="remove" class="btn btn-outline-danger" {% if not google_credentials.api_key and not google_credentials.cx %}disabled{% endif %}>Entfernen</button>
+                </div>
+                {% if google_credentials.api_key or google_credentials.cx %}
+                    <div class="col-12 text-muted small">
+                        Aktuelle Werte: API-Key gespeichert: {{ 'Ja' if google_credentials.api_key else 'Nein' }}, CX: {{ google_credentials.cx or '–' }}
+                    </div>
+                {% endif %}
+            </form>
+        </div>
+    </div>
+
+    <div class="card mb-3">
+        <div class="card-body">
+            <h2 class="h5">Datenqualitäts-Standardwerte</h2>
+            <p class="text-muted">Steuert, wie viele Schulen pro Lauf geprüft werden und welche Modelle für die Bewertung genutzt werden.</p>
+            <form method="post" class="row g-3">
+                <input type="hidden" name="form_id" value="data-quality-defaults">
+                <div class="col-md-4 col-12">
+                    <label for="dq_model" class="form-label">Sprachmodell</label>
+                    <input type="text" class="form-control" id="dq_model" name="dq_model" list="model-options"
+                           value="{{ data_quality_settings.model }}" required>
+                </div>
+                <div class="col-md-4 col-12">
+                    <label for="dq_temperature" class="form-label">Temperatur</label>
+                    <input type="number" class="form-control" step="0.1" min="0" max="2" id="dq_temperature" name="dq_temperature"
+                           value="{{ '%.2f'|format(data_quality_settings.temperature|default(0.1)) }}" required>
+                </div>
+                <div class="col-md-4 col-12">
+                    <label for="dq_confidence_threshold" class="form-label">Vertrauensschwelle</label>
+                    <input type="number" class="form-control" step="0.05" min="0" max="1" id="dq_confidence_threshold" name="dq_confidence_threshold"
+                           value="{{ '%.2f'|format(data_quality_settings.confidence_threshold|default(0.85)) }}" required>
+                </div>
+                <div class="col-md-4 col-12">
+                    <label for="dq_max_search_results" class="form-label">Treffer pro Google-Suche</label>
+                    <input type="number" class="form-control" id="dq_max_search_results" name="dq_max_search_results" min="1" max="10"
+                           value="{{ data_quality_settings.max_search_results }}" required>
+                </div>
+                <div class="col-md-4 col-12">
+                    <label for="dq_batch_size" class="form-label">Datensätze pro Durchlauf</label>
+                    <input type="number" class="form-control" id="dq_batch_size" name="dq_batch_size" min="1" max="500"
+                           value="{{ data_quality_settings.batch_size }}" required>
+                </div>
+                <div class="col-md-4 col-12 d-flex align-items-center">
+                    <div class="form-check mt-4">
+                        <input class="form-check-input" type="checkbox" value="1" id="dq_dry_run" name="dq_dry_run"
+                               {% if data_quality_settings.dry_run %}checked{% endif %}>
+                        <label class="form-check-label" for="dq_dry_run">Dry-Run (keine Stammdaten überschreiben)</label>
+                    </div>
+                </div>
+                <div class="col-12">
+                    <button type="submit" class="btn btn-primary">Einstellungen speichern</button>
                 </div>
             </form>
         </div>

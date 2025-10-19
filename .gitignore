@@ -2,4 +2,5 @@ __pycache__/
 *.pyc
 synonym_cache.json
 keyword_finder_cache.json
+data_quality_results.json
 backups/

@@ -32,6 +32,11 @@
                        href="{{ url_for('stammdaten') }}">Stammdaten</a>
                 </li>
                 <li class="nav-item">
+                    <a class="nav-link {% if active_page == 'data_quality' %}active{% endif %}"
+                       {% if active_page == 'data_quality' %}aria-current="page"{% endif %}
+                       href="{{ url_for('data_quality') }}">Datenqualität</a>
+                </li>
+                <li class="nav-item">
                     <a class="nav-link {% if active_page == 'settings' %}active{% endif %}"
                        {% if active_page == 'settings' %}aria-current="page"{% endif %}
                        href="{{ url_for('settings') }}">Einstellungen</a>

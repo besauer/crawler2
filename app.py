@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import re
 import threading
 import time
 import unicodedata
@@ -11,11 +12,13 @@ from dataclasses import dataclass, field
 from datetime import date, datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
+from urllib.parse import urljoin, urlparse
 
 import requests
 from flask import Flask, jsonify, render_template, request
 from flask.typing import ResponseReturnValue
 from openpyxl import load_workbook
+from bs4 import BeautifulSoup
 
 from crawler import (
     CrawlProgress,
@@ -81,6 +84,44 @@ AVAILABLE_OPENAI_MODELS = [
     "gpt-3.5-turbo",
     "llama-3.1-70b",
 ]
+DATA_QUALITY_RESULTS_PATH = Path("data_quality_results.json")
+data_quality_lock = threading.Lock()
+DATA_QUALITY_SITE_PROMPT = (
+    "Du prüfst, ob eine Webseite zur angegebenen Schule gehört. Du erhältst Schulname und Ort sowie komprimierte "
+    "Textauszüge aus Startseite und Impressum. Bewerte ausschließlich, ob die Seite mit hoher Wahrscheinlichkeit "
+    "die offizielle Webseite der Schule ist. Antworte als JSON-Objekt mit den Schlüsseln \"bewertung\" (Werte: OK, "
+    "NEIN, UNSICHER), \"confidence\" (0.0–1.0), \"begruendung\" (kurze Begründung) und \"gefundene_signale\" "
+    "(Liste kurzer Stichworte)."
+)
+DATA_QUALITY_SEARCH_PROMPT = (
+    "Du erhältst Schulname, Ort und eine Liste möglicher Webseiten aus einer Google-Suche. Wähle die URL aus, die am "
+    "ehesten die offizielle Seite der Schule ist. Entferne irrelevante Treffer. Gib ein JSON-Objekt mit den "
+    "Schlüsseln \"empfehlung\" (URL oder null), \"confidence\" (0.0–1.0), \"begruendung\" (kurze Begründung) und "
+    "\"signale\" (Liste kurzer Stichworte) zurück."
+)
+DEFAULT_DATA_QUALITY_SETTINGS = {
+    "model": OPENAI_MODEL_NAME,
+    "temperature": 0.1,
+    "confidence_threshold": 0.85,
+    "max_search_results": 10,
+    "batch_size": 25,
+    "dry_run": False,
+}
+GOOGLE_SEARCH_API_URL = "https://www.googleapis.com/customsearch/v1"
+GOOGLE_SEARCH_TIMEOUT = 20
+DATA_QUALITY_IMPRESSUM_KEYWORDS = {
+    "impressum",
+    "kontakt",
+    "datenschutz",
+    "rechtliches",
+    "legal",
+    "anbieter",
+}
+MAX_DATA_QUALITY_HISTORY = 20
+QUALITY_STATUS_PENDING = "pending"
+QUALITY_STATUS_OK = "ok"
+QUALITY_STATUS_UNSURE = "unsure"
+QUALITY_STATUS_INVALID = "invalid"
 
 api_key_lock = threading.Lock()
 _api_key_value: Optional[str] = None
@@ -314,6 +355,116 @@ def update_keyword_finder_defaults(values: Dict[str, object]) -> Dict[str, objec
     }
     save_settings_data(current)
     return current["keyword_finder_defaults"]
+
+
+def get_google_search_credentials() -> Dict[str, str]:
+    data = load_settings_data()
+    if not isinstance(data, dict):
+        return {"api_key": "", "cx": ""}
+    return {
+        "api_key": str(data.get("google_search_api_key", "") or "").strip(),
+        "cx": str(data.get("google_search_cx", "") or "").strip(),
+    }
+
+
+def update_google_search_credentials(api_key: str, cx: str) -> Dict[str, str]:
+    data = load_settings_data()
+    if not isinstance(data, dict):
+        data = {}
+    data["google_search_api_key"] = api_key.strip()
+    data["google_search_cx"] = cx.strip()
+    save_settings_data(data)
+    return get_google_search_credentials()
+
+
+def clear_google_search_credentials() -> None:
+    data = load_settings_data()
+    if not isinstance(data, dict):
+        data = {}
+    data.pop("google_search_api_key", None)
+    data.pop("google_search_cx", None)
+    save_settings_data(data)
+
+
+def _default_data_quality_settings() -> Dict[str, object]:
+    return dict(DEFAULT_DATA_QUALITY_SETTINGS)
+
+
+def get_data_quality_settings() -> Dict[str, object]:
+    data = load_settings_data()
+    defaults = _default_data_quality_settings()
+    if not isinstance(data, dict):
+        return defaults
+    stored = data.get("data_quality_settings")
+    if not isinstance(stored, dict):
+        return defaults
+    result = dict(defaults)
+    model = str(stored.get("model", "") or "").strip()
+    if model:
+        result["model"] = model
+    try:
+        temperature = float(stored.get("temperature", defaults["temperature"]))
+    except (TypeError, ValueError):
+        temperature = defaults["temperature"]
+    temperature = max(0.0, min(temperature, 2.0))
+    result["temperature"] = temperature
+    try:
+        threshold = float(stored.get("confidence_threshold", defaults["confidence_threshold"]))
+    except (TypeError, ValueError):
+        threshold = defaults["confidence_threshold"]
+    threshold = max(0.0, min(threshold, 1.0))
+    result["confidence_threshold"] = threshold
+    try:
+        max_search = int(stored.get("max_search_results", defaults["max_search_results"]))
+    except (TypeError, ValueError):
+        max_search = defaults["max_search_results"]
+    result["max_search_results"] = max(1, min(max_search, 50))
+    try:
+        batch_size = int(stored.get("batch_size", defaults["batch_size"]))
+    except (TypeError, ValueError):
+        batch_size = defaults["batch_size"]
+    result["batch_size"] = max(1, min(batch_size, 200))
+    result["dry_run"] = bool(stored.get("dry_run", defaults["dry_run"]))
+    return result
+
+
+def update_data_quality_settings(values: Dict[str, object]) -> Dict[str, object]:
+    data = load_settings_data()
+    if not isinstance(data, dict):
+        data = {}
+    defaults = _default_data_quality_settings()
+    model = str(values.get("model", "") or defaults["model"]).strip() or defaults["model"]
+    try:
+        temperature = float(values.get("temperature", defaults["temperature"]))
+    except (TypeError, ValueError):
+        temperature = defaults["temperature"]
+    temperature = max(0.0, min(temperature, 2.0))
+    try:
+        threshold = float(values.get("confidence_threshold", defaults["confidence_threshold"]))
+    except (TypeError, ValueError):
+        threshold = defaults["confidence_threshold"]
+    threshold = max(0.0, min(threshold, 1.0))
+    try:
+        max_search = int(values.get("max_search_results", defaults["max_search_results"]))
+    except (TypeError, ValueError):
+        max_search = defaults["max_search_results"]
+    max_search = max(1, min(max_search, 50))
+    try:
+        batch_size = int(values.get("batch_size", defaults["batch_size"]))
+    except (TypeError, ValueError):
+        batch_size = defaults["batch_size"]
+    batch_size = max(1, min(batch_size, 200))
+    dry_run = bool(values.get("dry_run"))
+    data["data_quality_settings"] = {
+        "model": model,
+        "temperature": temperature,
+        "confidence_threshold": threshold,
+        "max_search_results": max_search,
+        "batch_size": batch_size,
+        "dry_run": dry_run,
+    }
+    save_settings_data(data)
+    return get_data_quality_settings()
 
 
 def _default_crawl_settings() -> Dict[str, int]:
@@ -1147,6 +1298,322 @@ def evaluate_keyword_with_openai(
     }
 
 
+def _collapse_whitespace(text: str) -> str:
+    return " ".join((text or "").split())
+
+
+def _truncate_text(text: str, limit: int) -> str:
+    if limit <= 0:
+        return ""
+    collapsed = _collapse_whitespace(text)
+    if len(collapsed) <= limit:
+        return collapsed
+    return collapsed[: limit - 3] + "..."
+
+
+def fetch_url_text(url: str) -> Optional[str]:
+    headers = {
+        "User-Agent": "Mozilla/5.0 (compatible; SchulCrawler/1.0)",
+        "Accept": "text/html,application/xhtml+xml",
+    }
+    try:
+        response = requests.get(url, headers=headers, timeout=15)
+    except requests.RequestException:
+        return None
+    if response.status_code >= 400:
+        return None
+    content_type = response.headers.get("Content-Type", "").lower()
+    if "text" not in content_type and "html" not in content_type:
+        return None
+    response.encoding = response.apparent_encoding or response.encoding
+    return response.text
+
+
+def extract_visible_text(html: str) -> str:
+    if not html:
+        return ""
+    soup = BeautifulSoup(html, "html.parser")
+    for element in soup(["script", "style", "noscript"]):
+        element.decompose()
+    texts = [segment.strip() for segment in soup.stripped_strings]
+    return " ".join(texts)
+
+
+def collect_site_snapshot(url: str) -> Dict[str, object]:
+    snapshot = {
+        "url": url,
+        "domain": urlparse(url).netloc,
+        "title": "",
+        "description": "",
+        "main_excerpt": "",
+        "impressum_excerpt": "",
+        "structured_signals": {},
+        "fetched_urls": [],
+        "errors": [],
+    }
+    html = fetch_url_text(url)
+    if not html:
+        snapshot["errors"].append("Startseite konnte nicht geladen werden.")
+        return snapshot
+
+    soup = BeautifulSoup(html, "html.parser")
+    snapshot["title"] = _collapse_whitespace(soup.title.string if soup.title else "")
+    description_tag = soup.find("meta", attrs={"name": re.compile("description", re.I)})
+    if description_tag:
+        snapshot["description"] = _collapse_whitespace(description_tag.get("content", ""))
+    text = extract_visible_text(html)
+    snapshot["main_excerpt"] = _truncate_text(text, 1500)
+    snapshot["fetched_urls"].append(url)
+
+    structured: Dict[str, object] = {}
+    emails = sorted({match.group(0) for match in re.finditer(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+", text)})
+    if emails:
+        structured["emails"] = emails[:5]
+    postal_lines: List[str] = []
+    for line in text.split(". "):
+        if re.search(r"\b\d{5}\b", line):
+            postal_lines.append(_collapse_whitespace(line))
+            if len(postal_lines) >= 5:
+                break
+    if postal_lines:
+        structured["addresses"] = postal_lines
+    snapshot["structured_signals"] = structured
+
+    base_url = url
+    nav_links: List[str] = []
+    for link in soup.find_all("a", href=True):
+        link_text = link.get_text(" ", strip=True).lower()
+        if any(keyword in link_text for keyword in DATA_QUALITY_IMPRESSUM_KEYWORDS):
+            absolute = urljoin(base_url, link["href"])
+            nav_links.append(absolute)
+    unique_links: List[str] = []
+    seen_nav: Set[str] = set()
+    for link in nav_links:
+        if link not in seen_nav:
+            seen_nav.add(link)
+            unique_links.append(link)
+        if len(unique_links) >= 3:
+            break
+
+    for nav_url in unique_links:
+        html_nav = fetch_url_text(nav_url)
+        if not html_nav:
+            continue
+        nav_text = extract_visible_text(html_nav)
+        if not nav_text:
+            continue
+        if "impressum" in nav_url.lower() or "impressum" in nav_text.lower():
+            snapshot["impressum_excerpt"] = _truncate_text(nav_text, 1500)
+        else:
+            if not snapshot["impressum_excerpt"]:
+                snapshot["impressum_excerpt"] = _truncate_text(nav_text, 800)
+        snapshot["fetched_urls"].append(nav_url)
+        if snapshot["impressum_excerpt"]:
+            break
+
+    return snapshot
+
+
+def assess_school_website_with_llm(
+    schulname: str,
+    ort: str,
+    url: str,
+    snapshot: Dict[str, object],
+    *,
+    api_key: str,
+    settings: Dict[str, object],
+) -> Optional[Dict[str, object]]:
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+    model_name = str(settings.get("model") or OPENAI_MODEL_NAME)
+    temperature = float(settings.get("temperature", DEFAULT_DATA_QUALITY_SETTINGS["temperature"]))
+    payload = {
+        "schule": schulname,
+        "ort": ort,
+        "url": url,
+        "domain": snapshot.get("domain"),
+        "seitentitel": snapshot.get("title"),
+        "beschreibung": snapshot.get("description"),
+        "startseite_text": snapshot.get("main_excerpt"),
+        "impressum_text": snapshot.get("impressum_excerpt"),
+        "signale": snapshot.get("structured_signals", {}),
+    }
+    request_payload = {
+        "model": model_name,
+        "messages": [
+            {"role": "system", "content": DATA_QUALITY_SITE_PROMPT},
+            {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
+        ],
+        "temperature": temperature,
+        "max_tokens": 600,
+    }
+
+    try:
+        response = requests.post(
+            OPENAI_CHAT_COMPLETIONS_URL,
+            headers=headers,
+            json=request_payload,
+            timeout=OPENAI_TIMEOUT,
+        )
+    except requests.RequestException:
+        return None
+
+    if response.status_code >= 400:
+        return None
+
+    try:
+        data = response.json()
+    except ValueError:
+        return None
+
+    choices = data.get("choices") if isinstance(data, dict) else None
+    content = ""
+    if isinstance(choices, list) and choices:
+        message = choices[0].get("message") if isinstance(choices[0], dict) else None
+        if isinstance(message, dict):
+            content = str(message.get("content", ""))
+    if not content:
+        return None
+
+    content = content.strip()
+    try:
+        parsed = json.loads(content)
+    except json.JSONDecodeError:
+        start_idx = content.find("{")
+        end_idx = content.rfind("}")
+        if start_idx == -1 or end_idx == -1 or end_idx <= start_idx:
+            return None
+        try:
+            parsed = json.loads(content[start_idx : end_idx + 1])
+        except json.JSONDecodeError:
+            return None
+    if not isinstance(parsed, dict):
+        return None
+    return parsed
+
+
+def perform_google_search(query: str, api_key: str, cx: str, *, max_results: int) -> List[Dict[str, object]]:
+    params = {
+        "key": api_key,
+        "cx": cx,
+        "q": query,
+        "num": max(1, min(max_results, 10)),
+        "hl": "de",
+        "safe": "active",
+    }
+    try:
+        response = requests.get(GOOGLE_SEARCH_API_URL, params=params, timeout=GOOGLE_SEARCH_TIMEOUT)
+    except requests.RequestException:
+        return []
+    if response.status_code >= 400:
+        return []
+    try:
+        payload = response.json()
+    except ValueError:
+        return []
+    items = payload.get("items") if isinstance(payload, dict) else None
+    results: List[Dict[str, object]] = []
+    if isinstance(items, list):
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            link = item.get("link")
+            if not link:
+                continue
+            results.append(
+                {
+                    "title": _collapse_whitespace(str(item.get("title", ""))),
+                    "snippet": _collapse_whitespace(str(item.get("snippet", ""))),
+                    "displayLink": str(item.get("displayLink", "")),
+                    "link": str(link),
+                }
+            )
+    return results
+
+
+def analyse_search_results_with_llm(
+    schulname: str,
+    ort: str,
+    original_url: str,
+    results: List[Dict[str, object]],
+    *,
+    api_key: str,
+    settings: Dict[str, object],
+) -> Optional[Dict[str, object]]:
+    if not results:
+        return None
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+    model_name = str(settings.get("model") or OPENAI_MODEL_NAME)
+    temperature = float(settings.get("temperature", DEFAULT_DATA_QUALITY_SETTINGS["temperature"]))
+    payload = {
+        "schule": schulname,
+        "ort": ort,
+        "original_url": original_url,
+        "treffer": results,
+    }
+    request_payload = {
+        "model": model_name,
+        "messages": [
+            {"role": "system", "content": DATA_QUALITY_SEARCH_PROMPT},
+            {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
+        ],
+        "temperature": temperature,
+        "max_tokens": 600,
+    }
+    try:
+        response = requests.post(
+            OPENAI_CHAT_COMPLETIONS_URL,
+            headers=headers,
+            json=request_payload,
+            timeout=OPENAI_TIMEOUT,
+        )
+    except requests.RequestException:
+        return None
+    if response.status_code >= 400:
+        return None
+    try:
+        data = response.json()
+    except ValueError:
+        return None
+    choices = data.get("choices") if isinstance(data, dict) else None
+    content = ""
+    if isinstance(choices, list) and choices:
+        message = choices[0].get("message") if isinstance(choices[0], dict) else None
+        if isinstance(message, dict):
+            content = str(message.get("content", ""))
+    if not content:
+        return None
+    content = content.strip()
+    try:
+        parsed = json.loads(content)
+    except json.JSONDecodeError:
+        start_idx = content.find("{")
+        end_idx = content.rfind("}")
+        if start_idx == -1 or end_idx == -1 or end_idx <= start_idx:
+            return None
+        try:
+            parsed = json.loads(content[start_idx : end_idx + 1])
+        except json.JSONDecodeError:
+            return None
+    if not isinstance(parsed, dict):
+        return None
+    return parsed
+
+
+def normalise_quality_decision(value: str) -> str:
+    text = (value or "").strip().lower()
+    if text in {"ok", "korrekt", "ja", "true"}:
+        return QUALITY_STATUS_OK
+    if text in {"nein", "falsch", "false"}:
+        return QUALITY_STATUS_INVALID
+    return QUALITY_STATUS_UNSURE
+
+
 def test_openai_api_key(api_key: str) -> None:
     headers = {"Authorization": f"Bearer {api_key}"}
     try:
@@ -1441,11 +1908,165 @@ def replace_saved_searches(entries: List[Dict[str, object]]) -> None:
             pass
 
 
+def _read_data_quality_results_unlocked() -> Dict[str, Dict[str, object]]:
+    if not DATA_QUALITY_RESULTS_PATH.exists():
+        return {}
+    try:
+        with DATA_QUALITY_RESULTS_PATH.open("r", encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (json.JSONDecodeError, OSError):
+        return {}
+    if isinstance(data, dict):
+        cleaned: Dict[str, Dict[str, object]] = {}
+        for key, value in data.items():
+            if isinstance(key, str) and isinstance(value, dict):
+                cleaned[key] = value
+        return cleaned
+    return {}
+
+
+def load_data_quality_results() -> Dict[str, Dict[str, object]]:
+    with data_quality_lock:
+        return dict(_read_data_quality_results_unlocked())
+
+
+def save_data_quality_results(payload: Dict[str, Dict[str, object]]) -> None:
+    with data_quality_lock:
+        data = {key: value for key, value in payload.items() if isinstance(key, str) and isinstance(value, dict)}
+        try:
+            with DATA_QUALITY_RESULTS_PATH.open("w", encoding="utf-8") as handle:
+                json.dump(data, handle, ensure_ascii=False, indent=2)
+        except OSError:
+            pass
+
+
+def replace_data_quality_results(payload: Dict[str, Dict[str, object]]) -> None:
+    with data_quality_lock:
+        data = payload if isinstance(payload, dict) else {}
+        try:
+            with DATA_QUALITY_RESULTS_PATH.open("w", encoding="utf-8") as handle:
+                json.dump(data, handle, ensure_ascii=False, indent=2)
+        except OSError:
+            pass
+
+
+def update_data_quality_record(school_id: str, updates: Dict[str, object]) -> Dict[str, object]:
+    if not school_id:
+        return {}
+    with data_quality_lock:
+        data = _read_data_quality_results_unlocked()
+        record = data.get(school_id, {}) if isinstance(data, dict) else {}
+        if not isinstance(record, dict):
+            record = {}
+        record.update(updates)
+        data[school_id] = record
+        try:
+            with DATA_QUALITY_RESULTS_PATH.open("w", encoding="utf-8") as handle:
+                json.dump(data, handle, ensure_ascii=False, indent=2)
+        except OSError:
+            pass
+        return dict(record)
+
+
+def append_data_quality_history(school_id: str, entry: Dict[str, object]) -> None:
+    if not school_id:
+        return
+    if not isinstance(entry, dict):
+        return
+    with data_quality_lock:
+        data = _read_data_quality_results_unlocked()
+        record = data.get(school_id)
+        if not isinstance(record, dict):
+            record = {}
+        history = record.get("history") if isinstance(record.get("history"), list) else []
+        history = list(history)
+        entry_with_ts = dict(entry)
+        entry_with_ts.setdefault("timestamp", datetime.utcnow().isoformat() + "Z")
+        history.append(entry_with_ts)
+        if len(history) > MAX_DATA_QUALITY_HISTORY:
+            history = history[-MAX_DATA_QUALITY_HISTORY:]
+        record["history"] = history
+        data[school_id] = record
+        try:
+            with DATA_QUALITY_RESULTS_PATH.open("w", encoding="utf-8") as handle:
+                json.dump(data, handle, ensure_ascii=False, indent=2)
+        except OSError:
+            pass
+
+
 def _normalize_header(value: str) -> str:
     normalized = unicodedata.normalize("NFKD", value or "")
     normalized = "".join(ch for ch in normalized if not unicodedata.combining(ch))
     normalized = normalized.lower().replace("-", " ").replace("_", " ")
     return " ".join(normalized.split())
+
+
+def quality_status_label(status: str) -> str:
+    mapping = {
+        QUALITY_STATUS_PENDING: "Noch nicht geprüft",
+        QUALITY_STATUS_OK: "OK",
+        QUALITY_STATUS_UNSURE: "Unsicher",
+        QUALITY_STATUS_INVALID: "Falsch",
+    }
+    return mapping.get(status, "Unbekannt")
+
+
+def build_data_quality_dataset() -> List[Dict[str, object]]:
+    records = load_stammdaten()
+    quality = load_data_quality_results()
+    dataset: List[Dict[str, object]] = []
+    for entry in records:
+        if not isinstance(entry, dict):
+            continue
+        schul_id = str(entry.get("schul_id") or "").strip()
+        if not schul_id:
+            continue
+        quality_entry = quality.get(schul_id) if isinstance(quality, dict) else None
+        if not isinstance(quality_entry, dict):
+            quality_entry = {}
+        status = str(quality_entry.get("status") or QUALITY_STATUS_PENDING)
+        formatted = dict(quality_entry)
+        formatted.setdefault("status", status)
+        formatted.setdefault("status_label", quality_status_label(status))
+        formatted.setdefault("last_checked", None)
+        formatted.setdefault("primary_reason", "")
+        formatted.setdefault("confidence", None)
+        formatted.setdefault("suggested_url", None)
+        formatted.setdefault("suggested_confidence", None)
+        formatted.setdefault("suggested_reason", "")
+        formatted.setdefault("manual_note", "")
+        dataset.append(
+            {
+                "schul_id": schul_id,
+                "schulname": entry.get("schulname"),
+                "ort": entry.get("ort"),
+                "homepage": entry.get("homepage"),
+                "status": formatted["status"],
+                "status_label": formatted["status_label"],
+                "quality": formatted,
+            }
+        )
+    return dataset
+
+
+def update_stammdaten_url(school_id: str, new_url: str) -> bool:
+    sanitized_id = str(school_id or "").strip()
+    new_value = str(new_url or "").strip()
+    if not sanitized_id or not new_value:
+        return False
+    records = load_stammdaten()
+    updated = False
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        candidate = str(record.get("schul_id") or "").strip()
+        if candidate == sanitized_id:
+            record["homepage"] = new_value
+            updated = True
+            break
+    if updated:
+        save_stammdaten(records)
+    return updated
 
 
 def _coerce_str(value: object) -> str:
@@ -1639,6 +2260,7 @@ def collect_backup_snapshot() -> Dict[str, object]:
         "saved_searches": load_saved_searches(),
         "synonym_cache": load_synonym_cache(),
         "keyword_finder_cache": load_keyword_finder_cache(),
+        "data_quality_results": load_data_quality_results(),
     }
 
 
@@ -1689,6 +2311,13 @@ def restore_from_backup() -> None:
     ):
         if isinstance(keyword_finder_cache_data, dict):
             replace_keyword_finder_cache(keyword_finder_cache_data)
+
+    data_quality_results_data = snapshot.get("data_quality_results")
+    if data_quality_results_data and (
+        not DATA_QUALITY_RESULTS_PATH.exists() or DATA_QUALITY_RESULTS_PATH.stat().st_size == 0
+    ):
+        if isinstance(data_quality_results_data, dict):
+            replace_data_quality_results(data_quality_results_data)
 
 
 def _backup_worker() -> None:
@@ -1894,6 +2523,87 @@ class CrawlJob:
 jobs: Dict[str, CrawlJob] = {}
 
 
+@dataclass
+class DataQualityJob:
+    id: str
+    school_ids: List[str]
+    total: int
+    processed: int = 0
+    status: str = "pending"  # pending, running, cancelled, finished, error
+    current_school: Optional[str] = None
+    progress_percent: int = 0
+    error: Optional[str] = None
+    completed: bool = False
+    results: List[Dict[str, object]] = field(default_factory=list)
+    started_at: float = field(default_factory=time.time)
+    messages: List[str] = field(default_factory=list)
+    cancel_event: threading.Event = field(default_factory=threading.Event, repr=False, compare=False)
+    _lock: threading.Lock = field(default_factory=threading.Lock, repr=False, compare=False)
+
+    def as_dict(self) -> Dict[str, object]:
+        with self._lock:
+            return {
+                "job_id": self.id,
+                "status": self.status,
+                "current_school": self.current_school,
+                "processed": self.processed,
+                "total": self.total,
+                "progress_percent": self.progress_percent,
+                "error": self.error,
+                "completed": self.completed,
+                "results": list(self.results),
+                "messages": list(self.messages),
+            }
+
+    def update_progress(
+        self,
+        *,
+        current_school: Optional[str] = None,
+        processed_increment: int = 0,
+        result: Optional[Dict[str, object]] = None,
+        message: Optional[str] = None,
+    ) -> None:
+        with self._lock:
+            if current_school is not None:
+                self.current_school = current_school
+            if processed_increment:
+                self.processed += processed_increment
+            if self.total:
+                self.progress_percent = int((self.processed / self.total) * 100)
+            if result:
+                self.results.append(result)
+                if len(self.results) > 50:
+                    self.results = self.results[-50:]
+            if message:
+                self.messages.append(message)
+                if len(self.messages) > 50:
+                    self.messages = self.messages[-50:]
+
+    def mark_completed(self, *, error: Optional[str] = None) -> None:
+        with self._lock:
+            if error:
+                self.error = error
+                self.status = "error"
+            else:
+                self.status = "finished"
+            self.completed = True
+            self.current_school = None
+            if not self.progress_percent and self.total:
+                self.progress_percent = int((self.processed / self.total) * 100)
+
+    def mark_cancelled(self) -> None:
+        with self._lock:
+            self.status = "cancelled"
+            self.completed = True
+            self.current_school = None
+
+    def request_cancel(self) -> None:
+        self.cancel_event.set()
+
+
+data_quality_jobs: Dict[str, DataQualityJob] = {}
+
+
 def run_crawl_job(job: CrawlJob) -> None:
     try:
         for index, start_url in enumerate(job.start_urls, start=1):
@@ -1929,6 +2639,233 @@ def run_crawl_job(job: CrawlJob) -> None:
             job.mark_cancelled()
         else:
             job.mark_completed()
+    except Exception as exc:  # pragma: no cover - defensive safety net
+        job.mark_completed(error=str(exc))
+
+
+
+def run_data_quality_job(job: DataQualityJob) -> None:
+    try:
+        openai_key = get_api_key()
+        if not openai_key:
+            job.mark_completed(error="OpenAI-Schlüssel erforderlich. Bitte unter Einstellungen speichern.")
+            return
+
+        all_records = load_stammdaten()
+        records_by_id: Dict[str, Dict[str, object]] = {}
+        for entry in all_records:
+            schul_id = str(entry.get("schul_id") or "").strip()
+            if schul_id:
+                records_by_id[schul_id] = entry
+
+        settings = get_data_quality_settings()
+        google_credentials = get_google_search_credentials()
+        google_key = google_credentials.get("api_key", "").strip()
+        google_cx = google_credentials.get("cx", "").strip()
+        threshold = float(settings.get("confidence_threshold", DEFAULT_DATA_QUALITY_SETTINGS["confidence_threshold"]))
+
+        with job._lock:
+            job.status = "running"
+
+        for school_id in job.school_ids:
+            if job.cancel_event.is_set():
+                job.mark_cancelled()
+                return
+
+            record = records_by_id.get(str(school_id))
+            if not record:
+                job.update_progress(
+                    processed_increment=1,
+                    result={"schul_id": school_id, "status": "not-found"},
+                    message=f"Keine Stammdaten für Schul-ID {school_id} gefunden.",
+                )
+                append_data_quality_history(
+                    str(school_id),
+                    {
+                        "stage": "info",
+                        "status": "fehlend",
+                        "detail": "Keine Stammdaten gefunden.",
+                    },
+                )
+                continue
+
+            homepage = str(record.get("homepage", "")).strip()
+            schulname = str(record.get("schulname", "")).strip() or str(record.get("Schulname", "")).strip()
+            ort = str(record.get("ort", "")).strip()
+
+            if not homepage:
+                job.update_progress(
+                    processed_increment=1,
+                    result={"schul_id": school_id, "status": "no-url"},
+                    message=f"Keine URL in den Stammdaten für {schulname or school_id}.",
+                )
+                append_data_quality_history(
+                    str(school_id),
+                    {
+                        "stage": "info",
+                        "status": "fehlend",
+                        "detail": "Keine URL in den Stammdaten hinterlegt.",
+                    },
+                )
+                continue
+
+            job.update_progress(current_school=str(school_id))
+
+            snapshot = collect_site_snapshot(homepage)
+            llm_result = assess_school_website_with_llm(
+                schulname,
+                ort,
+                homepage,
+                snapshot,
+                api_key=openai_key,
+                settings=settings,
+            )
+
+            status_primary = QUALITY_STATUS_UNSURE
+            primary_confidence: Optional[float] = None
+            primary_reason = "Keine Bewertung verfügbar."
+            primary_signals: List[str] = []
+
+            if llm_result:
+                status_primary = normalise_quality_decision(llm_result.get("bewertung", ""))
+                try:
+                    primary_confidence = float(llm_result.get("confidence"))
+                except (TypeError, ValueError):
+                    primary_confidence = None
+                primary_reason = str(llm_result.get("begruendung", "")).strip() or primary_reason
+                signals_raw = llm_result.get("gefundene_signale")
+                if isinstance(signals_raw, list):
+                    primary_signals = [str(item) for item in signals_raw if str(item).strip()]
+
+            meets_threshold = primary_confidence is not None and primary_confidence >= threshold
+            if status_primary == QUALITY_STATUS_OK and not meets_threshold:
+                status_after_primary = QUALITY_STATUS_UNSURE
+            elif status_primary == QUALITY_STATUS_INVALID and not meets_threshold:
+                status_after_primary = QUALITY_STATUS_UNSURE
+            else:
+                status_after_primary = status_primary
+
+            history_entry_site = {
+                "stage": "site",
+                "status": status_primary,
+                "confidence": primary_confidence,
+                "reason": primary_reason,
+                "signals": primary_signals,
+                "snapshot": {
+                    "title": snapshot.get("title"),
+                    "description": snapshot.get("description"),
+                    "main_excerpt": snapshot.get("main_excerpt"),
+                    "impressum_excerpt": snapshot.get("impressum_excerpt"),
+                    "structured_signals": snapshot.get("structured_signals"),
+                    "errors": snapshot.get("errors"),
+                },
+            }
+            append_data_quality_history(str(school_id), history_entry_site)
+
+            suggestion_url: Optional[str] = None
+            suggestion_confidence: Optional[float] = None
+            suggestion_reason = ""
+            suggestion_signals: List[str] = []
+            stage_source = "site"
+
+            if status_after_primary != QUALITY_STATUS_OK:
+                if not google_key or not google_cx:
+                    job.update_progress(
+                        message="Google Search API-Konfiguration fehlt. Zweite Prüfung übersprungen.",
+                    )
+                else:
+                    query = f"{schulname} {ort}".strip()
+                    search_results = perform_google_search(
+                        query,
+                        google_key,
+                        google_cx,
+                        max_results=int(settings.get("max_search_results", 10)),
+                    )
+                    llm_search = analyse_search_results_with_llm(
+                        schulname,
+                        ort,
+                        homepage,
+                        search_results,
+                        api_key=openai_key,
+                        settings=settings,
+                    )
+                    if llm_search:
+                        stage_source = "site+google"
+                        suggestion_url = str(llm_search.get("empfehlung") or "").strip() or None
+                        try:
+                            suggestion_confidence = float(llm_search.get("confidence"))
+                        except (TypeError, ValueError):
+                            suggestion_confidence = None
+                        suggestion_reason = str(llm_search.get("begruendung", "")).strip()
+                        signals_raw = llm_search.get("signale")
+                        if isinstance(signals_raw, list):
+                            suggestion_signals = [str(item) for item in signals_raw if str(item).strip()]
+                        append_data_quality_history(
+                            str(school_id),
+                            {
+                                "stage": "search",
+                                "status": status_after_primary,
+                                "suggestion": suggestion_url,
+                                "confidence": suggestion_confidence,
+                                "reason": suggestion_reason,
+                                "signals": suggestion_signals,
+                                "results": search_results,
+                            },
+                        )
+                        if suggestion_url and suggestion_confidence is not None and suggestion_confidence >= threshold:
+                            status_after_primary = QUALITY_STATUS_INVALID
+                    else:
+                        append_data_quality_history(
+                            str(school_id),
+                            {
+                                "stage": "search",
+                                "status": "fehlgeschlagen",
+                                "reason": "Keine verwertbare Antwort von der Zweitprüfung.",
+                                "results": search_results,
+                            },
+                        )
+
+            timestamp = datetime.utcnow().isoformat() + "Z"
+            record_update = {
+                "status": status_after_primary,
+                "last_checked": timestamp,
+                "confidence": primary_confidence,
+                "primary_decision": status_primary,
+                "primary_confidence": primary_confidence,
+                "primary_reason": primary_reason,
+                "primary_signals": primary_signals,
+                "snapshot": {
+                    "title": snapshot.get("title"),
+                    "description": snapshot.get("description"),
+                    "main_excerpt": snapshot.get("main_excerpt"),
+                    "impressum_excerpt": snapshot.get("impressum_excerpt"),
+                    "structured_signals": snapshot.get("structured_signals"),
+                    "errors": snapshot.get("errors"),
+                    "fetched_urls": snapshot.get("fetched_urls"),
+                },
+                "suggested_url": suggestion_url,
+                "suggested_confidence": suggestion_confidence,
+                "suggested_reason": suggestion_reason,
+                "suggested_signals": suggestion_signals,
+                "last_source": stage_source,
+                "school_name": schulname,
+                "school_location": ort,
+                "original_url": homepage,
+            }
+            update_data_quality_record(str(school_id), record_update)
+
+            job.update_progress(
+                processed_increment=1,
+                result={
+                    "schul_id": school_id,
+                    "status": status_after_primary,
+                    "confidence": primary_confidence,
+                    "suggested_url": suggestion_url,
+                    "suggested_confidence": suggestion_confidence,
+                },
+            )
+
+        job.mark_completed()
     except Exception as exc:  # pragma: no cover - defensive safety net
         job.mark_completed(error=str(exc))
 
@@ -2411,6 +3348,230 @@ def stammdaten():
     )
 
 
+@app.route("/data-quality")
+def data_quality() -> ResponseReturnValue:
+    dataset = build_data_quality_dataset()
+    dq_settings = get_data_quality_settings()
+    google_credentials = get_google_search_credentials()
+    google_configured = bool(google_credentials.get("api_key") and google_credentials.get("cx"))
+    return render_template(
+        "data_quality.html",
+        records=dataset,
+        data_quality_settings=dq_settings,
+        google_credentials=google_credentials,
+        openai_present=has_api_key(),
+        google_configured=google_configured,
+        status_labels={
+            QUALITY_STATUS_PENDING: quality_status_label(QUALITY_STATUS_PENDING),
+            QUALITY_STATUS_OK: quality_status_label(QUALITY_STATUS_OK),
+            QUALITY_STATUS_UNSURE: quality_status_label(QUALITY_STATUS_UNSURE),
+            QUALITY_STATUS_INVALID: quality_status_label(QUALITY_STATUS_INVALID),
+        },
+        active_page="data_quality",
+    )
+
+
+@app.route("/data-quality/data")
+def data_quality_data() -> ResponseReturnValue:
+    return jsonify({"records": build_data_quality_dataset()})
+
+
+@app.route("/data-quality/details/<school_id>")
+def data_quality_details(school_id: str) -> ResponseReturnValue:
+    results = load_data_quality_results()
+    record = results.get(str(school_id)) if isinstance(results, dict) else None
+    if not isinstance(record, dict):
+        return jsonify({"error": "Keine Daten vorhanden."}), 404
+    return jsonify({"school_id": school_id, "quality": record, "history": record.get("history", [])})
+
+
+@app.route("/data-quality/start", methods=["POST"])
+def start_data_quality_job() -> ResponseReturnValue:
+    payload = request.get_json(silent=True) or {}
+    school_ids_raw = payload.get("school_ids")
+    dataset = build_data_quality_dataset()
+    if isinstance(school_ids_raw, list) and school_ids_raw:
+        school_ids = [str(item).strip() for item in school_ids_raw if str(item).strip()]
+    else:
+        school_ids = [record["schul_id"] for record in dataset]
+    school_ids = [sid for sid in school_ids if sid]
+    if not school_ids:
+        return jsonify({"error": "Keine Schulen ausgewählt."}), 400
+    settings = get_data_quality_settings()
+    try:
+        batch_size = int(settings.get("batch_size", len(school_ids)))
+    except (TypeError, ValueError):
+        batch_size = len(school_ids)
+    if batch_size > 0:
+        school_ids = school_ids[:batch_size]
+
+    job_id = str(uuid.uuid4())
+    job = DataQualityJob(id=job_id, school_ids=school_ids, total=len(school_ids))
+    data_quality_jobs[job_id] = job
+    thread = threading.Thread(target=run_data_quality_job, args=(job,), daemon=True)
+    thread.start()
+    return jsonify({"job_id": job_id})
+
+
+@app.route("/data-quality/status/<job_id>")
+def data_quality_status(job_id: str) -> ResponseReturnValue:
+    job = data_quality_jobs.get(job_id)
+    if not job:
+        return jsonify({"error": "Unbekannte Job-ID"}), 404
+    return jsonify(job.as_dict())
+
+
+@app.route("/data-quality/cancel/<job_id>", methods=["POST"])
+def cancel_data_quality_job(job_id: str) -> ResponseReturnValue:
+    job = data_quality_jobs.get(job_id)
+    if not job:
+        return jsonify({"error": "Unbekannte Job-ID"}), 404
+    job.request_cancel()
+    return jsonify({"status": "cancelled"})
+
+
+@app.route("/data-quality/export")
+def export_data_quality() -> ResponseReturnValue:
+    data = load_data_quality_results()
+    response = app.response_class(
+        json.dumps(data, ensure_ascii=False, indent=2),
+        mimetype="application/json",
+    )
+    response.headers["Content-Disposition"] = "attachment; filename=data_quality_results.json"
+    return response
+
+
+@app.route("/data-quality/record/<school_id>", methods=["POST"])
+def manage_data_quality_record(school_id: str) -> ResponseReturnValue:
+    payload = request.get_json(silent=True) or {}
+    action = (payload.get("action") or "").strip().lower()
+    if not action:
+        return jsonify({"error": "Keine Aktion übermittelt."}), 400
+
+    school_id = str(school_id)
+    dry_run = bool(get_data_quality_settings().get("dry_run", False))
+    results = load_data_quality_results()
+    record = results.get(school_id) if isinstance(results, dict) else None
+    if not isinstance(record, dict):
+        record = {"status": QUALITY_STATUS_PENDING}
+
+    now_iso = datetime.utcnow().isoformat() + "Z"
+
+    if action == "accept_suggestion":
+        suggestion = str(record.get("suggested_url") or "").strip()
+        if not suggestion:
+            return jsonify({"error": "Kein URL-Vorschlag vorhanden."}), 400
+        updated = True
+        if not dry_run:
+            updated = update_stammdaten_url(school_id, suggestion)
+        if updated:
+            update_data_quality_record(
+                school_id,
+                {
+                    "status": QUALITY_STATUS_PENDING,
+                    "original_url": suggestion,
+                    "last_checked": now_iso,
+                    "manual_note": "Vorschlag übernommen" + (" (Dry-Run)" if dry_run else ""),
+                    "suggested_url": None,
+                    "suggested_confidence": None,
+                    "suggested_reason": "",
+                    "suggested_signals": [],
+                },
+            )
+            append_data_quality_history(
+                school_id,
+                {
+                    "stage": "manual",
+                    "status": "accepted",
+                    "detail": "URL-Vorschlag übernommen" + (" (Dry-Run)" if dry_run else ""),
+                },
+            )
+            return jsonify({"status": "ok", "records": build_data_quality_dataset()})
+        return jsonify({"error": "URL konnte nicht aktualisiert werden."}), 500
+
+    if action == "update_url":
+        new_url = str(payload.get("url") or "").strip()
+        if not new_url:
+            return jsonify({"error": "Bitte geben Sie eine gültige URL an."}), 400
+        updated = True
+        if not dry_run:
+            updated = update_stammdaten_url(school_id, new_url)
+        if updated:
+            update_data_quality_record(
+                school_id,
+                {
+                    "status": QUALITY_STATUS_PENDING,
+                    "original_url": new_url,
+                    "last_checked": now_iso,
+                    "manual_note": "URL manuell angepasst" + (" (Dry-Run)" if dry_run else ""),
+                    "suggested_url": None,
+                    "suggested_confidence": None,
+                    "suggested_reason": "",
+                    "suggested_signals": [],
+                },
+            )
+            append_data_quality_history(
+                school_id,
+                {
+                    "stage": "manual",
+                    "status": "updated",
+                    "detail": "URL manuell angepasst" + (" (Dry-Run)" if dry_run else ""),
+                    "url": new_url,
+                },
+            )
+            return jsonify({"status": "ok", "records": build_data_quality_dataset()})
+        return jsonify({"error": "URL konnte nicht aktualisiert werden."}), 500
+
+    if action == "mark_ok":
+        update_data_quality_record(
+            school_id,
+            {
+                "status": QUALITY_STATUS_OK,
+                "last_checked": now_iso,
+                "confidence": 1.0,
+                "manual_note": "Manuell als korrekt markiert",
+            },
+        )
+        append_data_quality_history(
+            school_id,
+            {
+                "stage": "manual",
+                "status": "ok",
+                "detail": "Manuell als korrekt markiert.",
+            },
+        )
+        return jsonify({"status": "ok", "records": build_data_quality_dataset()})
+
+    if action == "ignore":
+        update_data_quality_record(
+            school_id,
+            {
+                "ignored": True,
+                "last_checked": now_iso,
+                "manual_note": "Als ignoriert markiert",
+            },
+        )
+        append_data_quality_history(
+            school_id,
+            {
+                "stage": "manual",
+                "status": "ignored",
+                "detail": "Als ignoriert markiert.",
+            },
+        )
+        return jsonify({"status": "ok", "records": build_data_quality_dataset()})
+
+    if action == "recheck":
+        job_id = str(uuid.uuid4())
+        job = DataQualityJob(id=job_id, school_ids=[school_id], total=1)
+        data_quality_jobs[job_id] = job
+        thread = threading.Thread(target=run_data_quality_job, args=(job,), daemon=True)
+        thread.start()
+        return jsonify({"status": "started", "job_id": job_id})
+
+    return jsonify({"error": f"Unbekannte Aktion: {action}"}), 400
+
+
 @app.route("/settings", methods=["GET", "POST"])
 def settings():
     message: Optional[str] = None
@@ -2420,6 +3581,8 @@ def settings():
     synonym_defaults = get_synonym_defaults()
     keyword_finder_defaults = get_keyword_finder_defaults()
     crawl_defaults = get_crawl_defaults()
+    google_credentials = get_google_search_credentials()
+    data_quality_settings = get_data_quality_settings()
 
     if request.method == "POST":
         form_id = request.form.get("form_id", "api")
@@ -2451,6 +3614,54 @@ def settings():
             }
             keyword_finder_defaults = update_keyword_finder_defaults(values)
             message = "Die Standardwerte für den Keyword-Finder wurden gespeichert."
+            message_category = "success"
+        elif form_id == "google-search":
+            action = request.form.get("action", "save")
+            if action == "remove":
+                clear_google_search_credentials()
+                google_credentials = get_google_search_credentials()
+                message = "Die Google-Search-Zugangsdaten wurden entfernt."
+                message_category = "success"
+            elif action == "test":
+                candidate_key = request.form.get("google_search_api_key", "").strip()
+                candidate_cx = request.form.get("google_search_cx", "").strip()
+                api_key = candidate_key or google_credentials.get("api_key")
+                cx = candidate_cx or google_credentials.get("cx")
+                if not api_key or not cx:
+                    message = "Bitte geben Sie API-Key und Search-Engine-ID an oder speichern Sie sie zuerst."
+                    message_category = "danger"
+                else:
+                    results = perform_google_search(
+                        "Beispielschule Stuttgart",
+                        api_key,
+                        cx,
+                        max_results=1,
+                    )
+                    if results:
+                        if candidate_key or candidate_cx:
+                            google_credentials = update_google_search_credentials(api_key, cx)
+                        message = "Die Google-Suche war erfolgreich."
+                        message_category = "success"
+                    else:
+                        message = "Testsuche fehlgeschlagen. Bitte Zugangsdaten prüfen."
+                        message_category = "danger"
+            else:
+                api_key = request.form.get("google_search_api_key", "").strip()
+                cx = request.form.get("google_search_cx", "").strip()
+                google_credentials = update_google_search_credentials(api_key, cx)
+                message = "Die Google-Search-Zugangsdaten wurden gespeichert."
+                message_category = "success"
+        elif form_id == "data-quality-defaults":
+            values = {
+                "model": request.form.get("dq_model", ""),
+                "temperature": request.form.get("dq_temperature"),
+                "confidence_threshold": request.form.get("dq_confidence_threshold"),
+                "max_search_results": request.form.get("dq_max_search_results"),
+                "batch_size": request.form.get("dq_batch_size"),
+                "dry_run": request.form.get("dq_dry_run"),
+            }
+            data_quality_settings = update_data_quality_settings(values)
+            message = "Die Einstellungen für die Datenqualität wurden gespeichert."
             message_category = "success"
         elif form_id == "google-key":
             action = request.form.get("action", "save")
@@ -2519,6 +3730,8 @@ def settings():
     planner_key_present = has_keyword_planner_key()
     keyword_finder_defaults = get_keyword_finder_defaults()
     crawl_defaults = get_crawl_defaults()
+    google_credentials = get_google_search_credentials()
+    data_quality_settings = get_data_quality_settings()
 
     return render_template(
         "settings.html",
@@ -2533,6 +3746,8 @@ def settings():
         max_max_pages=MAX_MAX_PAGES,
         keyword_finder_defaults=keyword_finder_defaults,
         keyword_finder_max_results=DEFAULT_KEYWORD_FINDER_MAX_RESULTS,
+        google_credentials=google_credentials,
+        data_quality_settings=data_quality_settings,
         active_page="settings",
     )
 
