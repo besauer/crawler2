@@ -1,0 +1,675 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+    <meta charset="UTF-8">
+    <title>Suchergebnisse – Schul-Webseiten Crawler</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css"
+          integrity="sha384-QWTKZyjpPEjISv5WaRU9OFeRpok6YctnYmDr5pNlyT2bRjXh0JMhjY6hW+ALEwIH"
+          crossorigin="anonymous">
+    <style>
+        body { padding-top: 0; }
+        .definition-row.active { background-color: rgba(13, 110, 253, 0.08); }
+        .run-row.active { background-color: rgba(25, 135, 84, 0.08); }
+        .results-table td { vertical-align: top; }
+        .badge-dimension { margin: 0 .25rem .25rem 0; }
+    </style>
+</head>
+<body>
+<nav class="navbar navbar-expand-lg navbar-light bg-light border-bottom">
+    <div class="container">
+        <div class="d-flex align-items-center w-100">
+            <div class="d-flex align-items-center">
+                <a class="navbar-brand me-3" href="{{ url_for('index') }}">Schul-Crawler</a>
+                <div class="d-none d-lg-flex align-items-center gap-2">
+                    <button type="button" class="btn btn-sm btn-outline-secondary" data-bundle-action="import">Import</button>
+                    <button type="button" class="btn btn-sm btn-primary" data-bundle-action="export">Export</button>
+                </div>
+            </div>
+            <button class="navbar-toggler ms-auto" type="button" data-bs-toggle="collapse" data-bs-target="#mainNav"
+                    aria-controls="mainNav" aria-expanded="false" aria-label="Navigation umschalten">
+                <span class="navbar-toggler-icon"></span>
+            </button>
+        </div>
+        <div class="collapse navbar-collapse" id="mainNav">
+            <div class="d-lg-none py-3 border-top">
+                <div class="d-grid gap-2 mb-2">
+                    <button type="button" class="btn btn-outline-secondary" data-bundle-action="import">Vollständiger Import</button>
+                    <button type="button" class="btn btn-primary" data-bundle-action="export">Vollständiger Export</button>
+                </div>
+            </div>
+            <ul class="navbar-nav ms-auto mb-2 mb-lg-0">
+                <li class="nav-item">
+                    <a class="nav-link {% if active_page == 'search' %}active{% endif %}"
+                       {% if active_page == 'search' %}aria-current="page"{% endif %}
+                       href="{{ url_for('index') }}">Suche</a>
+                </li>
+                <li class="nav-item">
+                    <a class="nav-link {% if active_page == 'search_results' %}active{% endif %}"
+                       {% if active_page == 'search_results' %}aria-current="page"{% endif %}
+                       href="{{ url_for('searches') }}">Suchergebnisse</a>
+                </li>
+                <li class="nav-item">
+                    <a class="nav-link {% if active_page == 'stammdaten' %}active{% endif %}"
+                       {% if active_page == 'stammdaten' %}aria-current="page"{% endif %}
+                       href="{{ url_for('stammdaten') }}">Stammdaten</a>
+                </li>
+                <li class="nav-item">
+                    <a class="nav-link {% if active_page == 'data_quality' %}active{% endif %}"
+                       {% if active_page == 'data_quality' %}aria-current="page"{% endif %}
+                       href="{{ url_for('data_quality') }}">Datenqualität</a>
+                </li>
+                <li class="nav-item">
+                    <a class="nav-link {% if active_page == 'settings' %}active{% endif %}"
+                       {% if active_page == 'settings' %}aria-current="page"{% endif %}
+                       href="{{ url_for('settings') }}">Einstellungen</a>
+                </li>
+            </ul>
+        </div>
+    </div>
+</nav>
+<main class="container py-4">
+    <div class="d-flex flex-wrap justify-content-between align-items-center mb-4 gap-2">
+        <div>
+            <h1 class="mb-0">Suchergebnisse</h1>
+            <p class="text-muted mb-0">Verwalten Sie KI-gestützte Suchläufe, bewerten Sie Ergebnisse nach Dimensionen und analysieren Sie Trends pro Schule.</p>
+        </div>
+        <div class="text-end">
+            {% if not has_api_key %}
+                <div class="alert alert-warning py-2 px-3 mb-2">OpenAI-Schlüssel fehlt – Bewertungen können nicht gestartet werden.</div>
+            {% endif %}
+            {% if not google_configured %}
+                <div class="alert alert-info py-2 px-3 mb-0">Google Search API ist nicht konfiguriert. Treffer basieren ausschließlich auf vorhandenen URLs.</div>
+            {% endif %}
+        </div>
+    </div>
+
+    <div class="row g-4">
+        <div class="col-lg-4">
+            <div class="card mb-4">
+                <div class="card-header d-flex justify-content-between align-items-center">
+                    <h2 class="h5 mb-0">Suche konfigurieren</h2>
+                    <button type="button" class="btn btn-sm btn-outline-secondary" id="reset-definition">Neu</button>
+                </div>
+                <div class="card-body">
+                    <div class="alert alert-danger d-none" id="definition-error" role="alert"></div>
+                    <form id="definition-form" class="vstack gap-3">
+                        <input type="hidden" id="definition-id">
+                        <div>
+                            <label class="form-label" for="definition-name">Name der Suche</label>
+                            <input type="text" class="form-control" id="definition-name" required>
+                        </div>
+                        <div>
+                            <label class="form-label" for="definition-description">Beschreibung</label>
+                            <textarea class="form-control" id="definition-description" rows="2"></textarea>
+                        </div>
+                        <div>
+                            <label class="form-label" for="definition-keywords">Suchstichwörter <span class="text-muted small">(ein Stichwort pro Zeile)</span></label>
+                            <textarea class="form-control" id="definition-keywords" rows="4" required></textarea>
+                        </div>
+                        <div>
+                            <label class="form-label" for="definition-schools">Schulen auswählen</label>
+                            <select class="form-select" id="definition-schools" multiple size="6">
+                                {% for record in schools %}
+                                    <option value="{{ record.schul_id }}">{{ record.schulname }} – {{ record.ort }}</option>
+                                {% endfor %}
+                            </select>
+                            <div class="form-text">Wenn leer, werden alle aktiven Schulen berücksichtigt.</div>
+                        </div>
+                        <div>
+                            <label class="form-label" for="definition-prompt">Bewertungsprompt</label>
+                            <textarea class="form-control" id="definition-prompt" rows="5">{{ search_defaults.prompt }}</textarea>
+                        </div>
+                        <div class="row g-2">
+                            <div class="col-sm-6">
+                                <label class="form-label" for="definition-model">Modell</label>
+                                <select class="form-select" id="definition-model">
+                                    {% for model in available_models %}
+                                        <option value="{{ model }}" {% if model == search_defaults.model %}selected{% endif %}>{{ model }}</option>
+                                    {% endfor %}
+                                </select>
+                            </div>
+                            <div class="col-sm-3">
+                                <label class="form-label" for="definition-temperature">Temperatur</label>
+                                <input type="number" step="0.1" min="0" max="2" class="form-control" id="definition-temperature" value="{{ search_defaults.temperature }}">
+                            </div>
+                            <div class="col-sm-3">
+                                <label class="form-label" for="definition-max-results">Treffer</label>
+                                <input type="number" min="1" max="150" class="form-control" id="definition-max-results" value="{{ search_defaults.max_results }}">
+                            </div>
+                        </div>
+                        <div class="d-grid gap-2">
+                            <button type="submit" class="btn btn-primary">Speichern</button>
+                            <button type="button" class="btn btn-success" id="start-run" {% if not has_api_key %}disabled{% endif %}>Suche starten</button>
+                        </div>
+                    </form>
+                </div>
+            </div>
+
+            <div class="card">
+                <div class="card-header d-flex justify-content-between align-items-center">
+                    <h2 class="h5 mb-0">Gespeicherte Suchen</h2>
+                    <span class="badge bg-secondary" id="definition-count">0</span>
+                </div>
+                <div class="table-responsive">
+                    <table class="table table-sm mb-0" id="definitions-table">
+                        <thead>
+                        <tr>
+                            <th>Name</th>
+                            <th class="text-end">Stichwörter</th>
+                            <th>Status</th>
+                            <th class="text-end">Aktionen</th>
+                        </tr>
+                        </thead>
+                        <tbody></tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+
+        <div class="col-lg-8">
+            <div class="card mb-4">
+                <div class="card-header d-flex justify-content-between align-items-center">
+                    <h2 class="h5 mb-0">Suchläufe</h2>
+                    <div class="small text-muted" id="run-summary">Keine Läufe ausgewählt.</div>
+                </div>
+                <div class="table-responsive">
+                    <table class="table table-sm mb-0" id="runs-table">
+                        <thead>
+                        <tr>
+                            <th>Start</th>
+                            <th>Status</th>
+                            <th class="text-end">Ergebnisse</th>
+                            <th>Modell</th>
+                            <th class="text-end">Aktionen</th>
+                        </tr>
+                        </thead>
+                        <tbody></tbody>
+                    </table>
+                </div>
+            </div>
+
+            <div class="card mb-4">
+                <div class="card-header d-flex flex-wrap gap-3 align-items-center justify-content-between">
+                    <div>
+                        <h2 class="h5 mb-0">Ergebnisse</h2>
+                        <div class="small text-muted" id="results-summary">Bitte wählen Sie einen Suchlauf aus.</div>
+                    </div>
+                    <form class="row g-2 align-items-end" id="result-filter-form">
+                        <div class="col-md-4">
+                            <label class="form-label" for="filter-dimension">Dimension</label>
+                            <select class="form-select" id="filter-dimension">
+                                <option value="">Alle</option>
+                                {% for dimension in search_dimensions %}
+                                    <option value="{{ dimension }}">{{ dimension }}</option>
+                                {% endfor %}
+                            </select>
+                        </div>
+                        <div class="col-md-3">
+                            <label class="form-label" for="filter-min-value">Min. Wert</label>
+                            <input type="number" step="1" min="0" max="5" class="form-control" id="filter-min-value" placeholder="0-5">
+                        </div>
+                        <div class="col-md-3">
+                            <label class="form-label" for="filter-min-confidence">Min. Sicherheit</label>
+                            <input type="number" step="0.1" min="0" max="1" class="form-control" id="filter-min-confidence" placeholder="0-1">
+                        </div>
+                        <div class="col-md-2 d-grid">
+                            <button type="submit" class="btn btn-outline-primary">Filtern</button>
+                        </div>
+                    </form>
+                </div>
+                <div class="card-body">
+                    <div class="row g-3">
+                        <div class="col-lg-6">
+                            <h3 class="h6">Dimensionen</h3>
+                            <div class="table-responsive">
+                                <table class="table table-sm mb-0" id="dimension-summary-table">
+                                    <thead>
+                                    <tr>
+                                        <th>Dimension</th>
+                                        <th class="text-end">Anzahl</th>
+                                        <th class="text-end">Ø Wert</th>
+                                        <th class="text-end">Ø Sicherheit</th>
+                                    </tr>
+                                    </thead>
+                                    <tbody></tbody>
+                                </table>
+                            </div>
+                        </div>
+                        <div class="col-lg-6">
+                            <h3 class="h6">Schulen</h3>
+                            <div class="table-responsive">
+                                <table class="table table-sm mb-0" id="school-summary-table">
+                                    <thead>
+                                    <tr>
+                                        <th>Schule</th>
+                                        <th class="text-end">Treffer</th>
+                                    </tr>
+                                    </thead>
+                                    <tbody></tbody>
+                                </table>
+                            </div>
+                        </div>
+                    </div>
+                    <hr>
+                    <div class="table-responsive">
+                        <table class="table table-striped table-hover results-table" id="results-table">
+                            <thead>
+                            <tr>
+                                <th>Schule</th>
+                                <th>Keyword</th>
+                                <th>URL</th>
+                                <th class="text-end">Ø Wert</th>
+                                <th>Dimensionen</th>
+                                <th>Auszug</th>
+                            </tr>
+                            </thead>
+                            <tbody></tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</main>
+
+<script>
+    const defaults = {{ search_defaults|tojson }};
+    const dimensions = {{ search_dimensions|tojson }};
+    const state = {
+        definitions: {{ definitions|tojson }},
+        runs: {{ runs|tojson }},
+        jobs: {{ active_jobs|tojson }},
+        selectedDefinitionId: null,
+        selectedRunId: null,
+        polling: {},
+    };
+
+    const definitionForm = document.getElementById('definition-form');
+    const definitionIdInput = document.getElementById('definition-id');
+    const definitionNameInput = document.getElementById('definition-name');
+    const definitionDescriptionInput = document.getElementById('definition-description');
+    const definitionKeywordsInput = document.getElementById('definition-keywords');
+    const definitionSchoolsSelect = document.getElementById('definition-schools');
+    const definitionPromptInput = document.getElementById('definition-prompt');
+    const definitionModelSelect = document.getElementById('definition-model');
+    const definitionTemperatureInput = document.getElementById('definition-temperature');
+    const definitionMaxResultsInput = document.getElementById('definition-max-results');
+    const definitionError = document.getElementById('definition-error');
+    const definitionsTableBody = document.querySelector('#definitions-table tbody');
+    const definitionCount = document.getElementById('definition-count');
+    const resetDefinitionButton = document.getElementById('reset-definition');
+    const startRunButton = document.getElementById('start-run');
+    const runsTableBody = document.querySelector('#runs-table tbody');
+    const runSummary = document.getElementById('run-summary');
+    const resultSummary = document.getElementById('results-summary');
+    const resultsTableBody = document.querySelector('#results-table tbody');
+    const dimensionSummaryBody = document.querySelector('#dimension-summary-table tbody');
+    const schoolSummaryBody = document.querySelector('#school-summary-table tbody');
+    const resultFilterForm = document.getElementById('result-filter-form');
+
+    function showDefinitionError(message) {
+        definitionError.textContent = message;
+        definitionError.classList.remove('d-none');
+    }
+
+    function clearDefinitionError() {
+        definitionError.classList.add('d-none');
+        definitionError.textContent = '';
+    }
+
+    function populateDefinitionForm(definition) {
+        clearDefinitionError();
+        definitionIdInput.value = definition.id || '';
+        definitionNameInput.value = definition.name || '';
+        definitionDescriptionInput.value = definition.description || '';
+        definitionKeywordsInput.value = (definition.keywords || []).join('\n');
+        Array.from(definitionSchoolsSelect.options).forEach(option => {
+            option.selected = (definition.school_ids || []).includes(option.value);
+        });
+        definitionPromptInput.value = definition.prompt || defaults.prompt || '';
+        definitionModelSelect.value = definition.model || defaults.model || definitionModelSelect.value;
+        definitionTemperatureInput.value = definition.temperature ?? defaults.temperature ?? 0.2;
+        definitionMaxResultsInput.value = definition.max_results ?? defaults.max_results ?? 5;
+        state.selectedDefinitionId = definition.id || null;
+        highlightSelectedDefinition();
+        renderRuns();
+    }
+
+    function resetDefinitionForm() {
+        definitionForm.reset();
+        definitionIdInput.value = '';
+        definitionPromptInput.value = defaults.prompt || '';
+        definitionModelSelect.value = defaults.model || definitionModelSelect.value;
+        definitionTemperatureInput.value = defaults.temperature ?? 0.2;
+        definitionMaxResultsInput.value = defaults.max_results ?? 5;
+        Array.from(definitionSchoolsSelect.options).forEach(option => option.selected = false);
+        state.selectedDefinitionId = null;
+        state.selectedRunId = null;
+        highlightSelectedDefinition();
+        highlightSelectedRun();
+        runsTableBody.innerHTML = '';
+        resultsTableBody.innerHTML = '';
+        dimensionSummaryBody.innerHTML = '';
+        schoolSummaryBody.innerHTML = '';
+        runSummary.textContent = 'Keine Läufe ausgewählt.';
+        resultSummary.textContent = 'Bitte wählen Sie einen Suchlauf aus.';
+    }
+
+    function highlightSelectedDefinition() {
+        Array.from(definitionsTableBody.querySelectorAll('tr')).forEach(row => {
+            if (row.dataset.id === state.selectedDefinitionId) {
+                row.classList.add('definition-row', 'active');
+            } else {
+                row.classList.remove('definition-row', 'active');
+            }
+        });
+    }
+
+    function highlightSelectedRun() {
+        Array.from(runsTableBody.querySelectorAll('tr')).forEach(row => {
+            if (row.dataset.id === state.selectedRunId) {
+                row.classList.add('run-row', 'active');
+            } else {
+                row.classList.remove('run-row', 'active');
+            }
+        });
+    }
+
+    function renderDefinitions() {
+        definitionsTableBody.innerHTML = '';
+        state.definitions.forEach(definition => {
+            const row = document.createElement('tr');
+            row.dataset.id = definition.id;
+            row.innerHTML = `
+                <td>
+                    <button type="button" class="btn btn-link btn-sm p-0 definition-select" data-id="${definition.id}">
+                        ${definition.name || '(Unbenannt)'}
+                    </button>
+                </td>
+                <td class="text-end">${(definition.keywords || []).length}</td>
+                <td><span class="badge bg-secondary">${definition.status || 'neu'}</span></td>
+                <td class="text-end">
+                    <div class="btn-group btn-group-sm" role="group">
+                        <button type="button" class="btn btn-outline-primary definition-select" data-id="${definition.id}">Öffnen</button>
+                        <button type="button" class="btn btn-outline-secondary definition-duplicate" data-id="${definition.id}">Duplizieren</button>
+                        <button type="button" class="btn btn-outline-danger definition-delete" data-id="${definition.id}">&times;</button>
+                    </div>
+                </td>`;
+            definitionsTableBody.appendChild(row);
+        });
+        definitionCount.textContent = state.definitions.length;
+        highlightSelectedDefinition();
+    }
+
+    function renderRuns() {
+        const currentId = state.selectedDefinitionId;
+        const filteredRuns = state.runs.filter(run => !currentId || run.definition_id === currentId);
+        runsTableBody.innerHTML = '';
+        if (!filteredRuns.length) {
+            runSummary.textContent = currentId ? 'Keine Läufe für diese Suche.' : 'Bitte wählen Sie eine Suche aus.';
+        } else {
+            runSummary.textContent = `${filteredRuns.length} Lauf/Läufe verfügbar.`;
+        }
+        filteredRuns.forEach(run => {
+            const row = document.createElement('tr');
+            row.dataset.id = run.id;
+            const status = (run.status || 'pending').toString();
+            const statusBadge = status === 'finished' ? 'success' : (status === 'error' ? 'danger' : 'secondary');
+            const completedAt = run.completed_at ? new Date(run.completed_at).toLocaleString('de-DE') : '';
+            const startedAt = run.started_at ? new Date(run.started_at).toLocaleString('de-DE') : '';
+            const resultCount = run.results || 0;
+            row.innerHTML = `
+                <td><div class="small text-muted">${startedAt || 'laufend'}</div>${run.definition_name || ''}</td>
+                <td><span class="badge bg-${statusBadge}">${status}</span></td>
+                <td class="text-end">${resultCount}</td>
+                <td>${run.model || ''}</td>
+                <td class="text-end">
+                    <div class="btn-group btn-group-sm" role="group">
+                        <button type="button" class="btn btn-outline-primary run-select" data-id="${run.id}">Anzeigen</button>
+                    </div>
+                </td>`;
+            runsTableBody.appendChild(row);
+        });
+        highlightSelectedRun();
+    }
+
+    function renderResults(data) {
+        resultsTableBody.innerHTML = '';
+        dimensionSummaryBody.innerHTML = '';
+        schoolSummaryBody.innerHTML = '';
+        if (!data) {
+            resultSummary.textContent = 'Bitte wählen Sie einen Suchlauf aus.';
+            return;
+        }
+        resultSummary.textContent = `${data.filtered_results} von ${data.total_results} Treffern angezeigt.`;
+        data.results.forEach(entry => {
+            const dimensionsHtml = (entry.dimensions || []).map(dim => `
+                <span class="badge bg-primary-subtle text-dark badge-dimension">
+                    ${dim.dimension || ''}: ${dim.value ?? '-'} (${(dim.confidence ?? 0).toFixed(2)})
+                </span>
+            `).join('');
+            const row = document.createElement('tr');
+            row.innerHTML = `
+                <td><strong>${entry.school_name || entry.school_id || 'Unbekannt'}</strong><div class="small text-muted">${entry.school_homepage || ''}</div></td>
+                <td>${entry.keyword || ''}</td>
+                <td><a href="${entry.target_url}" target="_blank" rel="noreferrer">${entry.target_url}</a></td>
+                <td class="text-end">${(entry.average_value ?? 0).toFixed(2)}</td>
+                <td>${dimensionsHtml}</td>
+                <td>${entry.content_excerpt || ''}</td>`;
+            resultsTableBody.appendChild(row);
+        });
+
+        data.dimension_summary.forEach(item => {
+            const row = document.createElement('tr');
+            row.innerHTML = `
+                <td>${item.dimension}</td>
+                <td class="text-end">${item.count || 0}</td>
+                <td class="text-end">${(item.average_value ?? 0).toFixed(2)}</td>
+                <td class="text-end">${(item.average_confidence ?? 0).toFixed(2)}</td>`;
+            dimensionSummaryBody.appendChild(row);
+        });
+
+        data.school_summary.forEach(item => {
+            const row = document.createElement('tr');
+            row.innerHTML = `
+                <td>${item.school_name || item.school_id}</td>
+                <td class="text-end">${item.count || 0}</td>`;
+            schoolSummaryBody.appendChild(row);
+        });
+    }
+
+    function fetchData() {
+        fetch('/searches/data')
+            .then(response => response.json())
+            .then(data => {
+                state.definitions = data.definitions || [];
+                state.runs = data.runs || [];
+                state.jobs = data.jobs || {};
+                renderDefinitions();
+                renderRuns();
+            })
+            .catch(() => {
+                showDefinitionError('Daten konnten nicht geladen werden.');
+            });
+    }
+
+    definitionForm.addEventListener('submit', event => {
+        event.preventDefault();
+        clearDefinitionError();
+        const payload = {
+            id: definitionIdInput.value || undefined,
+            name: definitionNameInput.value,
+            description: definitionDescriptionInput.value,
+            keywords: definitionKeywordsInput.value.split('\n').map(item => item.trim()).filter(Boolean),
+            school_ids: Array.from(definitionSchoolsSelect.selectedOptions).map(option => option.value),
+            prompt: definitionPromptInput.value,
+            model: definitionModelSelect.value,
+            temperature: definitionTemperatureInput.value,
+            max_results: definitionMaxResultsInput.value,
+        };
+        fetch('/searches/definitions', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+        })
+            .then(response => response.json().then(body => ({ ok: response.ok, body })))
+            .then(({ ok, body }) => {
+                if (!ok) {
+                    throw new Error(body.error || 'Suche konnte nicht gespeichert werden.');
+                }
+                state.selectedDefinitionId = body.definition.id;
+                fetchData();
+            })
+            .catch(error => {
+                showDefinitionError(error.message || 'Unbekannter Fehler.');
+            });
+    });
+
+    resetDefinitionButton.addEventListener('click', () => {
+        resetDefinitionForm();
+    });
+
+    definitionsTableBody.addEventListener('click', event => {
+        const target = event.target.closest('button');
+        if (!target) return;
+        const id = target.dataset.id;
+        if (!id) return;
+        if (target.classList.contains('definition-delete')) {
+            if (!confirm('Diese Suche wirklich löschen?')) return;
+            fetch(`/searches/definitions/${id}`, { method: 'DELETE' })
+                .then(response => response.json().then(body => ({ ok: response.ok, body })))
+                .then(({ ok, body }) => {
+                    if (!ok) throw new Error(body.error || 'Suche konnte nicht gelöscht werden.');
+                    if (state.selectedDefinitionId === id) {
+                        resetDefinitionForm();
+                    }
+                    fetchData();
+                })
+                .catch(error => showDefinitionError(error.message || 'Löschen fehlgeschlagen.'));
+        } else if (target.classList.contains('definition-duplicate')) {
+            fetch(`/searches/definitions/${id}/duplicate`, { method: 'POST' })
+                .then(response => response.json().then(body => ({ ok: response.ok, body })))
+                .then(({ ok, body }) => {
+                    if (!ok) throw new Error(body.error || 'Suche konnte nicht dupliziert werden.');
+                    state.selectedDefinitionId = body.definition.id;
+                    fetchData();
+                })
+                .catch(error => showDefinitionError(error.message || 'Duplizieren fehlgeschlagen.'));
+        } else if (target.classList.contains('definition-select')) {
+            const definition = state.definitions.find(entry => entry.id === id);
+            if (definition) {
+                populateDefinitionForm(definition);
+            }
+        }
+    });
+
+    startRunButton.addEventListener('click', () => {
+        const currentId = definitionIdInput.value;
+        if (!currentId) {
+            showDefinitionError('Bitte speichern Sie die Suche, bevor Sie einen Lauf starten.');
+            return;
+        }
+        const payload = {
+            id: currentId,
+            name: definitionNameInput.value,
+            description: definitionDescriptionInput.value,
+            keywords: definitionKeywordsInput.value.split('\n').map(item => item.trim()).filter(Boolean),
+            school_ids: Array.from(definitionSchoolsSelect.selectedOptions).map(option => option.value),
+            prompt: definitionPromptInput.value,
+            model: definitionModelSelect.value,
+            temperature: definitionTemperatureInput.value,
+            max_results: definitionMaxResultsInput.value,
+        };
+        startRunButton.disabled = true;
+        startRunButton.textContent = 'Startet...';
+        fetch(`/searches/${currentId}/run`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+        })
+            .then(response => response.json().then(body => ({ ok: response.ok, body })))
+            .then(({ ok, body }) => {
+                if (!ok) throw new Error(body.error || 'Suche konnte nicht gestartet werden.');
+                state.selectedDefinitionId = currentId;
+                fetchData();
+                pollJob(body.job_id);
+            })
+            .catch(error => {
+                showDefinitionError(error.message || 'Start fehlgeschlagen.');
+            })
+            .finally(() => {
+                startRunButton.disabled = false;
+                startRunButton.textContent = 'Suche starten';
+            });
+    });
+
+    runsTableBody.addEventListener('click', event => {
+        const target = event.target.closest('button');
+        if (!target) return;
+        if (target.classList.contains('run-select')) {
+            const id = target.dataset.id;
+            state.selectedRunId = id;
+            highlightSelectedRun();
+            fetchResults();
+        }
+    });
+
+    resultFilterForm.addEventListener('submit', event => {
+        event.preventDefault();
+        fetchResults();
+    });
+
+    function fetchResults() {
+        const runId = state.selectedRunId;
+        if (!runId) {
+            renderResults(null);
+            return;
+        }
+        const params = new URLSearchParams();
+        const dimensionValue = document.getElementById('filter-dimension').value;
+        const minValue = document.getElementById('filter-min-value').value;
+        const minConfidence = document.getElementById('filter-min-confidence').value;
+        if (dimensionValue) params.set('dimension', dimensionValue);
+        if (minValue) params.set('min_value', minValue);
+        if (minConfidence) params.set('min_confidence', minConfidence);
+        fetch(`/searches/runs/${runId}/results?${params.toString()}`)
+            .then(response => response.json().then(body => ({ ok: response.ok, body })))
+            .then(({ ok, body }) => {
+                if (!ok) throw new Error(body.error || 'Ergebnisse konnten nicht geladen werden.');
+                renderResults(body);
+            })
+            .catch(error => {
+                resultSummary.textContent = error.message || 'Ergebnisse konnten nicht geladen werden.';
+            });
+    }
+
+    function pollJob(jobId) {
+        if (!jobId) return;
+        fetch(`/searches/jobs/${jobId}`)
+            .then(response => response.json())
+            .then(data => {
+                if (!data.job) return;
+                const status = data.job.status || 'pending';
+                if (['finished', 'error', 'cancelled'].includes(status)) {
+                    fetchData();
+                } else {
+                    setTimeout(() => pollJob(jobId), 2000);
+                }
+            })
+            .catch(() => {
+                setTimeout(() => pollJob(jobId), 4000);
+            });
+    }
+
+    document.addEventListener('DOMContentLoaded', () => {
+        renderDefinitions();
+        renderRuns();
+        if (state.definitions.length) {
+            populateDefinitionForm(state.definitions[0]);
+        }
+        fetchData();
+    });
+</script>
+{% include '_data_management_modals.html' %}
+</body>
+</html>
