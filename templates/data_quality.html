@@ -136,6 +136,7 @@
                     <button type="button" class="btn btn-outline-secondary btn-sm" id="select-all">Alle auswählen</button>
                     <button type="button" class="btn btn-outline-secondary btn-sm" id="select-none">Keine auswählen</button>
                     <button type="button" class="btn btn-outline-primary" id="start-quality-check">Prüfung starten</button>
+                    <button type="button" class="btn btn-outline-success" id="accept-invalid">„Falsch“-Vorschläge übernehmen</button>
                     <button type="button" class="btn btn-outline-danger" id="cancel-quality-check" disabled>Abbrechen</button>
                 </div>
             </div>
@@ -213,7 +214,7 @@
                     </thead>
                     <tbody id="schools-body">
                     {% for record in records %}
-                        <tr data-school-id="{{ record.schul_id }}" data-status="{{ record.status }}" data-school-label="{{ record.schulname|default('')|e }}">
+                        <tr data-school-id="{{ record.schul_id }}" data-status="{{ record.status }}" data-school-label="{{ record.schulname|default('')|e }}" data-has-suggestion="{{ '1' if record.quality.suggested_url else '' }}" data-suggested-url="{{ record.quality.suggested_url|default('')|e }}">
                             <td class="text-nowrap">
                                 <div class="dropdown">
                                     <button class="btn btn-sm btn-outline-primary dropdown-toggle" type="button" data-bs-toggle="dropdown" aria-expanded="false">
@@ -348,6 +349,8 @@
         const pendingButtons = document.querySelectorAll('[data-select-pending]');
         const pendingCountInput = document.getElementById('pending-count-input');
         const applyPendingCountBtn = document.getElementById('apply-pending-count');
+        const acceptInvalidBtn = document.getElementById('accept-invalid');
+        const bulkAcceptUrl = "{{ url_for('bulk_accept_data_quality') }}";
         const statusLabels = {{ status_labels|tojson }};
 
         let currentJobId = null;
@@ -429,6 +432,7 @@
                     schulname: name,
                     homepage,
                     status: row.dataset.status || '',
+                    suggested_url: row.dataset.suggestedUrl || '',
                 });
             });
         }
@@ -477,6 +481,9 @@
                     : '';
                 const inlineStatus = `<div class="school-status">${statusBadge}${correctionBadge}${manualNote}</div>`;
 
+                row.dataset.hasSuggestion = suggestionUrl ? '1' : '';
+                row.dataset.suggestedUrl = suggestionUrl;
+
                 row.innerHTML = `
                     <td class="text-nowrap">
                         <div class="dropdown">
@@ -502,6 +509,43 @@
                 tableBody.appendChild(row);
             });
             syncMasterCheckbox();
+        }
+
+        function collectInvalidRows() {
+            return Array.from(document.querySelectorAll('#schools-body tr[data-school-id]')).filter(row => {
+                const status = (row.dataset.status || '').toLowerCase();
+                const hasSuggestion = (row.dataset.hasSuggestion || '').trim() !== '' || (row.dataset.suggestedUrl || '').trim() !== '';
+                return status === 'invalid' && hasSuggestion;
+            });
+        }
+
+        function performBulkAccept(ids) {
+            if (!ids.length) {
+                appendMessage('Keine als falsch markierten Vorschläge gefunden.');
+                return Promise.resolve();
+            }
+            return fetch(bulkAcceptUrl, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ school_ids: ids })
+            }).then(resp => resp.json()).then(data => {
+                if (data.records) {
+                    updateTable(data.records);
+                }
+                if (data.summary) {
+                    const summary = data.summary || {};
+                    appendMessage(`Übernommen: ${summary.applied || 0}, ohne Vorschlag: ${summary.skipped || 0}, Fehler: ${summary.failed || 0}.`);
+                    if (summary.dry_run) {
+                        appendMessage('Hinweis: Dry-Run aktiv – Stammdaten wurden nicht geändert.');
+                    }
+                }
+                if (data.error) {
+                    appendMessage(data.error);
+                }
+                return data;
+            }).catch(() => {
+                appendMessage('Automatische Übernahme fehlgeschlagen.');
+            });
         }
 
         function renderProgressResults(results) {
@@ -769,6 +813,27 @@
             button.addEventListener('click', () => {
                 const limit = Number(button.dataset.selectPending);
                 selectPending(Number.isFinite(limit) ? limit : null);
+            });
+        });
+
+        acceptInvalidBtn?.addEventListener('click', () => {
+            const rows = collectInvalidRows();
+            if (!rows.length) {
+                appendMessage('Keine als falsch markierten Vorschläge gefunden.');
+                return;
+            }
+            setAllCheckboxes(false);
+            rows.forEach(row => {
+                const checkbox = row.querySelector('.record-checkbox');
+                if (checkbox) {
+                    checkbox.checked = true;
+                }
+            });
+            syncMasterCheckbox();
+            acceptInvalidBtn.disabled = true;
+            const ids = rows.map(row => row.dataset.schoolId).filter(Boolean);
+            performBulkAccept(ids).finally(() => {
+                acceptInvalidBtn.disabled = false;
             });
         });
 

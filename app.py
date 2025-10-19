@@ -2816,6 +2816,68 @@ def append_data_quality_history(school_id: str, entry: Dict[str, object]) -> Non
         storage.set_json("data_quality", "results", data)
 
 
+def _apply_data_quality_url(
+    school_id: str,
+    new_url: str,
+    *,
+    dry_run: bool,
+    manual_note_suffix: Optional[str] = None,
+    history_stage: str = "manual",
+    history_status: str = "accepted",
+    history_detail: Optional[str] = "URL-Vorschlag übernommen",
+    history_extra: Optional[Dict[str, object]] = None,
+) -> bool:
+    target_url = str(new_url or "").strip()
+    if not school_id or not target_url:
+        return False
+
+    updated = True
+    if not dry_run:
+        updated = update_stammdaten_url(school_id, target_url)
+    if not updated:
+        return False
+
+    timestamp = datetime.utcnow().isoformat() + "Z"
+    note = "Richtiger Wert übernommen"
+    if manual_note_suffix:
+        note += f" ({manual_note_suffix})"
+    if dry_run:
+        note += " (Dry-Run)"
+
+    update_data_quality_record(
+        school_id,
+        {
+            "status": QUALITY_STATUS_OK,
+            "original_url": target_url,
+            "last_checked": timestamp,
+            "manual_note": note,
+            "suggested_url": None,
+            "suggested_confidence": None,
+            "suggested_reason": "",
+            "suggested_signals": [],
+            "correction_applied": True,
+            "correction_applied_at": timestamp,
+        },
+    )
+
+    history_entry: Dict[str, object] = {
+        "stage": history_stage,
+        "status": history_status,
+    }
+    if history_detail:
+        detail_text = str(history_detail)
+        if dry_run:
+            detail_text += " (Dry-Run)"
+        history_entry["detail"] = detail_text
+    elif dry_run:
+        history_entry["detail"] = "Dry-Run"
+    if history_extra:
+        history_entry.update(history_extra)
+
+    append_data_quality_history(school_id, history_entry)
+    return True
+
+
 def _normalize_header(value: str) -> str:
     normalized = unicodedata.normalize("NFKD", value or "")
     normalized = "".join(ch for ch in normalized if not unicodedata.combining(ch))
@@ -4365,33 +4427,14 @@ def manage_data_quality_record(school_id: str) -> ResponseReturnValue:
         suggestion = str(record.get("suggested_url") or "").strip()
         if not suggestion:
             return jsonify({"error": "Kein URL-Vorschlag vorhanden."}), 400
-        updated = True
-        if not dry_run:
-            updated = update_stammdaten_url(school_id, suggestion)
-        if updated:
-            update_data_quality_record(
-                school_id,
-                {
-                    "status": QUALITY_STATUS_OK,
-                    "original_url": suggestion,
-                    "last_checked": now_iso,
-                    "manual_note": "Richtiger Wert übernommen" + (" (Dry-Run)" if dry_run else ""),
-                    "suggested_url": None,
-                    "suggested_confidence": None,
-                    "suggested_reason": "",
-                    "suggested_signals": [],
-                    "correction_applied": True,
-                    "correction_applied_at": now_iso,
-                },
-            )
-            append_data_quality_history(
-                school_id,
-                {
-                    "stage": "manual",
-                    "status": "accepted",
-                    "detail": "URL-Vorschlag übernommen" + (" (Dry-Run)" if dry_run else ""),
-                },
-            )
+        if _apply_data_quality_url(
+            school_id,
+            suggestion,
+            dry_run=dry_run,
+            history_stage="manual",
+            history_status="accepted",
+            history_detail="URL-Vorschlag übernommen",
+        ):
             return jsonify({"status": "ok", "records": build_data_quality_dataset()})
         return jsonify({"error": "URL konnte nicht aktualisiert werden."}), 500
 
@@ -4399,34 +4442,16 @@ def manage_data_quality_record(school_id: str) -> ResponseReturnValue:
         new_url = str(payload.get("url") or "").strip()
         if not new_url:
             return jsonify({"error": "Bitte geben Sie eine gültige URL an."}), 400
-        updated = True
-        if not dry_run:
-            updated = update_stammdaten_url(school_id, new_url)
-        if updated:
-            update_data_quality_record(
-                school_id,
-                {
-                    "status": QUALITY_STATUS_OK,
-                    "original_url": new_url,
-                    "last_checked": now_iso,
-                    "manual_note": "Richtiger Wert übernommen (manuell)" + (" (Dry-Run)" if dry_run else ""),
-                    "suggested_url": None,
-                    "suggested_confidence": None,
-                    "suggested_reason": "",
-                    "suggested_signals": [],
-                    "correction_applied": True,
-                    "correction_applied_at": now_iso,
-                },
-            )
-            append_data_quality_history(
-                school_id,
-                {
-                    "stage": "manual",
-                    "status": "updated",
-                    "detail": "URL manuell angepasst" + (" (Dry-Run)" if dry_run else ""),
-                    "url": new_url,
-                },
-            )
+        if _apply_data_quality_url(
+            school_id,
+            new_url,
+            dry_run=dry_run,
+            manual_note_suffix="manuell",
+            history_stage="manual",
+            history_status="updated",
+            history_detail="URL manuell angepasst",
+            history_extra={"url": new_url},
+        ):
             return jsonify({"status": "ok", "records": build_data_quality_dataset()})
         return jsonify({"error": "URL konnte nicht aktualisiert werden."}), 500
 
@@ -4482,6 +4507,86 @@ def manage_data_quality_record(school_id: str) -> ResponseReturnValue:
         return jsonify({"status": "started", "job_id": job_id})
 
     return jsonify({"error": f"Unbekannte Aktion: {action}"}), 400
+
+
+@app.route("/data-quality/bulk-accept", methods=["POST"])
+def bulk_accept_data_quality() -> ResponseReturnValue:
+    payload = request.get_json(silent=True) or {}
+    requested_ids_raw = payload.get("school_ids")
+
+    dataset = build_data_quality_dataset()
+    dataset_map = {str(record.get("schul_id")): record for record in dataset if record.get("schul_id")}
+
+    if isinstance(requested_ids_raw, list) and requested_ids_raw:
+        target_ids = []
+        seen: Set[str] = set()
+        for raw_id in requested_ids_raw:
+            sid = str(raw_id).strip()
+            if not sid or sid in seen or sid not in dataset_map:
+                continue
+            seen.add(sid)
+            target_ids.append(sid)
+    else:
+        target_ids = [
+            record_id
+            for record_id, record in dataset_map.items()
+            if str(record.get("status")).lower() == QUALITY_STATUS_INVALID
+        ]
+
+    if not target_ids:
+        return jsonify({"error": "Keine als falsch markierten Vorschläge gefunden."}), 400
+
+    dry_run = bool(get_data_quality_settings().get("dry_run", False))
+    applied: List[str] = []
+    skipped: List[Dict[str, object]] = []
+    failed: List[Dict[str, object]] = []
+
+    for school_id in target_ids:
+        record = dataset_map.get(school_id) or {}
+        quality = record.get("quality") if isinstance(record.get("quality"), dict) else {}
+        suggestion = str(quality.get("suggested_url") or "").strip()
+        if not suggestion:
+            skipped.append({"schul_id": school_id, "reason": "Kein Vorschlag vorhanden"})
+            continue
+        success = _apply_data_quality_url(
+            school_id,
+            suggestion,
+            dry_run=dry_run,
+            manual_note_suffix="automatisch",
+            history_stage="bulk",
+            history_status="accepted",
+            history_detail="URL-Vorschlag automatisch übernommen",
+            history_extra={"source": "bulk"},
+        )
+        if success:
+            applied.append(school_id)
+        else:
+            failed.append({"schul_id": school_id, "reason": "URL konnte nicht aktualisiert werden"})
+
+    summary = {
+        "requested": len(target_ids),
+        "applied": len(applied),
+        "skipped": len(skipped),
+        "failed": len(failed),
+        "dry_run": dry_run,
+    }
+
+    response: Dict[str, object] = {
+        "status": "ok",
+        "summary": summary,
+        "applied": applied,
+        "skipped": skipped,
+        "failed": failed,
+        "records": build_data_quality_dataset(),
+    }
+    if dry_run:
+        response["message"] = "Dry-Run aktiv: Stammdaten wurden nicht geändert."
+    if failed and not applied:
+        response["status"] = "error"
+        response["error"] = "Keine URL konnte aktualisiert werden."
+        return jsonify(response), 500
+
+    return jsonify(response)
 
 
 @app.route("/settings", methods=["GET", "POST"])
