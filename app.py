@@ -42,8 +42,8 @@ def template_break_every(value: object, interval: int = 30) -> Markup:
     if not text:
         return Markup("")
     interval = max(1, int(interval or 1))
-    chunks = [escape(text[i : i + interval]) for i in range(0, len(text), interval)]
-    return Markup("<wbr>".join(chunks))
+    chunks = [f"<span class='d-block'>{escape(text[i : i + interval])}</span>" for i in range(0, len(text), interval)]
+    return Markup("".join(chunks))
 
 saved_search_lock = threading.Lock()
 DEFAULT_CONCURRENCY = 5

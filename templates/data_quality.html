@@ -39,6 +39,10 @@
         .status-cell .quality-note { display: inline-block; margin-left: 0.5rem; }
         .school-cell { white-space: normal; }
         .school-name { white-space: normal; word-break: break-word; }
+        .school-url { font-size: 0.9rem; }
+        .school-status { margin-top: 0.25rem; }
+        .school-meta { color: #6c757d; }
+        .school-meta strong { color: inherit; font-weight: 600; }
     </style>
 </head>
 <body>
@@ -234,8 +238,19 @@
                             </td>
                             <td><input type="checkbox" class="form-check-input record-checkbox" value="{{ record.schul_id }}"></td>
                             <td class="school-cell">
-                                <div class="fw-semibold school-name">{{ record.schulname|break_every(30) }}</div>
-                                <div class="small text-muted">ID: {{ record.schul_id }}</div>
+                                <div class="school-url">
+                                    {% if record.homepage %}
+                                        <a href="{{ record.homepage }}" target="_blank" rel="noopener">{{ record.homepage }}</a>
+                                    {% else %}
+                                        <span class="text-muted">—</span>
+                                    {% endif %}
+                                </div>
+                                <div class="school-status">
+                                    <span class="badge bg-secondary status-badge" data-status="{{ record.status }}">{{ record.status_label }}</span>
+                                </div>
+                                <div class="fw-semibold school-name mt-1">{{ record.schulname|break_every(40) }}</div>
+                                <div class="school-meta">Ort: {{ record.ort }}</div>
+                                <div class="school-meta small">ID: {{ record.schul_id }}</div>
                             </td>
                             <td class="text-nowrap">{{ record.ort }}</td>
                             <td class="text-nowrap">
@@ -373,12 +388,13 @@
             if (!text) {
                 return '';
             }
-            const interval = 30;
+            const interval = 40;
             const chunks = [];
             for (let index = 0; index < text.length; index += interval) {
-                chunks.push(escapeHtml(text.slice(index, index + interval)));
+                const piece = text.slice(index, index + interval);
+                chunks.push(`<span class="d-block">${escapeHtml(piece)}</span>`);
             }
-            return chunks.join('<wbr>');
+            return chunks.join('');
         }
 
         function getSelectedIds() {
@@ -425,8 +441,11 @@
                 const homepageHtml = homepage
                     ? `<a href="${escapeHtml(homepage)}" target="_blank" rel="noopener">${escapeHtml(homepage)}</a>`
                     : '<span class="text-muted">—</span>';
-                const manualNote = record?.quality?.manual_note ? `<span class="text-muted quality-note">${escapeHtml(record.quality.manual_note)}</span>` : '';
+                const manualNoteText = record?.quality?.manual_note ? escapeHtml(record.quality.manual_note) : '';
+                const manualNote = manualNoteText ? `<span class="text-muted quality-note">${manualNoteText}</span>` : '';
                 const lastChecked = record?.quality?.last_checked ? `<time datetime="${escapeHtml(record.quality.last_checked)}">${escapeHtml(record.quality.last_checked)}</time>` : '<span class="text-muted">Noch nicht geprüft</span>';
+                const statusBadge = `<span class="badge bg-secondary status-badge" data-status="${escapeHtml(record.status)}">${escapeHtml(record.status_label)}</span>`;
+                const inlineStatus = `<div class="school-status">${statusBadge}</div>`;
 
                 row.innerHTML = `
                     <td class="text-nowrap">
@@ -446,11 +465,11 @@
                         </div>
                     </td>
                     <td><input type="checkbox" class="form-check-input record-checkbox" value="${escapeHtml(record.schul_id)}"></td>
-                    <td class="school-cell"><div class="fw-semibold school-name">${formatSchoolName(record.schulname || '')}</div><div class="small text-muted">ID: ${escapeHtml(record.schul_id)}</div></td>
+                    <td class="school-cell"><div class="school-url">${homepageHtml}</div>${inlineStatus}<div class="fw-semibold school-name mt-1">${formatSchoolName(record.schulname || '')}</div><div class="school-meta">Ort: ${escapeHtml(record.ort || '')}</div><div class="school-meta small">ID: ${escapeHtml(record.schul_id || '')}</div></td>
                     <td class="text-nowrap">${escapeHtml(record.ort || '')}</td>
                     <td class="text-nowrap">${homepageHtml}</td>
                     <td class="text-nowrap">${suggestionHtml}</td>
-                    <td class="status-cell"><span class="badge bg-secondary status-badge" data-status="${escapeHtml(record.status)}">${escapeHtml(record.status_label)}</span>${manualNote}</td>
+                    <td class="status-cell">${statusBadge}${manualNote}</td>
                     <td class="text-nowrap">${lastChecked}</td>
                 `;
                 tableBody.appendChild(row);
