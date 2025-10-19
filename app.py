@@ -23,6 +23,7 @@ from flask import Flask, jsonify, render_template, request
 from flask.typing import ResponseReturnValue
 from openpyxl import load_workbook
 from bs4 import BeautifulSoup
+from markupsafe import Markup, escape
 
 from crawler import (
     CrawlProgress,
@@ -32,6 +33,16 @@ from crawler import (
 )
 
 app = Flask(__name__)
+
+
+@app.template_filter("break_every")
+def template_break_every(value: object, interval: int = 30) -> Markup:
+    text = "" if value is None else str(value)
+    if not text:
+        return Markup("")
+    interval = max(1, int(interval or 1))
+    chunks = [escape(text[i : i + interval]) for i in range(0, len(text), interval)]
+    return Markup("<wbr>".join(chunks))
 
 SAVED_SEARCHES_PATH = Path("saved_searches.json")
 saved_search_lock = threading.Lock()
@@ -3819,11 +3830,9 @@ def run_data_quality_correction_job(job: DataQualityCorrectionJob) -> None:
             return
 
         google_credentials = get_google_search_credentials()
-        google_key = google_credentials.get("api_key", "").strip()
-        google_cx = google_credentials.get("cx", "").strip()
-        if not google_key or not google_cx:
-            job.mark_completed(error="Google Search API-Konfiguration erforderlich.")
-            return
+        google_key = str(google_credentials.get("api_key", "")).strip()
+        google_cx = str(google_credentials.get("cx", "")).strip()
+        has_google = bool(google_key and google_cx)
 
         settings = get_data_quality_settings()
         allowed_domains = {
@@ -3873,8 +3882,9 @@ def run_data_quality_correction_job(job: DataQualityCorrectionJob) -> None:
 
             normalized_id = str(school_id)
 
-            quality_entry = quality_results.get(normalized_id) if isinstance(quality_results, dict) else None
-            status = str(quality_entry.get("status") if isinstance(quality_entry, dict) else "") or QUALITY_STATUS_PENDING
+            quality_entry_raw = quality_results.get(normalized_id) if isinstance(quality_results, dict) else None
+            quality_entry = quality_entry_raw if isinstance(quality_entry_raw, dict) else {}
+            status = str(quality_entry.get("status") or QUALITY_STATUS_PENDING)
             if status not in {QUALITY_STATUS_UNSURE, QUALITY_STATUS_INVALID}:
                 job.update_progress(
                     processed_increment=1,
@@ -3895,61 +3905,97 @@ def run_data_quality_correction_job(job: DataQualityCorrectionJob) -> None:
 
             job.update_progress(current_school=display_name)
 
-            query = f"{display_name} {ort}".strip()
-            search_results = perform_google_search(
-                query,
-                google_key,
-                google_cx,
-                max_results=int(settings.get("max_search_results", 10)),
-                language=language,
-                region=region,
-            )
-            filtered_results = [
-                result
-                for result in search_results
-                if isinstance(result, dict)
-                and _domain_allowed(result.get("link", ""), allowed_domains, blocked_domains)
-            ]
-            if not filtered_results:
-                job.update_progress(
-                    processed_increment=1,
-                    message=f"{display_name}: Keine geeigneten Treffer gefunden.",
-                )
-                continue
-
-            llm_search = analyse_search_results_with_llm(
-                display_name,
-                ort,
-                old_url,
-                filtered_results,
-                api_key=openai_key,
-                settings=settings,
-            )
-            if not llm_search:
-                job.update_progress(
-                    processed_increment=1,
-                    message=f"{display_name}: Keine Empfehlung aus den Suchtreffern.",
-                )
-                continue
-
-            candidate_url = _normalise_candidate_url(llm_search.get("empfehlung"))
+            existing_suggestion = _normalise_candidate_url(quality_entry.get("suggested_url")) if quality_entry else ""
             try:
-                confidence = float(llm_search.get("confidence"))
+                existing_confidence = float(quality_entry.get("suggested_confidence")) if quality_entry else None
             except (TypeError, ValueError):
-                confidence = None
-            reason = str(llm_search.get("begruendung", "")).strip()
+                existing_confidence = None
+            raw_existing_reason = quality_entry.get("suggested_reason") if quality_entry else None
+            existing_reason = str(raw_existing_reason).strip() if raw_existing_reason else ""
 
-            if not candidate_url or confidence is None or confidence < threshold:
-                job.update_progress(
-                    processed_increment=1,
-                    message=f"{display_name}: Empfehlung nicht übernommen (fehlende Sicherheit).",
+            candidate_url = None
+            confidence: Optional[float] = None
+            reason = ""
+
+            if existing_suggestion and _domain_allowed(existing_suggestion, allowed_domains, blocked_domains):
+                meets_confidence = existing_confidence is None or existing_confidence >= threshold
+                if meets_confidence:
+                    candidate_url = existing_suggestion
+                    confidence = existing_confidence
+                    reason = existing_reason or "Vorherige Empfehlung übernommen."
+
+            if not candidate_url:
+                if not has_google:
+                    job.update_progress(
+                        processed_increment=1,
+                        message=(
+                            f"{display_name}: Keine Übernahme möglich (Google Search API fehlt und kein gültiger Vorschlag vorhanden)."
+                        ),
+                    )
+                    continue
+
+                query = f"{display_name} {ort}".strip()
+                search_results = perform_google_search(
+                    query,
+                    google_key,
+                    google_cx,
+                    max_results=int(settings.get("max_search_results", 10)),
+                    language=language,
+                    region=region,
                 )
-                continue
+                filtered_results = [
+                    result
+                    for result in search_results
+                    if isinstance(result, dict)
+                    and _domain_allowed(result.get("link", ""), allowed_domains, blocked_domains)
+                ]
+                if not filtered_results:
+                    job.update_progress(
+                        processed_increment=1,
+                        message=f"{display_name}: Keine geeigneten Treffer gefunden.",
+                    )
+                    continue
 
-            if not _domain_allowed(candidate_url, allowed_domains, blocked_domains):
+                llm_search = analyse_search_results_with_llm(
+                    display_name,
+                    ort,
+                    old_url,
+                    filtered_results,
+                    api_key=openai_key,
+                    settings=settings,
+                )
+                if not llm_search:
+                    job.update_progress(
+                        processed_increment=1,
+                        message=f"{display_name}: Keine Empfehlung aus den Suchtreffern.",
+                    )
+                    continue
+
+                candidate_url = _normalise_candidate_url(llm_search.get("empfehlung"))
+                try:
+                    confidence = float(llm_search.get("confidence"))
+                except (TypeError, ValueError):
+                    confidence = None
+                reason = str(llm_search.get("begruendung", "")).strip()
+
+                if not candidate_url or confidence is None or confidence < threshold:
+                    job.update_progress(
+                        processed_increment=1,
+                        message=f"{display_name}: Empfehlung nicht übernommen (fehlende Sicherheit).",
+                    )
+                    continue
+
+                if not _domain_allowed(candidate_url, allowed_domains, blocked_domains):
+                    job.update_progress(
+                        processed_increment=1,
+                        message=f"{display_name}: Empfohlene Domain nicht erlaubt.",
+                    )
+                    continue
+
+            if not candidate_url:
                 job.update_progress(
                     processed_increment=1,
-                    message=f"{display_name}: Empfohlene Domain nicht erlaubt.",
+                    message=f"{display_name}: Keine gültige Ersatz-URL gefunden.",
                 )
                 continue
 
@@ -4614,8 +4660,29 @@ def start_data_quality_correction() -> ResponseReturnValue:
     if not has_api_key():
         return jsonify({"error": "OpenAI-Schlüssel erforderlich."}), 400
     google_credentials = get_google_search_credentials()
-    if not (google_credentials.get("api_key") and google_credentials.get("cx")):
-        return jsonify({"error": "Google Search API-Key und Suchmaschinen-ID erforderlich."}), 400
+    google_api_key = str(google_credentials.get("api_key", "")).strip()
+    google_cx = str(google_credentials.get("cx", "")).strip()
+    has_google = bool(google_api_key and google_cx)
+    if not has_google:
+        dataset_map = {
+            str(record.get("schul_id")): record
+            for record in dataset
+            if isinstance(record, dict) and record.get("schul_id")
+        }
+        has_existing_suggestion = any(
+            bool(
+                (dataset_map.get(school_id) or {})
+                .get("quality", {})
+                .get("suggested_url")
+            )
+            for school_id in school_ids
+        )
+        if not has_existing_suggestion:
+            return jsonify(
+                {
+                    "error": "Google Search API-Key und Suchmaschinen-ID erforderlich oder vorhandene Vorschläge nutzen.",
+                }
+            ), 400
 
     job_id = str(uuid.uuid4())
     job = DataQualityCorrectionJob(id=job_id, school_ids=school_ids, total=len(school_ids))

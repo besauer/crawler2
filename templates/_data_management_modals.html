@@ -243,7 +243,7 @@
                     const label = info.label || key;
                     const radios = ['replace', 'merge', 'ignore'].map((mode) => {
                         const id = `import-${key}-${mode}`;
-                        const checked = mode === 'merge' ? 'checked' : '';
+                        const checked = mode === 'replace' ? 'checked' : '';
                         return `
                             <div class="form-check form-check-inline">
                                 <input class="form-check-input" type="radio" name="import-action-${key}" id="${id}" value="${mode}" ${checked}>
