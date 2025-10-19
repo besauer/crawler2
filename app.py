@@ -2197,22 +2197,34 @@ def collect_site_snapshot(url: str) -> Dict[str, object]:
     snapshot["structured_signals"] = structured
 
     base_url = url
-    nav_links: List[str] = []
+    impressum_links: List[str] = []
+    auxiliary_links: List[str] = []
     for link in soup.find_all("a", href=True):
-        link_text = link.get_text(" ", strip=True).lower()
-        if any(keyword in link_text for keyword in DATA_QUALITY_IMPRESSUM_KEYWORDS):
+        link_text = link.get_text(" ", strip=True)
+        link_text_lower = link_text.lower()
+        href_lower = link["href"].lower()
+        if any(keyword in link_text_lower for keyword in DATA_QUALITY_IMPRESSUM_KEYWORDS) or any(
+            keyword in href_lower for keyword in DATA_QUALITY_IMPRESSUM_KEYWORDS
+        ):
             absolute = urljoin(base_url, link["href"])
-            nav_links.append(absolute)
-    unique_links: List[str] = []
+            if "impressum" in link_text_lower or "impressum" in href_lower:
+                impressum_links.append(absolute)
+            else:
+                auxiliary_links.append(absolute)
+    nav_links: List[str] = []
     seen_nav: Set[str] = set()
-    for link in nav_links:
-        if link not in seen_nav:
+    for candidate_list in (impressum_links, auxiliary_links):
+        for link in candidate_list:
+            if link in seen_nav:
+                continue
             seen_nav.add(link)
-            unique_links.append(link)
-        if len(unique_links) >= 3:
+            nav_links.append(link)
+            if len(nav_links) >= 3:
+                break
+        if len(nav_links) >= 3:
             break
 
-    for nav_url in unique_links:
+    for nav_url in nav_links:
         html_nav = fetch_url_text(nav_url)
         if not html_nav:
             continue
@@ -2221,6 +2233,7 @@ def collect_site_snapshot(url: str) -> Dict[str, object]:
             continue
         if "impressum" in nav_url.lower() or "impressum" in nav_text.lower():
             snapshot["impressum_excerpt"] = _truncate_text(nav_text, 1500)
+            snapshot["impressum_url"] = nav_url
         else:
             if not snapshot["impressum_excerpt"]:
                 snapshot["impressum_excerpt"] = _truncate_text(nav_text, 800)
