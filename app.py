@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import base64
+import io
 import json
 import math
 import os
+import platform
 import re
+import subprocess
 import threading
 import time
 import unicodedata
@@ -11,7 +15,7 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from pathlib import Path
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 from urllib.parse import urljoin, urlparse
 
 import requests
@@ -118,6 +122,46 @@ DATA_QUALITY_IMPRESSUM_KEYWORDS = {
     "anbieter",
 }
 MAX_DATA_QUALITY_HISTORY = 20
+
+EXPORT_SCHEMA_VERSION = 1
+EXPORT_SECTION_DEFINITIONS: Dict[str, Dict[str, str]] = {
+    "stammdaten": {
+        "label": "Stammdaten",
+        "description": "Schulverzeichnis inkl. aller Zusatzfelder.",
+    },
+    "keywords": {
+        "label": "Keywords & Synonyme",
+        "description": "Gespeicherte Suchläufe, Synonym- und Keyword-Cache.",
+    },
+    "settings": {
+        "label": "Anwendungs- & Crawl-Einstellungen",
+        "description": "Voreinstellungen für Synonyme, Crawl, Keyword-Finder und Datenqualität.",
+    },
+    "data_quality": {
+        "label": "Datenqualitäts-Ergebnisse",
+        "description": "Prüfstatus, Vorschläge und Historie pro Schule.",
+    },
+    "api_keys": {
+        "label": "API-Schlüssel & Tokens",
+        "description": "OpenAI-, Google- und weitere Zugangsdaten.",
+    },
+}
+EXPORT_SECTION_ORDER = [
+    "stammdaten",
+    "keywords",
+    "settings",
+    "data_quality",
+    "api_keys",
+]
+
+IMPORT_SESSION_TTL_SECONDS = 600
+IMPORT_SESSION_LIMIT = 8
+
+AUDIT_LOG_PATH = Path("audit_log.json")
+audit_log_lock = threading.Lock()
+
+_import_sessions: Dict[str, Dict[str, Any]] = {}
+import_sessions_lock = threading.Lock()
 QUALITY_STATUS_PENDING = "pending"
 QUALITY_STATUS_OK = "ok"
 QUALITY_STATUS_UNSURE = "unsure"
@@ -632,6 +676,625 @@ def get_keyword_finder_cache_entry(key: str) -> Optional[Dict[str, object]]:
         if isinstance(data, dict):
             return data
     return None
+
+
+def _read_audit_log_unlocked() -> List[Dict[str, Any]]:
+    if not AUDIT_LOG_PATH.exists():
+        return []
+    try:
+        with AUDIT_LOG_PATH.open("r", encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (json.JSONDecodeError, OSError):
+        return []
+    if isinstance(data, list):
+        return [entry for entry in data if isinstance(entry, dict)]
+    return []
+
+
+def append_audit_event(action: str, details: Dict[str, Any]) -> None:
+    entry = {
+        "timestamp": datetime.utcnow().isoformat() + "Z",
+        "action": action,
+        "details": details,
+    }
+    with audit_log_lock:
+        data = _read_audit_log_unlocked()
+        data.append(entry)
+        try:
+            with AUDIT_LOG_PATH.open("w", encoding="utf-8") as handle:
+                json.dump(data, handle, ensure_ascii=False, indent=2)
+        except OSError:
+            pass
+
+
+def record_audit_event(action: str, details: Dict[str, Any]) -> None:
+    sanitized = {}
+    for key, value in details.items():
+        if isinstance(value, (str, int, float, bool)) or value is None:
+            sanitized[key] = value
+        elif isinstance(value, (list, dict)):
+            sanitized[key] = value
+        else:
+            sanitized[key] = str(value)
+    append_audit_event(action, sanitized)
+
+
+def _cleanup_import_sessions_locked() -> None:
+    now = time.time()
+    expired = [
+        key
+        for key, payload in _import_sessions.items()
+        if now - payload.get("created", 0.0) > IMPORT_SESSION_TTL_SECONDS
+    ]
+    for key in expired:
+        _import_sessions.pop(key, None)
+    if len(_import_sessions) > IMPORT_SESSION_LIMIT:
+        sorted_items = sorted(
+            _import_sessions.items(), key=lambda item: item[1].get("created", now)
+        )
+        for key, _ in sorted_items[:-IMPORT_SESSION_LIMIT]:
+            _import_sessions.pop(key, None)
+
+
+def create_import_session(payload: Dict[str, Any], summary: Dict[str, Any], contains_sensitive: bool) -> str:
+    session_id = str(uuid.uuid4())
+    with import_sessions_lock:
+        _cleanup_import_sessions_locked()
+        _import_sessions[session_id] = {
+            "payload": payload,
+            "summary": summary,
+            "contains_sensitive": contains_sensitive,
+            "created": time.time(),
+        }
+    return session_id
+
+
+def get_import_session(session_id: str) -> Optional[Dict[str, Any]]:
+    with import_sessions_lock:
+        data = _import_sessions.get(session_id)
+        if not data:
+            return None
+        return dict(data)
+
+
+def consume_import_session(session_id: str) -> Optional[Dict[str, Any]]:
+    with import_sessions_lock:
+        data = _import_sessions.pop(session_id, None)
+        return dict(data) if data else None
+
+
+def _stammdaten_key(record: Dict[str, Any]) -> str:
+    if not isinstance(record, dict):
+        return ""
+    jahr = record.get("jahr")
+    if jahr is None:
+        jahr = record.get("Jahr")
+    schul_id = (
+        record.get("schul_id")
+        or record.get("Schul_ID")
+        or record.get("schulId")
+        or record.get("id")
+    )
+    if schul_id is None:
+        return ""
+    try:
+        jahr_value = str(jahr).strip()
+    except Exception:
+        jahr_value = ""
+    try:
+        schul_value = str(schul_id).strip()
+    except Exception:
+        schul_value = ""
+    if not schul_value:
+        return ""
+    return f"{jahr_value}|{schul_value}".strip("|")
+
+
+def _saved_search_signature(entry: Dict[str, Any]) -> str:
+    if not isinstance(entry, dict):
+        return ""
+    job_id = entry.get("job_id")
+    if job_id:
+        return f"job:{job_id}"
+    saved_at = entry.get("saved_at")
+    start_urls = entry.get("start_urls")
+    if isinstance(start_urls, list):
+        start_urls_value = ",".join(sorted(str(url) for url in start_urls))
+    else:
+        start_urls_value = ""
+    return f"sig:{saved_at or ''}:{start_urls_value}"
+
+
+def _git_metadata() -> Dict[str, str]:
+    metadata: Dict[str, str] = {
+        "python_version": platform.python_version(),
+    }
+    try:
+        branch = (
+            subprocess.check_output(
+                ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+                stderr=subprocess.DEVNULL,
+                text=True,
+            )
+            .strip()
+        )
+    except (subprocess.SubprocessError, OSError):
+        branch = ""
+    if branch:
+        metadata["git_branch"] = branch
+    try:
+        commit = (
+            subprocess.check_output(
+                ["git", "rev-parse", "HEAD"], stderr=subprocess.DEVNULL, text=True
+            )
+            .strip()
+        )
+    except (subprocess.SubprocessError, OSError):
+        commit = ""
+    if commit:
+        metadata["git_commit"] = commit
+    return metadata
+
+
+def summarize_section(section: str, data: Any) -> Dict[str, Any]:
+    base = {
+        "label": EXPORT_SECTION_DEFINITIONS.get(section, {}).get("label", section),
+    }
+    if section == "stammdaten":
+        base["entries"] = len(data) if isinstance(data, list) else 0
+    elif section == "keywords":
+        saved = data.get("saved_searches") if isinstance(data, dict) else []
+        syn_cache = data.get("synonym_cache") if isinstance(data, dict) else {}
+        finder_cache = data.get("keyword_finder_cache") if isinstance(data, dict) else {}
+        base.update(
+            {
+                "saved_searches": len(saved) if isinstance(saved, list) else 0,
+                "synonym_cache_entries": len(syn_cache)
+                if isinstance(syn_cache, dict)
+                else 0,
+                "keyword_finder_cache_entries": len(finder_cache)
+                if isinstance(finder_cache, dict)
+                else 0,
+            }
+        )
+    elif section == "settings":
+        base["keys"] = len(data) if isinstance(data, dict) else 0
+    elif section == "data_quality":
+        records = None
+        if isinstance(data, dict):
+            if "records" in data and isinstance(data["records"], dict):
+                records = data["records"]
+            elif "data" in data and isinstance(data["data"], dict):
+                records = data["data"]
+            elif isinstance(data, dict):
+                records = data
+        if isinstance(records, dict):
+            base["records"] = len(records)
+        else:
+            base["records"] = 0
+    elif section == "api_keys":
+        openai_key = ""
+        keyword_key = ""
+        google_search = {}
+        if isinstance(data, dict):
+            openai_key = str(data.get("openai") or "")
+            keyword_key = str(data.get("google_keyword_planner") or "")
+            google_search = data.get("google_search") if isinstance(data.get("google_search"), dict) else {}
+        base.update(
+            {
+                "openai": bool(openai_key),
+                "google_keyword_planner": bool(keyword_key),
+                "google_search_api_key": bool(google_search.get("api_key"))
+                if isinstance(google_search, dict)
+                else False,
+                "google_search_cx": bool(google_search.get("cx"))
+                if isinstance(google_search, dict)
+                else False,
+            }
+        )
+    return base
+
+
+def build_export_payload(selected_sections: Set[str]) -> Tuple[Dict[str, Any], Dict[str, Any], bool]:
+    requested = {
+        section
+        for section in selected_sections
+        if section in EXPORT_SECTION_DEFINITIONS
+    }
+    if not requested:
+        requested = set(EXPORT_SECTION_ORDER)
+
+    payload: Dict[str, Any] = {
+        "schema_version": EXPORT_SCHEMA_VERSION,
+        "generated_at": datetime.utcnow().isoformat() + "Z",
+        "meta": _git_metadata(),
+        "sections": {},
+    }
+    summary: Dict[str, Any] = {
+        "schema_version": EXPORT_SCHEMA_VERSION,
+        "generated_at": payload["generated_at"],
+        "meta": payload["meta"],
+        "sections": {},
+    }
+    contains_sensitive = False
+
+    if "stammdaten" in requested:
+        stammdaten_data = load_stammdaten()
+        payload["sections"]["stammdaten"] = stammdaten_data
+        summary["sections"]["stammdaten"] = summarize_section("stammdaten", stammdaten_data)
+
+    if "keywords" in requested:
+        keywords_payload = {
+            "saved_searches": load_saved_searches(),
+            "synonym_cache": load_synonym_cache(),
+            "keyword_finder_cache": load_keyword_finder_cache(),
+        }
+        payload["sections"]["keywords"] = keywords_payload
+        summary["sections"]["keywords"] = summarize_section("keywords", keywords_payload)
+
+    if "settings" in requested:
+        settings_payload = load_settings_data()
+        payload["sections"]["settings"] = settings_payload
+        summary["sections"]["settings"] = summarize_section("settings", settings_payload)
+
+    if "data_quality" in requested:
+        dq_payload = {"records": load_data_quality_results()}
+        payload["sections"]["data_quality"] = dq_payload
+        summary["sections"]["data_quality"] = summarize_section("data_quality", dq_payload)
+
+    if "api_keys" in requested:
+        api_payload = {
+            "openai": get_api_key() or "",
+            "google_keyword_planner": get_keyword_planner_key() or "",
+            "google_search": get_google_search_credentials(),
+        }
+        payload["sections"]["api_keys"] = api_payload
+        api_summary = summarize_section("api_keys", api_payload)
+        summary["sections"]["api_keys"] = api_summary
+        contains_sensitive = any(
+            bool(api_summary.get(flag))
+            for flag in [
+                "openai",
+                "google_keyword_planner",
+                "google_search_api_key",
+                "google_search_cx",
+            ]
+        )
+
+    summary["requested_sections"] = sorted(requested)
+    return payload, summary, contains_sensitive
+
+
+def analyze_import_payload(payload: Dict[str, Any]) -> Tuple[Dict[str, Any], bool]:
+    if not isinstance(payload, dict):
+        raise ValueError("Ungültiges Exportformat")
+    schema_version = payload.get("schema_version")
+    if schema_version != EXPORT_SCHEMA_VERSION:
+        raise ValueError("Die Exportdatei verwendet eine inkompatible Version.")
+    sections = payload.get("sections")
+    if not isinstance(sections, dict):
+        raise ValueError("Die Exportdatei enthält keine Bereiche.")
+
+    summary: Dict[str, Any] = {
+        "schema_version": schema_version,
+        "generated_at": payload.get("generated_at"),
+        "meta": payload.get("meta", {}),
+        "sections": {},
+    }
+    contains_sensitive = False
+
+    for key, definition in EXPORT_SECTION_DEFINITIONS.items():
+        if key not in sections:
+            continue
+        section_summary = summarize_section(key, sections[key])
+        summary["sections"][key] = section_summary
+        if key == "api_keys":
+            contains_sensitive = any(
+                bool(section_summary.get(flag))
+                for flag in [
+                    "openai",
+                    "google_keyword_planner",
+                    "google_search_api_key",
+                    "google_search_cx",
+                ]
+            )
+
+    summary["available_sections"] = sorted(summary["sections"].keys())
+    summary["contains_sensitive"] = contains_sensitive
+    return summary, contains_sensitive
+
+
+def apply_stammdaten_import(data: Any, mode: str, dry_run: bool) -> Dict[str, Any]:
+    if not isinstance(data, list):
+        return {"status": "skipped", "reason": "Ungültiges Format"}
+    current = load_stammdaten()
+    if mode == "replace":
+        if not dry_run:
+            save_stammdaten(data)
+        return {
+            "status": "replaced",
+            "previous": len(current),
+            "new_total": len(data),
+        }
+
+    index: Dict[str, Dict[str, Any]] = {}
+    for record in current:
+        key = _stammdaten_key(record)
+        if key:
+            index[key] = dict(record)
+
+    added = 0
+    updated = 0
+    skipped = 0
+    for record in data:
+        key = _stammdaten_key(record)
+        if not key:
+            skipped += 1
+            continue
+        existing = index.get(key)
+        if existing is None:
+            index[key] = dict(record)
+            added += 1
+        elif existing != record:
+            index[key] = dict(record)
+            updated += 1
+        else:
+            skipped += 1
+
+    merged: List[Dict[str, Any]] = []
+    seen_keys: Set[str] = set()
+    for record in current:
+        key = _stammdaten_key(record)
+        if key and key in index:
+            merged.append(index[key])
+            seen_keys.add(key)
+    for key, record in index.items():
+        if key not in seen_keys:
+            merged.append(record)
+
+    if not dry_run and (added or updated):
+        save_stammdaten(merged)
+
+    return {
+        "status": "merged",
+        "added": added,
+        "updated": updated,
+        "unchanged": skipped,
+        "total": len(index),
+    }
+
+
+def apply_settings_import(data: Any, mode: str, dry_run: bool) -> Dict[str, Any]:
+    if not isinstance(data, dict):
+        return {"status": "skipped", "reason": "Ungültiges Format"}
+    current = load_settings_data()
+    if mode == "replace":
+        if not dry_run:
+            save_settings_data(data)
+        return {
+            "status": "replaced",
+            "keys": len(data),
+        }
+
+    merged = dict(current)
+    updated = 0
+    for key, value in data.items():
+        if merged.get(key) != value:
+            merged[key] = value
+            updated += 1
+    if not dry_run and updated:
+        save_settings_data(merged)
+    return {
+        "status": "merged",
+        "updated_keys": updated,
+        "total_keys": len(merged),
+    }
+
+
+def apply_saved_search_merge(existing: List[Dict[str, Any]], incoming: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], Dict[str, int]]:
+    signatures = { _saved_search_signature(entry): entry for entry in existing }
+    stats = {"added": 0, "skipped": 0}
+    merged = list(existing)
+    for entry in incoming:
+        sig = _saved_search_signature(entry)
+        if not sig:
+            sig = f"raw:{json.dumps(entry, ensure_ascii=False, sort_keys=True)}"
+        if sig in signatures:
+            stats["skipped"] += 1
+            continue
+        signatures[sig] = entry
+        merged.append(entry)
+        stats["added"] += 1
+    return merged, stats
+
+
+def apply_keywords_import(data: Any, mode: str, dry_run: bool) -> Dict[str, Any]:
+    if not isinstance(data, dict):
+        return {"status": "skipped", "reason": "Ungültiges Format"}
+
+    incoming_saved = data.get("saved_searches") if isinstance(data.get("saved_searches"), list) else []
+    incoming_synonyms = data.get("synonym_cache") if isinstance(data.get("synonym_cache"), dict) else {}
+    incoming_finder = data.get("keyword_finder_cache") if isinstance(data.get("keyword_finder_cache"), dict) else {}
+
+    result: Dict[str, Any] = {}
+
+    if mode == "replace":
+        if not dry_run:
+            replace_saved_searches(list(incoming_saved))
+            replace_synonym_cache(dict(incoming_synonyms))
+            replace_keyword_finder_cache(dict(incoming_finder))
+        result.update(
+            {
+                "status": "replaced",
+                "saved_searches": len(incoming_saved),
+                "synonym_cache_entries": len(incoming_synonyms),
+                "keyword_finder_cache_entries": len(incoming_finder),
+            }
+        )
+        return result
+
+    current_saved = load_saved_searches()
+    current_synonyms = load_synonym_cache()
+    current_finder = load_keyword_finder_cache()
+
+    merged_saved, saved_stats = apply_saved_search_merge(current_saved, list(incoming_saved))
+    synonym_updates = 0
+    for key, value in incoming_synonyms.items():
+        if current_synonyms.get(key) != value:
+            current_synonyms[key] = value
+            synonym_updates += 1
+    finder_updates = 0
+    for key, value in incoming_finder.items():
+        if current_finder.get(key) != value:
+            current_finder[key] = value
+            finder_updates += 1
+
+    if not dry_run and saved_stats["added"]:
+        replace_saved_searches(merged_saved)
+    if not dry_run and synonym_updates:
+        replace_synonym_cache(current_synonyms)
+    if not dry_run and finder_updates:
+        replace_keyword_finder_cache(current_finder)
+
+    result.update(
+        {
+            "status": "merged",
+            "saved_searches_added": saved_stats["added"],
+            "saved_searches_skipped": saved_stats["skipped"],
+            "synonym_updates": synonym_updates,
+            "keyword_finder_updates": finder_updates,
+        }
+    )
+    return result
+
+
+def apply_data_quality_import(data: Any, mode: str, dry_run: bool) -> Dict[str, Any]:
+    records = None
+    if isinstance(data, dict):
+        if "records" in data and isinstance(data["records"], dict):
+            records = data["records"]
+        elif "data" in data and isinstance(data["data"], dict):
+            records = data["data"]
+        elif all(isinstance(key, str) for key in data.keys()):
+            records = data
+    if not isinstance(records, dict):
+        return {"status": "skipped", "reason": "Ungültiges Format"}
+
+    current = load_data_quality_results()
+    if mode == "replace":
+        if not dry_run:
+            replace_data_quality_results(records)
+        return {
+            "status": "replaced",
+            "records": len(records),
+        }
+
+    merged = dict(current)
+    added = 0
+    updated = 0
+    for key, value in records.items():
+        if key not in merged:
+            merged[key] = value
+            added += 1
+        elif merged[key] != value:
+            merged[key] = value
+            updated += 1
+    if not dry_run and (added or updated):
+        replace_data_quality_results(merged)
+    return {
+        "status": "merged",
+        "added": added,
+        "updated": updated,
+        "total": len(merged),
+    }
+
+
+def apply_api_keys_import(data: Any, mode: str, dry_run: bool) -> Dict[str, Any]:
+    if not isinstance(data, dict):
+        return {"status": "skipped", "reason": "Ungültiges Format"}
+    incoming_openai = str(data.get("openai") or "").strip()
+    incoming_planner = str(data.get("google_keyword_planner") or "").strip()
+    incoming_search = data.get("google_search") if isinstance(data.get("google_search"), dict) else {}
+    incoming_search_api = str(incoming_search.get("api_key") or "").strip()
+    incoming_search_cx = str(incoming_search.get("cx") or "").strip()
+
+    current_openai = get_api_key() or ""
+    current_planner = get_keyword_planner_key() or ""
+    current_search = get_google_search_credentials()
+
+    updated = {"openai": False, "keyword_planner": False, "google_search": False}
+
+    if mode == "replace":
+        if not dry_run:
+            set_api_key(incoming_openai)
+            set_keyword_planner_key(incoming_planner)
+            update_google_search_credentials(incoming_search_api, incoming_search_cx)
+        updated = {
+            "openai": incoming_openai != current_openai,
+            "keyword_planner": incoming_planner != current_planner,
+            "google_search": (
+                incoming_search_api != current_search.get("api_key")
+                or incoming_search_cx != current_search.get("cx")
+            ),
+        }
+        return {
+            "status": "replaced",
+            "changes": updated,
+        }
+
+    if incoming_openai and not current_openai:
+        if not dry_run:
+            set_api_key(incoming_openai)
+        updated["openai"] = True
+    if incoming_planner and not current_planner:
+        if not dry_run:
+            set_keyword_planner_key(incoming_planner)
+        updated["keyword_planner"] = True
+    if (incoming_search_api or incoming_search_cx) and (
+        not current_search.get("api_key") or not current_search.get("cx")
+    ):
+        if not dry_run:
+            update_google_search_credentials(
+                incoming_search_api or current_search.get("api_key", ""),
+                incoming_search_cx or current_search.get("cx", ""),
+            )
+        updated["google_search"] = True
+
+    return {
+        "status": "merged",
+        "changes": updated,
+    }
+
+
+def apply_import(payload: Dict[str, Any], actions: Dict[str, str], dry_run: bool) -> Dict[str, Any]:
+    sections = payload.get("sections")
+    if not isinstance(sections, dict):
+        raise ValueError("Exportpaket unvollständig")
+
+    results: Dict[str, Any] = {}
+
+    for section in EXPORT_SECTION_DEFINITIONS.keys():
+        data = sections.get(section)
+        if data is None:
+            continue
+        mode = actions.get(section, "ignore")
+        if mode == "ignore":
+            results[section] = {"status": "ignored"}
+            continue
+        if section == "stammdaten":
+            results[section] = apply_stammdaten_import(data, mode, dry_run)
+        elif section == "keywords":
+            results[section] = apply_keywords_import(data, mode, dry_run)
+        elif section == "settings":
+            results[section] = apply_settings_import(data, mode, dry_run)
+        elif section == "data_quality":
+            results[section] = apply_data_quality_import(data, mode, dry_run)
+        elif section == "api_keys":
+            results[section] = apply_api_keys_import(data, mode, dry_run)
+        else:
+            results[section] = {"status": "skipped"}
+
+    return {"results": results, "dry_run": dry_run}
 
 
 def keyword_finder_cache_key(
@@ -3748,7 +4411,130 @@ def settings():
         keyword_finder_max_results=DEFAULT_KEYWORD_FINDER_MAX_RESULTS,
         google_credentials=google_credentials,
         data_quality_settings=data_quality_settings,
+        export_sections=EXPORT_SECTION_ORDER,
+        export_definitions=EXPORT_SECTION_DEFINITIONS,
         active_page="settings",
+    )
+
+
+@app.post("/settings/export")
+def export_data_bundle() -> ResponseReturnValue:
+    request_data = request.get_json(silent=True) or {}
+    sections_value = request_data.get("sections", [])
+    if not isinstance(sections_value, list):
+        sections_value = []
+    selected_sections = {str(value) for value in sections_value}
+    payload, summary, contains_sensitive = build_export_payload(selected_sections)
+    raw = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
+    encoded = base64.b64encode(raw).decode("ascii")
+    filename = f"crawler-export-{datetime.utcnow().strftime('%Y%m%d-%H%M%S')}.json"
+    record_audit_event(
+        "export",
+        {
+            "sections": summary.get("requested_sections", []),
+            "bytes": len(raw),
+            "contains_sensitive": contains_sensitive,
+        },
+    )
+    return jsonify(
+        {
+            "status": "ok",
+            "filename": filename,
+            "filesize": len(raw),
+            "summary": summary,
+            "download": encoded,
+            "contains_sensitive": contains_sensitive,
+        }
+    )
+
+
+@app.post("/settings/import/preview")
+def import_preview() -> ResponseReturnValue:
+    if "file" not in request.files:
+        return jsonify({"status": "error", "message": "Bitte wählen Sie eine Exportdatei aus."}), 400
+    file_storage = request.files["file"]
+    try:
+        payload = json.load(file_storage)
+    except json.JSONDecodeError:
+        return jsonify({"status": "error", "message": "Die Datei konnte nicht gelesen werden."}), 400
+    try:
+        summary, contains_sensitive = analyze_import_payload(payload)
+    except ValueError as exc:
+        return jsonify({"status": "error", "message": str(exc)}), 400
+
+    session_id = create_import_session(payload, summary, contains_sensitive)
+    record_audit_event(
+        "import-preview",
+        {
+            "session": session_id,
+            "sections": summary.get("available_sections", []),
+            "contains_sensitive": contains_sensitive,
+        },
+    )
+    return jsonify(
+        {
+            "status": "ok",
+            "session_id": session_id,
+            "summary": summary,
+            "contains_sensitive": contains_sensitive,
+        }
+    )
+
+
+@app.post("/settings/import/apply")
+def import_apply_route() -> ResponseReturnValue:
+    request_data = request.get_json(silent=True) or {}
+    session_id = str(request_data.get("session_id") or "").strip()
+    if not session_id:
+        return jsonify({"status": "error", "message": "Die Vorschau ist abgelaufen. Bitte erneut laden."}), 400
+    session = get_import_session(session_id)
+    if not session:
+        return jsonify({"status": "error", "message": "Die Vorschau ist abgelaufen. Bitte erneut laden."}), 410
+
+    actions = request_data.get("actions", {})
+    if not isinstance(actions, dict):
+        actions = {}
+    dry_run = bool(request_data.get("dry_run", False))
+    confirm_sensitive = bool(request_data.get("confirm_sensitive", False))
+
+    contains_sensitive = bool(session.get("contains_sensitive"))
+    if contains_sensitive and not confirm_sensitive:
+        return (
+            jsonify(
+                {
+                    "status": "error",
+                    "message": "Bitte bestätigen Sie, dass Sie sensible Daten importieren möchten.",
+                }
+            ),
+            400,
+        )
+
+    payload = session.get("payload")
+    try:
+        result = apply_import(payload, {str(k): str(v) for k, v in actions.items()}, dry_run)
+    except ValueError as exc:
+        return jsonify({"status": "error", "message": str(exc)}), 400
+
+    record_audit_event(
+        "import-apply",
+        {
+            "session": session_id,
+            "dry_run": dry_run,
+            "actions": {k: actions.get(k, "ignore") for k in EXPORT_SECTION_DEFINITIONS.keys()},
+            "contains_sensitive": contains_sensitive,
+        },
+    )
+
+    if not dry_run:
+        consume_import_session(session_id)
+
+    return jsonify(
+        {
+            "status": "ok",
+            "dry_run": dry_run,
+            "result": result,
+            "summary": session.get("summary"),
+        }
     )
 
 
