@@ -1,0 +1,24 @@
+{
+  "synonym_defaults": {
+    "prompt": "Du bist ein Synonym-Experte für deutschsprachige Websuche und spezialisiert auf Synonyme, die sich auf Webseiten von Schulen in Baden Württemberg finden. Denke dabei vor allem an Keywords, die so banal sind, dass man sie schnell vergisst. Die aber häufig vorkommen. Gib ausschließlich eine JSON-Liste mit gebräuchlichen Synonymen, nahen Begriffen und typischen Kurzformen des folgenden Begriffs zurück. Keine Erklärungen, keine weiteren Wörter. Vermeide Homonyme und irrelevante Bedeutungen.",
+    "max_results": 50,
+    "temperature": 0.2,
+    "model": "gpt-4o-mini"
+  },
+  "crawl_defaults": {
+    "max_pages": 100,
+    "concurrency": 5
+  },
+  "keyword_finder_defaults": {
+    "prompt": "Du kombinierst Vorschläge des Google Keyword Planner mit zusätzlicher Analyse. Du erhältst ein JSON-Objekt mit Keyword-Vorschlägen (einschließlich Suchvolumen, Wettbewerb und Relevanz). Gruppiere die Begriffe semantisch in 3–8 Themencluster, entferne irrelevante oder doppelte Begriffe und gib pro Cluster die drei bis fünf relevantesten Begriffe zurück. Nutze kurze, aussagekräftige Cluster-Namen. Antworte ausschließlich im folgenden JSON-Format: {\"clusters\": [{\"label\": \"<Cluster>\", \"keywords\": [{\"term\": \"<Begriff>\", \"search_volume\": <Zahl|null>, \"competition\": \"<niedrig/mittel/hoch/null>\", \"relevance\": <Zahl|null>}]}]}}. Keine weiteren Texte.",
+    "max_results": 150,
+    "temperature": 0.3,
+    "model": "gpt-4o-mini"
+  },
+  "search_defaults": {
+    "prompt": "Bewertung schulischer KI-Integration Anweisung: Analysiere den folgenden Text einer Schulwebseite. Bewerte, welche der 9 Dimensionen schulischer KI-Integration zutreffen und wie stark sie ausgeprägt sind (1–5). Gib zusätzlich für jede Bewertung eine Sicherheit (0–1) an. Mehrere Dimensionen können gleichzeitig zutreffen. Formatiere das Ergebnis immer exakt im folgenden JSON-Schema: { \"Bewertung\": [ {\"Dimension\": \"Einsatz im Unterricht\", \"Wert\": 0, \"Sicherheit\": 0.0}, {\"Dimension\": \"Medienbildung & KI-Kompetenzen\", \"Wert\": 0, \"Sicherheit\": 0.0}, {\"Dimension\": \"Ethik, Datenschutz & Verantwortung\", \"Wert\": 0, \"Sicherheit\": 0.0}, {\"Dimension\": \"Partizipation & Mitgestaltung\", \"Wert\": 0, \"Sicherheit\": 0.0}, {\"Dimension\": \"Infrastruktur & Zugänglichkeit\", \"Wert\": 0, \"Sicherheit\": 0.0}, {\"Dimension\": \"Schulentwicklung & Steuerung\", \"Wert\": 0, \"Sicherheit\": 0.0}, {\"Dimension\": \"Fortbildung & Professionalisierung\", \"Wert\": 0, \"Sicherheit\": 0.0}, {\"Dimension\": \"Schulkultur & Kommunikation\", \"Wert\": 0, \"Sicherheit\": 0.0}, {\"Dimension\": \"Kooperation & Netzwerke\", \"Wert\": 0, \"Sicherheit\": 0.0} ] } Bewertungslogik Wert Bedeutung 1 Klarer Hinweis auf KI-Aktivität, jedoch nur sporadisch oder punktuell. 2 KI ist im Alltag erkennbar integriert, jedoch ohne formale Konzepte. 3 Schulweite Nutzung oder erkennbare Konzepte und feste Strukturen vorhanden. 4 Klare, ausgearbeitete Konzepte und tiefe Verankerung im Schulalltag. 5 Außergewöhnlich stark ausgeprägt, innovativ, tief reflektiert und strategisch verankert. Text zur Analyse {{CONTENT}}",
+    "max_results": 5,
+    "temperature": 0.2,
+    "model": "gpt-4o-mini"
+  }
+}
