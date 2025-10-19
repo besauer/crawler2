@@ -16,7 +16,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 from urllib.parse import urljoin, urlparse, urlunparse
 
 import requests
@@ -47,6 +47,10 @@ def template_break_every(value: object, interval: int = 30) -> Markup:
     return Markup("".join(chunks))
 
 saved_search_lock = threading.Lock()
+search_definition_lock = threading.Lock()
+search_run_lock = threading.Lock()
+search_result_lock = threading.Lock()
+search_jobs_lock = threading.Lock()
 DEFAULT_CONCURRENCY = 5
 MAX_CONCURRENCY = 150
 MAX_MAX_PAGES = 1000
@@ -135,6 +139,45 @@ DATA_QUALITY_IMPRESSUM_KEYWORDS = {
 }
 MAX_DATA_QUALITY_HISTORY = 20
 
+DEFAULT_SEARCH_EVALUATION_PROMPT = (
+    "Bewertung schulischer KI-Integration Anweisung: Analysiere den folgenden Text einer Schulwebseite. "
+    "Bewerte, welche der 9 Dimensionen schulischer KI-Integration zutreffen und wie stark sie ausgeprägt sind (1–5). "
+    "Gib zusätzlich für jede Bewertung eine Sicherheit (0–1) an. Mehrere Dimensionen können gleichzeitig zutreffen. "
+    "Formatiere das Ergebnis immer exakt im folgenden JSON-Schema: { \"Bewertung\": [ {\"Dimension\": \"Einsatz im Unterricht\", "
+    "\"Wert\": 0, \"Sicherheit\": 0.0}, {\"Dimension\": \"Medienbildung & KI-Kompetenzen\", \"Wert\": 0, \"Sicherheit\": 0.0}, "
+    "{\"Dimension\": \"Ethik, Datenschutz & Verantwortung\", \"Wert\": 0, \"Sicherheit\": 0.0}, {\"Dimension\": \"Partizipation & Mitgestaltung\", "
+    "\"Wert\": 0, \"Sicherheit\": 0.0}, {\"Dimension\": \"Infrastruktur & Zugänglichkeit\", \"Wert\": 0, \"Sicherheit\": 0.0}, "
+    "{\"Dimension\": \"Schulentwicklung & Steuerung\", \"Wert\": 0, \"Sicherheit\": 0.0}, {\"Dimension\": \"Fortbildung & Professionalisierung\", "
+    "\"Wert\": 0, \"Sicherheit\": 0.0}, {\"Dimension\": \"Schulkultur & Kommunikation\", \"Wert\": 0, \"Sicherheit\": 0.0}, "
+    "{\"Dimension\": \"Kooperation & Netzwerke\", \"Wert\": 0, \"Sicherheit\": 0.0} ] } Bewertungslogik Wert Bedeutung 1 Klarer Hinweis "
+    "auf KI-Aktivität, jedoch nur sporadisch oder punktuell. 2 KI ist im Alltag erkennbar integriert, jedoch ohne formale Konzepte. "
+    "3 Schulweite Nutzung oder erkennbare Konzepte und feste Strukturen vorhanden. 4 Klare, ausgearbeitete Konzepte und tiefe "
+    "Verankerung im Schulalltag. 5 Außergewöhnlich stark ausgeprägt, innovativ, tief reflektiert und strategisch verankert. "
+    "Text zur Analyse {{CONTENT}}"
+)
+DEFAULT_SEARCH_MODEL = OPENAI_MODEL_NAME
+DEFAULT_SEARCH_TEMPERATURE = 0.2
+DEFAULT_SEARCH_MAX_RESULTS = 5
+SEARCH_STATUS_NEW = "neu"
+SEARCH_STATUS_RUNNING = "in_arbeit"
+SEARCH_STATUS_FINISHED = "abgeschlossen"
+SEARCH_DIMENSIONS = [
+    "Einsatz im Unterricht",
+    "Medienbildung & KI-Kompetenzen",
+    "Ethik, Datenschutz & Verantwortung",
+    "Partizipation & Mitgestaltung",
+    "Infrastruktur & Zugänglichkeit",
+    "Schulentwicklung & Steuerung",
+    "Fortbildung & Professionalisierung",
+    "Schulkultur & Kommunikation",
+    "Kooperation & Netzwerke",
+]
+
+
+def utcnow_iso() -> str:
+    return datetime.utcnow().isoformat() + "Z"
+
+
 EXPORT_SCHEMA_VERSION = 1
 EXPORT_SECTION_DEFINITIONS: Dict[str, Dict[str, str]] = {
     "stammdaten": {
@@ -144,6 +187,10 @@ EXPORT_SECTION_DEFINITIONS: Dict[str, Dict[str, str]] = {
     "keywords": {
         "label": "Keywords & Synonyme",
         "description": "Gespeicherte Suchläufe, Synonym- und Keyword-Cache.",
+    },
+    "searches": {
+        "label": "Suchergebnisse",
+        "description": "Suchdefinitionen, Auswertungen und Bewertungsresultate.",
     },
     "settings": {
         "label": "Anwendungs- & Crawl-Einstellungen",
@@ -161,6 +208,7 @@ EXPORT_SECTION_DEFINITIONS: Dict[str, Dict[str, str]] = {
 EXPORT_SECTION_ORDER = [
     "stammdaten",
     "keywords",
+    "searches",
     "settings",
     "data_quality",
     "api_keys",
@@ -268,6 +316,15 @@ def _default_synonym_settings() -> Dict[str, object]:
     }
 
 
+def _default_search_settings() -> Dict[str, object]:
+    return {
+        "prompt": DEFAULT_SEARCH_EVALUATION_PROMPT,
+        "max_results": DEFAULT_SEARCH_MAX_RESULTS,
+        "temperature": DEFAULT_SEARCH_TEMPERATURE,
+        "model": DEFAULT_SEARCH_MODEL,
+    }
+
+
 def _read_settings_unlocked() -> Dict[str, object]:
     data = storage.get_json("settings", "data", {})
     if isinstance(data, dict):
@@ -311,6 +368,35 @@ def get_synonym_defaults() -> Dict[str, object]:
     return result
 
 
+def get_search_defaults() -> Dict[str, object]:
+    data = load_settings_data()
+    defaults = _default_search_settings()
+    result = dict(defaults)
+    settings_search = data.get("search_defaults") if isinstance(data, dict) else {}
+    if isinstance(settings_search, dict):
+        prompt = str(settings_search.get("prompt", "")).strip()
+        if prompt:
+            result["prompt"] = prompt
+        max_results_value = settings_search.get("max_results")
+        try:
+            max_results = int(max_results_value)
+        except (TypeError, ValueError):
+            max_results = defaults["max_results"]
+        max_results = max(1, min(max_results, 150))
+        result["max_results"] = max_results
+        temperature_value = settings_search.get("temperature")
+        try:
+            temperature = float(temperature_value)
+        except (TypeError, ValueError):
+            temperature = defaults["temperature"]
+        temperature = max(0.0, min(temperature, 2.0))
+        result["temperature"] = temperature
+        model_value = str(settings_search.get("model", "")).strip()
+        if model_value:
+            result["model"] = model_value
+    return result
+
+
 def update_synonym_defaults(values: Dict[str, object]) -> Dict[str, object]:
     current = load_settings_data()
     defaults = _default_synonym_settings()
@@ -344,6 +430,33 @@ def update_synonym_defaults(values: Dict[str, object]) -> Dict[str, object]:
     }
     save_settings_data(current)
     return current["synonym_defaults"]
+
+
+def update_search_defaults(values: Dict[str, object]) -> Dict[str, object]:
+    current = load_settings_data()
+    defaults = _default_search_settings()
+    prompt = str(values.get("prompt", "")).strip() or defaults["prompt"]
+    try:
+        max_results = int(values.get("max_results", defaults["max_results"]))
+    except (TypeError, ValueError):
+        max_results = defaults["max_results"]
+    max_results = max(1, min(max_results, 150))
+    try:
+        temperature = float(values.get("temperature", defaults["temperature"]))
+    except (TypeError, ValueError):
+        temperature = defaults["temperature"]
+    temperature = max(0.0, min(temperature, 2.0))
+    model = str(values.get("model", "")).strip() or defaults["model"]
+
+    current.setdefault("search_defaults", {})
+    current["search_defaults"] = {
+        "prompt": prompt,
+        "max_results": max_results,
+        "temperature": temperature,
+        "model": model,
+    }
+    save_settings_data(current)
+    return current["search_defaults"]
 
 
 def _default_keyword_finder_settings() -> Dict[str, object]:
@@ -886,6 +999,24 @@ def summarize_section(section: str, data: Any) -> Dict[str, Any]:
         )
     elif section == "settings":
         base["keys"] = len(data) if isinstance(data, dict) else 0
+    elif section == "searches":
+        definitions = []
+        runs = []
+        results = {}
+        if isinstance(data, dict):
+            if isinstance(data.get("definitions"), list):
+                definitions = data["definitions"]
+            if isinstance(data.get("runs"), list):
+                runs = data["runs"]
+            if isinstance(data.get("results"), dict):
+                results = data["results"]
+        base.update(
+            {
+                "definitions": len(definitions),
+                "runs": len(runs),
+                "result_sets": len(results),
+            }
+        )
     elif section == "data_quality":
         records = None
         if isinstance(data, dict):
@@ -958,6 +1089,11 @@ def build_export_payload(selected_sections: Set[str]) -> Tuple[Dict[str, Any], D
         }
         payload["sections"]["keywords"] = keywords_payload
         summary["sections"]["keywords"] = summarize_section("keywords", keywords_payload)
+
+    if "searches" in requested:
+        searches_payload = collect_all_search_data()
+        payload["sections"]["searches"] = searches_payload
+        summary["sections"]["searches"] = summarize_section("searches", searches_payload)
 
     if "settings" in requested:
         settings_payload = load_settings_data()
@@ -1195,6 +1331,124 @@ def apply_keywords_import(data: Any, mode: str, dry_run: bool) -> Dict[str, Any]
     return result
 
 
+def apply_searches_import(data: Any, mode: str, dry_run: bool) -> Dict[str, Any]:
+    if not isinstance(data, dict):
+        return {"status": "skipped", "reason": "Ungültiges Format"}
+
+    definitions = data.get("definitions") if isinstance(data.get("definitions"), list) else []
+    runs = data.get("runs") if isinstance(data.get("runs"), list) else []
+    results = data.get("results") if isinstance(data.get("results"), dict) else {}
+
+    def_count = len(definitions)
+    run_count = len(runs)
+    result_entries = sum(len(value) for value in results.values() if isinstance(value, list))
+
+    if mode == "replace":
+        if not dry_run:
+            existing_ids = [str(item.get("id")) for item in load_search_definitions() if str(item.get("id"))]
+            if existing_ids:
+                delete_search_definitions(existing_ids)
+            for definition in definitions:
+                if isinstance(definition, dict) and definition.get("id"):
+                    save_search_definition(definition)
+            for run in runs:
+                if isinstance(run, dict) and run.get("id") and run.get("definition_id"):
+                    save_search_run(run)
+            for run_id, entries in results.items():
+                run_id_str = str(run_id or "").strip()
+                if not run_id_str or not isinstance(entries, list):
+                    continue
+                clear_search_results(run_id_str)
+                append_search_results(run_id_str, [entry for entry in entries if isinstance(entry, dict)])
+        return {
+            "status": "replaced",
+            "definitions": def_count,
+            "runs": run_count,
+            "results": result_entries,
+        }
+
+    existing_definitions = {str(item.get("id")): item for item in load_search_definitions() if str(item.get("id"))}
+    added_defs = 0
+    updated_defs = 0
+    if not dry_run:
+        for definition in definitions:
+            if not isinstance(definition, dict):
+                continue
+            identifier = str(definition.get("id") or "").strip()
+            if not identifier:
+                continue
+            if identifier not in existing_definitions:
+                added_defs += 1
+            elif existing_definitions[identifier] != definition:
+                updated_defs += 1
+            save_search_definition(definition)
+            existing_definitions[identifier] = definition
+    else:
+        for definition in definitions:
+            if not isinstance(definition, dict):
+                continue
+            identifier = str(definition.get("id") or "").strip()
+            if not identifier:
+                continue
+            if identifier not in existing_definitions:
+                added_defs += 1
+            elif existing_definitions[identifier] != definition:
+                updated_defs += 1
+            existing_definitions[identifier] = definition
+
+    existing_runs = {str(item.get("id")): item for item in list_search_runs() if str(item.get("id"))}
+    added_runs = 0
+    updated_runs = 0
+    if not dry_run:
+        for run in runs:
+            if not isinstance(run, dict):
+                continue
+            run_id = str(run.get("id") or "").strip()
+            definition_id = str(run.get("definition_id") or "").strip()
+            if not run_id or not definition_id:
+                continue
+            if run_id not in existing_runs:
+                added_runs += 1
+            elif existing_runs[run_id] != run:
+                updated_runs += 1
+            save_search_run(run)
+            existing_runs[run_id] = run
+    else:
+        for run in runs:
+            if not isinstance(run, dict):
+                continue
+            run_id = str(run.get("id") or "").strip()
+            definition_id = str(run.get("definition_id") or "").strip()
+            if not run_id or not definition_id:
+                continue
+            if run_id not in existing_runs:
+                added_runs += 1
+            elif existing_runs[run_id] != run:
+                updated_runs += 1
+            existing_runs[run_id] = run
+
+    imported_results = 0
+    for run_id, entries in results.items():
+        run_id_str = str(run_id or "").strip()
+        if not run_id_str or not isinstance(entries, list):
+            continue
+        cleaned_entries = [entry for entry in entries if isinstance(entry, dict)]
+        imported_results += len(cleaned_entries)
+        if not dry_run:
+            clear_search_results(run_id_str)
+            if cleaned_entries:
+                append_search_results(run_id_str, cleaned_entries)
+
+    return {
+        "status": "merged",
+        "definitions_added": added_defs,
+        "definitions_updated": updated_defs,
+        "runs_added": added_runs,
+        "runs_updated": updated_runs,
+        "results_updated": imported_results,
+    }
+
+
 def apply_data_quality_import(data: Any, mode: str, dry_run: bool) -> Dict[str, Any]:
     records = None
     if isinstance(data, dict):
@@ -1312,6 +1566,8 @@ def apply_import(payload: Dict[str, Any], actions: Dict[str, str], dry_run: bool
             results[section] = apply_stammdaten_import(data, mode, dry_run)
         elif section == "keywords":
             results[section] = apply_keywords_import(data, mode, dry_run)
+        elif section == "searches":
+            results[section] = apply_searches_import(data, mode, dry_run)
         elif section == "settings":
             results[section] = apply_settings_import(data, mode, dry_run)
         elif section == "data_quality":
@@ -2331,6 +2587,139 @@ def perform_google_search(
     return results
 
 
+def _extract_domain_from_url(url: str) -> str:
+    try:
+        parsed = urlparse(url)
+    except ValueError:
+        return ""
+    domain = parsed.netloc or parsed.path
+    if domain.startswith("www."):
+        domain = domain[4:]
+    return domain.lower()
+
+
+def fetch_page_text(url: str, *, timeout: int = 15) -> str:
+    headers = {"User-Agent": "Mozilla/5.0 (compatible; SchulCrawler/1.0)"}
+    try:
+        response = requests.get(url, headers=headers, timeout=timeout)
+    except requests.RequestException:
+        return ""
+    if response.status_code >= 400:
+        return ""
+    content_type = str(response.headers.get("Content-Type", "")).lower()
+    if "text" not in content_type and "html" not in content_type:
+        return ""
+    try:
+        soup = BeautifulSoup(response.text, "html.parser")
+    except Exception:
+        return ""
+    for element in soup(["script", "style", "noscript", "template"]):
+        element.decompose()
+    text = soup.get_text(separator=" ", strip=True)
+    collapsed = _collapse_whitespace(text)
+    return collapsed[:20000]
+
+
+def evaluate_page_with_llm(
+    content: str,
+    prompt: str,
+    api_key: str,
+    *,
+    model: str,
+    temperature: float,
+) -> Optional[List[Dict[str, Any]]]:
+    cleaned = (content or "").strip()
+    if not cleaned:
+        return None
+    template = (prompt or "").strip() or DEFAULT_SEARCH_EVALUATION_PROMPT
+    if "{{CONTENT}}" in template:
+        user_prompt = template.replace("{{CONTENT}}", cleaned)
+    else:
+        user_prompt = f"{template}\n\nText zur Analyse:\n{cleaned}"
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "model": model or DEFAULT_SEARCH_MODEL,
+        "messages": [
+            {
+                "role": "system",
+                "content": "Du analysierst Schulwebseiten nach dem bereitgestellten Bewertungsprompt und gibst JSON aus.",
+            },
+            {"role": "user", "content": user_prompt},
+        ],
+        "temperature": max(0.0, min(float(temperature), 2.0)),
+        "max_tokens": 900,
+    }
+    try:
+        response = requests.post(
+            OPENAI_CHAT_COMPLETIONS_URL,
+            headers=headers,
+            json=payload,
+            timeout=OPENAI_TIMEOUT,
+        )
+    except requests.RequestException:
+        return None
+    if response.status_code >= 400:
+        return None
+    try:
+        data = response.json()
+    except ValueError:
+        return None
+    choices = data.get("choices") if isinstance(data, dict) else None
+    content_text = ""
+    if isinstance(choices, list) and choices:
+        first = choices[0]
+        if isinstance(first, dict):
+            message = first.get("message")
+            if isinstance(message, dict):
+                content_text = str(message.get("content", ""))
+    content_text = content_text.strip()
+    if not content_text:
+        return None
+    try:
+        parsed = json.loads(content_text)
+    except json.JSONDecodeError:
+        start = content_text.find("{")
+        end = content_text.rfind("}")
+        if start == -1 or end == -1 or end <= start:
+            return None
+        try:
+            parsed = json.loads(content_text[start : end + 1])
+        except json.JSONDecodeError:
+            return None
+    if not isinstance(parsed, dict):
+        return None
+    evaluations = parsed.get("Bewertung")
+    if not isinstance(evaluations, list):
+        return None
+    cleaned_eval: List[Dict[str, Any]] = []
+    for entry in evaluations:
+        if not isinstance(entry, dict):
+            continue
+        dimension = str(entry.get("Dimension", "")).strip()
+        try:
+            value = int(entry.get("Wert", 0))
+        except (TypeError, ValueError):
+            try:
+                value = int(float(entry.get("Wert", 0)))
+            except (TypeError, ValueError):
+                value = 0
+        try:
+            confidence = float(entry.get("Sicherheit", 0.0))
+        except (TypeError, ValueError):
+            confidence = 0.0
+        cleaned_eval.append(
+            {
+                "dimension": dimension,
+                "value": max(0, min(value, 5)),
+                "confidence": max(0.0, min(confidence, 1.0)),
+            }
+        )
+    return cleaned_eval or None
+
+
 def _normalise_domain(domain: str) -> str:
     text = (domain or "").strip().lower()
     if text.startswith("www."):
@@ -2752,6 +3141,191 @@ def replace_saved_searches(entries: List[Dict[str, object]]) -> None:
         storage.replace_saved_searches(entries)
 
 
+def load_search_definitions() -> List[Dict[str, Any]]:
+    with search_definition_lock:
+        return list(storage.list_search_definitions())
+
+
+def get_search_definition(definition_id: str) -> Optional[Dict[str, Any]]:
+    with search_definition_lock:
+        return storage.get_search_definition(definition_id)
+
+
+def save_search_definition(definition: Dict[str, Any]) -> None:
+    with search_definition_lock:
+        storage.upsert_search_definition(definition)
+
+
+def delete_search_definitions(identifiers: Iterable[str]) -> None:
+    with search_definition_lock:
+        storage.delete_search_definitions(list(identifiers))
+
+
+def list_search_runs(definition_id: Optional[str] = None) -> List[Dict[str, Any]]:
+    with search_run_lock:
+        return list(storage.list_search_runs(definition_id))
+
+
+def get_search_run(run_id: str) -> Optional[Dict[str, Any]]:
+    with search_run_lock:
+        return storage.get_search_run(run_id)
+
+
+def save_search_run(run_payload: Dict[str, Any]) -> None:
+    run_id = str(run_payload.get("id") or "").strip()
+    definition_id = str(run_payload.get("definition_id") or "").strip()
+    if not run_id or not definition_id:
+        raise ValueError("Search run erfordert eine ID und eine Definition-ID")
+    with search_run_lock:
+        storage.upsert_search_run(run_id, definition_id, run_payload)
+
+
+def append_search_results(run_id: str, entries: Iterable[Dict[str, Any]]) -> None:
+    with search_result_lock:
+        storage.append_search_results(run_id, list(entries))
+
+
+def load_search_results(run_id: str) -> List[Dict[str, Any]]:
+    with search_result_lock:
+        return list(storage.load_search_results(run_id))
+
+
+def clear_search_results(run_id: str) -> None:
+    with search_result_lock:
+        storage.clear_search_results(run_id)
+
+
+def collect_all_search_data() -> Dict[str, Any]:
+    definitions = load_search_definitions()
+    runs = list_search_runs()
+    results: Dict[str, List[Dict[str, Any]]] = {}
+    for run in runs:
+        run_id = str(run.get("id") or "").strip()
+        if not run_id or run_id in results:
+            continue
+        results[run_id] = load_search_results(run_id)
+    return {
+        "definitions": definitions,
+        "runs": runs,
+        "results": results,
+    }
+
+
+def normalise_keywords(values: Iterable[object]) -> List[str]:
+    cleaned: List[str] = []
+    seen: Set[str] = set()
+    for value in values:
+        text = str(value or "").strip()
+        if not text:
+            continue
+        lowered = text.lower()
+        if lowered in seen:
+            continue
+        seen.add(lowered)
+        cleaned.append(text)
+    return cleaned
+
+
+def normalise_school_ids(values: Iterable[object]) -> List[str]:
+    cleaned: List[str] = []
+    seen: Set[str] = set()
+    for value in values:
+        text = str(value or "").strip()
+        if not text:
+            continue
+        if text in seen:
+            continue
+        seen.add(text)
+        cleaned.append(text)
+    return cleaned
+
+
+def update_search_definition_meta(definition_id: str, **updates: Any) -> Optional[Dict[str, Any]]:
+    if not definition_id:
+        return None
+    definition = get_search_definition(definition_id)
+    if not definition:
+        return None
+    for key, value in updates.items():
+        if value is not None:
+            definition[key] = value
+    definition["updated_at"] = utcnow_iso()
+    save_search_definition(definition)
+    return definition
+
+
+def store_search_definition(payload: Dict[str, Any]) -> Dict[str, Any]:
+    defaults = get_search_defaults()
+    identifier = str(payload.get("id") or uuid.uuid4())
+    existing = get_search_definition(identifier)
+    definition: Dict[str, Any] = dict(existing) if isinstance(existing, dict) else {}
+    created_at = definition.get("created_at") or utcnow_iso()
+
+    name = str(payload.get("name") or definition.get("name") or "").strip()
+    if not name:
+        raise ValueError("Bitte vergeben Sie einen Namen für die Suche.")
+
+    description = str(payload.get("description") or definition.get("description") or "").strip()
+
+    keywords_raw = payload.get("keywords")
+    if isinstance(keywords_raw, str):
+        lines = [item.strip() for item in keywords_raw.splitlines() if item.strip()]
+        keywords = normalise_keywords(lines)
+    elif isinstance(keywords_raw, list):
+        keywords = normalise_keywords(keywords_raw)
+    else:
+        keywords = normalise_keywords(definition.get("keywords", []))
+    if not keywords:
+        raise ValueError("Bitte geben Sie mindestens ein Suchstichwort an.")
+
+    school_ids_raw = payload.get("school_ids")
+    if isinstance(school_ids_raw, list):
+        school_ids = normalise_school_ids(school_ids_raw)
+    else:
+        school_ids = normalise_school_ids(definition.get("school_ids", []))
+
+    prompt_text = str(payload.get("prompt") or definition.get("prompt") or defaults["prompt"]).strip()
+    model_value = str(payload.get("model") or definition.get("model") or defaults["model"]).strip()
+
+    temperature_raw = payload.get("temperature", definition.get("temperature", defaults["temperature"]))
+    try:
+        temperature_value = float(temperature_raw)
+    except (TypeError, ValueError):
+        temperature_value = defaults["temperature"]
+    temperature_value = max(0.0, min(temperature_value, 2.0))
+
+    max_results_raw = payload.get("max_results", definition.get("max_results", defaults["max_results"]))
+    try:
+        max_results_value = int(max_results_raw)
+    except (TypeError, ValueError):
+        max_results_value = defaults["max_results"]
+    max_results_value = max(1, min(max_results_value, 150))
+
+    status_candidate = str(payload.get("status") or definition.get("status") or SEARCH_STATUS_NEW)
+    if status_candidate not in {SEARCH_STATUS_NEW, SEARCH_STATUS_RUNNING, SEARCH_STATUS_FINISHED}:
+        status_candidate = SEARCH_STATUS_NEW
+
+    definition.update(
+        {
+            "id": identifier,
+            "name": name,
+            "description": description,
+            "keywords": keywords,
+            "school_ids": school_ids,
+            "prompt": prompt_text,
+            "model": model_value,
+            "temperature": temperature_value,
+            "max_results": max_results_value,
+            "status": status_candidate,
+            "created_at": created_at,
+            "updated_at": utcnow_iso(),
+        }
+    )
+
+    save_search_definition(definition)
+    return definition
+
+
 def _read_data_quality_results_unlocked() -> Dict[str, Dict[str, object]]:
     data = storage.get_json("data_quality", "results", {})
     if isinstance(data, dict):
@@ -3139,6 +3713,7 @@ def collect_backup_snapshot() -> Dict[str, object]:
         "synonym_cache": load_synonym_cache(),
         "keyword_finder_cache": load_keyword_finder_cache(),
         "data_quality_results": load_data_quality_results(),
+        "searches": collect_all_search_data(),
     }
 
 
@@ -3192,6 +3767,11 @@ def restore_from_backup() -> None:
     if data_quality_results_data and not load_data_quality_results():
         if isinstance(data_quality_results_data, dict):
             replace_data_quality_results(data_quality_results_data)
+
+    search_snapshot = snapshot.get("searches")
+    if isinstance(search_snapshot, dict):
+        if not load_search_definitions() and not list_search_runs():
+            apply_searches_import(search_snapshot, "replace", dry_run=False)
 
 
 def _backup_worker() -> None:
@@ -3476,6 +4056,95 @@ class DataQualityJob:
 
 
 data_quality_jobs: Dict[str, DataQualityJob] = {}
+
+
+@dataclass
+class SearchJob:
+    id: str
+    definition_id: str
+    definition_name: str
+    keywords: List[str]
+    school_ids: List[str]
+    prompt: str
+    model: str
+    temperature: float
+    max_results: int
+    status: str = "pending"
+    total_tasks: int = 0
+    processed_tasks: int = 0
+    results_count: int = 0
+    error: Optional[str] = None
+    messages: List[str] = field(default_factory=list)
+    current_school: Optional[str] = None
+    current_keyword: Optional[str] = None
+    current_url: Optional[str] = None
+    started_at: float = field(default_factory=time.time)
+    completed_at: Optional[float] = None
+    completed: bool = False
+    cancel_event: threading.Event = field(default_factory=threading.Event, repr=False, compare=False)
+    _lock: threading.Lock = field(default_factory=threading.Lock, repr=False, compare=False)
+
+    def as_dict(self) -> Dict[str, Any]:
+        with self._lock:
+            progress = 0
+            if self.total_tasks:
+                progress = min(100, int((self.processed_tasks / self.total_tasks) * 100))
+            return {
+                "job_id": self.id,
+                "definition_id": self.definition_id,
+                "definition_name": self.definition_name,
+                "status": self.status,
+                "total_tasks": self.total_tasks,
+                "processed_tasks": self.processed_tasks,
+                "results": self.results_count,
+                "error": self.error,
+                "messages": list(self.messages),
+                "current_school": self.current_school,
+                "current_keyword": self.current_keyword,
+                "current_url": self.current_url,
+                "progress_percent": progress,
+                "started_at": self.started_at,
+                "completed_at": self.completed_at,
+                "completed": self.completed,
+            }
+
+
+search_jobs: Dict[str, SearchJob] = {}
+
+
+def register_search_job(job: SearchJob) -> None:
+    with search_jobs_lock:
+        search_jobs[job.id] = job
+
+
+def get_search_job(job_id: str) -> Optional[SearchJob]:
+    with search_jobs_lock:
+        return search_jobs.get(job_id)
+
+
+def persist_search_job_state(job: SearchJob) -> None:
+    with job._lock:
+        payload = {
+            "id": job.id,
+            "definition_id": job.definition_id,
+            "definition_name": job.definition_name,
+            "status": job.status,
+            "keywords": list(job.keywords),
+            "school_ids": list(job.school_ids),
+            "results": job.results_count,
+            "processed_tasks": job.processed_tasks,
+            "total_tasks": job.total_tasks,
+            "messages": list(job.messages),
+            "prompt": job.prompt,
+            "model": job.model,
+            "temperature": job.temperature,
+            "max_results": job.max_results,
+            "started_at": datetime.utcfromtimestamp(job.started_at).isoformat() + "Z",
+            "error": job.error,
+        }
+        if job.completed_at:
+            payload["completed_at"] = datetime.utcfromtimestamp(job.completed_at).isoformat() + "Z"
+        save_search_run(payload)
 
 
 def run_crawl_job(job: CrawlJob) -> None:
@@ -3835,6 +4504,194 @@ def run_data_quality_job(job: DataQualityJob) -> None:
 
     except Exception as exc:  # pragma: no cover - defensive safety net
         job.mark_completed(error=str(exc))
+
+
+def run_search_job(job: SearchJob) -> None:
+    try:
+        openai_key = get_api_key()
+        if not openai_key:
+            with job._lock:
+                job.status = "error"
+                job.error = "OpenAI-Schlüssel erforderlich. Bitte in den Einstellungen speichern."
+                job.completed = True
+                job.completed_at = time.time()
+            persist_search_job_state(job)
+            update_search_definition_meta(
+                job.definition_id,
+                status=SEARCH_STATUS_NEW,
+                last_error=job.error,
+            )
+            return
+
+        google_credentials = get_google_search_credentials()
+        google_key = str(google_credentials.get("api_key") or "").strip()
+        google_cx = str(google_credentials.get("cx") or "").strip()
+        if not google_key or not google_cx:
+            with job._lock:
+                job.status = "error"
+                job.error = "Google Search API-Schlüssel und CX erforderlich. Bitte in den Einstellungen speichern."
+                job.completed = True
+                job.completed_at = time.time()
+            persist_search_job_state(job)
+            update_search_definition_meta(
+                job.definition_id,
+                status=SEARCH_STATUS_NEW,
+                last_error=job.error,
+            )
+            return
+
+        stammdaten = load_stammdaten()
+        records_by_id: Dict[str, Dict[str, Any]] = {}
+        for entry in stammdaten:
+            if not isinstance(entry, dict):
+                continue
+            schul_id = str(entry.get("schul_id") or "").strip()
+            if schul_id:
+                records_by_id[schul_id] = entry
+
+        school_ids = job.school_ids or list(records_by_id.keys())
+        keywords = job.keywords or []
+
+        tasks: List[Tuple[str, Dict[str, Any], str, str]] = []
+        for school_id in school_ids:
+            record = records_by_id.get(school_id)
+            if not record:
+                with job._lock:
+                    job.messages.append(f"Keine Stammdaten für Schul-ID {school_id} gefunden.")
+                continue
+            homepage = str(record.get("homepage") or "").strip()
+            if not homepage:
+                with job._lock:
+                    job.messages.append(
+                        f"{record.get('schulname', school_id)} hat keine Homepage in den Stammdaten."
+                    )
+                continue
+            domain = _extract_domain_from_url(homepage)
+            for keyword in keywords:
+                tasks.append((school_id, record, keyword, domain))
+
+        with job._lock:
+            job.total_tasks = len(tasks)
+            job.status = "running"
+            job.messages.append(f"Starte Suchlauf mit {len(tasks)} Kombinationen.")
+        persist_search_job_state(job)
+        update_search_definition_meta(job.definition_id, status=SEARCH_STATUS_RUNNING, last_error=None)
+
+        if not tasks:
+            with job._lock:
+                job.status = "finished"
+                job.completed = True
+                job.completed_at = time.time()
+            persist_search_job_state(job)
+            update_search_definition_meta(
+                job.definition_id,
+                status=SEARCH_STATUS_FINISHED,
+                last_run_id=job.id,
+                last_run_at=utcnow_iso(),
+            )
+            return
+
+        for school_id, record, keyword, domain in tasks:
+            if job.cancel_event.is_set():
+                with job._lock:
+                    job.status = "cancelled"
+                    job.completed = True
+                    job.completed_at = time.time()
+                persist_search_job_state(job)
+                update_search_definition_meta(job.definition_id, status=SEARCH_STATUS_NEW)
+                return
+
+            query = keyword
+            if domain:
+                query = f"{keyword} site:{domain}"
+
+            search_results = perform_google_search(
+                query,
+                google_key,
+                google_cx,
+                max_results=job.max_results,
+                language="de",
+                region="de",
+            )
+
+            page_entries: List[Dict[str, Any]] = []
+            for item in search_results:
+                link = str(item.get("link") or "").strip()
+                if not link:
+                    continue
+                text = fetch_page_text(link)
+                if not text:
+                    continue
+                evaluation = evaluate_page_with_llm(
+                    text,
+                    job.prompt,
+                    openai_key,
+                    model=job.model,
+                    temperature=job.temperature,
+                )
+                if not evaluation:
+                    continue
+                avg_value = sum(entry.get("value", 0) for entry in evaluation) / max(len(evaluation), 1)
+                avg_confidence = sum(entry.get("confidence", 0.0) for entry in evaluation) / max(len(evaluation), 1)
+                page_entries.append(
+                    {
+                        "school_id": school_id,
+                        "school_name": record.get("schulname"),
+                        "school_homepage": record.get("homepage"),
+                        "keyword": keyword,
+                        "query": query,
+                        "target_url": link,
+                        "google_title": item.get("title"),
+                        "google_snippet": item.get("snippet"),
+                        "dimensions": evaluation,
+                        "average_value": avg_value,
+                        "average_confidence": avg_confidence,
+                        "evaluated_at": utcnow_iso(),
+                        "model": job.model,
+                        "prompt": job.prompt,
+                        "content_excerpt": text[:600],
+                    }
+                )
+
+            with job._lock:
+                job.processed_tasks += 1
+                job.current_school = str(record.get("schulname") or school_id)
+                job.current_keyword = keyword
+                job.current_url = page_entries[-1]["target_url"] if page_entries else None
+                if page_entries:
+                    job.results_count += len(page_entries)
+            if page_entries:
+                append_search_results(job.id, page_entries)
+            persist_search_job_state(job)
+
+        with job._lock:
+            job.status = "finished"
+            job.completed = True
+            job.completed_at = time.time()
+        persist_search_job_state(job)
+        update_search_definition_meta(
+            job.definition_id,
+            status=SEARCH_STATUS_FINISHED,
+            last_run_id=job.id,
+            last_run_at=utcnow_iso(),
+            last_error=None,
+        )
+    except Exception as exc:  # pragma: no cover - defensive safety net
+        message = str(exc)
+        with job._lock:
+            job.status = "error"
+            job.error = message
+            job.completed = True
+            job.completed_at = time.time()
+        persist_search_job_state(job)
+        update_search_definition_meta(
+            job.definition_id,
+            status=SEARCH_STATUS_NEW,
+            last_error=message,
+        )
+    finally:
+        with search_jobs_lock:
+            search_jobs.pop(job.id, None)
 
 
 @app.route("/", methods=["GET", "POST"])
@@ -4278,6 +5135,270 @@ def index():
         max_concurrency=MAX_CONCURRENCY,
         active_page="search",
     )
+
+
+@app.route("/searches")
+def searches() -> ResponseReturnValue:
+    records = [record for record in load_stammdaten() if record.get("aktiv", True)]
+    definitions = load_search_definitions()
+    runs = list_search_runs()
+    defaults = get_search_defaults()
+    google_credentials = get_google_search_credentials()
+    google_configured = bool(google_credentials.get("api_key") and google_credentials.get("cx"))
+    with search_jobs_lock:
+        active_jobs = {job_id: job.as_dict() for job_id, job in search_jobs.items()}
+    return render_template(
+        "searches.html",
+        active_page="search_results",
+        schools=records,
+        definitions=definitions,
+        runs=runs,
+        search_defaults=defaults,
+        available_models=AVAILABLE_OPENAI_MODELS,
+        has_api_key=has_api_key(),
+        google_configured=google_configured,
+        active_jobs=active_jobs,
+        search_dimensions=SEARCH_DIMENSIONS,
+    )
+
+
+@app.get("/searches/data")
+def searches_data() -> ResponseReturnValue:
+    definitions = load_search_definitions()
+    runs = list_search_runs()
+    with search_jobs_lock:
+        active_jobs = {job_id: job.as_dict() for job_id, job in search_jobs.items()}
+    return jsonify({"definitions": definitions, "runs": runs, "jobs": active_jobs})
+
+
+@app.post("/searches/definitions")
+def create_or_update_search_definition() -> ResponseReturnValue:
+    payload = request.get_json(silent=True) or {}
+    if not isinstance(payload, dict):
+        return jsonify({"error": "Ungültige Anfrage."}), 400
+    try:
+        definition = store_search_definition(payload)
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    return jsonify({"definition": definition})
+
+
+@app.delete("/searches/definitions/<definition_id>")
+def delete_search_definition_route(definition_id: str) -> ResponseReturnValue:
+    identifier = str(definition_id or "").strip()
+    if not identifier:
+        return jsonify({"error": "Ungültige ID."}), 400
+    with search_jobs_lock:
+        for job in search_jobs.values():
+            if job.definition_id == identifier and not job.completed:
+                return jsonify({"error": "Suche läuft noch. Bitte warten Sie bis zum Ende oder brechen Sie ab."}), 409
+    delete_search_definitions([identifier])
+    return jsonify({"status": "ok"})
+
+
+@app.post("/searches/definitions/<definition_id>/duplicate")
+def duplicate_search_definition(definition_id: str) -> ResponseReturnValue:
+    identifier = str(definition_id or "").strip()
+    if not identifier:
+        return jsonify({"error": "Ungültige ID."}), 400
+    original = get_search_definition(identifier)
+    if not original:
+        return jsonify({"error": "Suche wurde nicht gefunden."}), 404
+    duplicate = dict(original)
+    duplicate.pop("id", None)
+    duplicate["id"] = str(uuid.uuid4())
+    duplicate["name"] = f"{original.get('name')} (Kopie)"
+    duplicate["status"] = SEARCH_STATUS_NEW
+    duplicate.pop("last_run_id", None)
+    duplicate.pop("last_run_at", None)
+    duplicate.pop("last_error", None)
+    duplicate["created_at"] = utcnow_iso()
+    duplicate["updated_at"] = duplicate["created_at"]
+    save_search_definition(duplicate)
+    return jsonify({"definition": duplicate})
+
+
+@app.post("/searches/<definition_id>/run")
+def start_search_run(definition_id: str) -> ResponseReturnValue:
+    identifier = str(definition_id or "").strip()
+    if not identifier:
+        return jsonify({"error": "Ungültige ID."}), 400
+    definition = get_search_definition(identifier)
+    if not definition:
+        return jsonify({"error": "Suche wurde nicht gefunden."}), 404
+
+    payload = request.get_json(silent=True) or {}
+    overrides = payload if isinstance(payload, dict) else {}
+    try:
+        definition_override = store_search_definition({**definition, **overrides, "id": identifier})
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+
+    job_id = str(uuid.uuid4())
+    keywords = list(definition_override.get("keywords", []))
+    school_ids = list(definition_override.get("school_ids", []))
+    prompt_text = str(definition_override.get("prompt") or "").strip()
+    model_value = str(definition_override.get("model") or DEFAULT_SEARCH_MODEL).strip()
+    temperature_value = float(definition_override.get("temperature", DEFAULT_SEARCH_TEMPERATURE))
+    max_results_value = int(definition_override.get("max_results", DEFAULT_SEARCH_MAX_RESULTS))
+
+    job = SearchJob(
+        id=job_id,
+        definition_id=identifier,
+        definition_name=str(definition_override.get("name") or identifier),
+        keywords=keywords,
+        school_ids=school_ids,
+        prompt=prompt_text,
+        model=model_value,
+        temperature=temperature_value,
+        max_results=max_results_value,
+    )
+    register_search_job(job)
+    persist_search_job_state(job)
+
+    thread = threading.Thread(target=run_search_job, args=(job,), daemon=True)
+    thread.start()
+
+    return jsonify({"job_id": job_id, "definition": definition_override})
+
+
+@app.get("/searches/jobs/<job_id>")
+def search_job_status(job_id: str) -> ResponseReturnValue:
+    identifier = str(job_id or "").strip()
+    if not identifier:
+        return jsonify({"error": "Ungültige Job-ID."}), 400
+    job = get_search_job(identifier)
+    if job:
+        return jsonify({"job": job.as_dict()})
+    run = get_search_run(identifier)
+    if run:
+        return jsonify({"job": run})
+    return jsonify({"error": "Job nicht gefunden."}), 404
+
+
+@app.get("/searches/runs/<run_id>")
+def search_run_info(run_id: str) -> ResponseReturnValue:
+    identifier = str(run_id or "").strip()
+    if not identifier:
+        return jsonify({"error": "Ungültige Run-ID."}), 400
+    run = get_search_run(identifier)
+    if not run:
+        return jsonify({"error": "Run nicht gefunden."}), 404
+    results = load_search_results(identifier)
+    return jsonify({"run": run, "result_count": len(results)})
+
+
+@app.get("/searches/runs/<run_id>/results")
+def search_run_results(run_id: str) -> ResponseReturnValue:
+    identifier = str(run_id or "").strip()
+    if not identifier:
+        return jsonify({"error": "Ungültige Run-ID."}), 400
+    run = get_search_run(identifier)
+    if not run:
+        return jsonify({"error": "Run nicht gefunden."}), 404
+    results = load_search_results(identifier)
+
+    school_filter = request.args.get("school_id", "").strip()
+    keyword_filter = request.args.get("keyword", "").strip()
+    dimension_filter = request.args.get("dimension", "").strip()
+    min_value_raw = request.args.get("min_value")
+    min_confidence_raw = request.args.get("min_confidence")
+
+    try:
+        min_value = float(min_value_raw) if min_value_raw is not None else None
+    except (TypeError, ValueError):
+        min_value = None
+    try:
+        min_confidence = float(min_confidence_raw) if min_confidence_raw is not None else None
+    except (TypeError, ValueError):
+        min_confidence = None
+
+    filtered: List[Dict[str, Any]] = []
+    for entry in results:
+        if school_filter and str(entry.get("school_id")) != school_filter:
+            continue
+        if keyword_filter and str(entry.get("keyword")) != keyword_filter:
+            continue
+        if dimension_filter:
+            dimensions = entry.get("dimensions") if isinstance(entry.get("dimensions"), list) else []
+            matches_dimension = False
+            for dim in dimensions:
+                if not isinstance(dim, dict):
+                    continue
+                if str(dim.get("dimension")) != dimension_filter:
+                    continue
+                value = dim.get("value")
+                confidence = dim.get("confidence")
+                if min_value is not None and (value is None or float(value) < min_value):
+                    continue
+                if min_confidence is not None and (confidence is None or float(confidence) < min_confidence):
+                    continue
+                matches_dimension = True
+                break
+            if not matches_dimension:
+                continue
+        filtered.append(entry)
+
+    dimension_summary: Dict[str, Dict[str, float]] = {}
+    school_summary: Dict[str, Dict[str, Any]] = {}
+    keyword_summary: Dict[str, Dict[str, Any]] = {}
+
+    for entry in filtered:
+        school_id = str(entry.get("school_id") or "")
+        school_summary.setdefault(
+            school_id,
+            {
+                "school_id": school_id,
+                "school_name": entry.get("school_name"),
+                "count": 0,
+            },
+        )["count"] += 1
+        keyword = str(entry.get("keyword") or "")
+        keyword_summary.setdefault(
+            keyword,
+            {
+                "keyword": keyword,
+                "count": 0,
+            },
+        )["count"] += 1
+        for dim in entry.get("dimensions", []):
+            if not isinstance(dim, dict):
+                continue
+            label = str(dim.get("dimension"))
+            value = float(dim.get("value", 0))
+            confidence = float(dim.get("confidence", 0.0))
+            stats = dimension_summary.setdefault(
+                label,
+                {
+                    "dimension": label,
+                    "count": 0,
+                    "value_sum": 0.0,
+                    "confidence_sum": 0.0,
+                },
+            )
+            stats["count"] += 1
+            stats["value_sum"] += value
+            stats["confidence_sum"] += confidence
+
+    for stats in dimension_summary.values():
+        count = max(stats.get("count", 0), 1)
+        stats["average_value"] = stats["value_sum"] / count
+        stats["average_confidence"] = stats["confidence_sum"] / count
+        stats.pop("value_sum", None)
+        stats.pop("confidence_sum", None)
+
+    return jsonify(
+        {
+            "run": run,
+            "total_results": len(results),
+            "filtered_results": len(filtered),
+            "results": filtered,
+            "dimension_summary": list(dimension_summary.values()),
+            "school_summary": list(school_summary.values()),
+            "keyword_summary": list(keyword_summary.values()),
+        }
+    )
+
 
 @app.route("/stammdaten", methods=["GET", "POST"])
 def stammdaten():
@@ -4751,6 +5872,7 @@ def settings():
     planner_key_present = has_keyword_planner_key()
     keyword_finder_defaults = get_keyword_finder_defaults()
     crawl_defaults = get_crawl_defaults()
+    search_defaults = get_search_defaults()
     google_credentials = get_google_search_credentials()
     data_quality_settings = get_data_quality_settings()
 
@@ -4767,6 +5889,7 @@ def settings():
         max_max_pages=MAX_MAX_PAGES,
         keyword_finder_defaults=keyword_finder_defaults,
         keyword_finder_max_results=DEFAULT_KEYWORD_FINDER_MAX_RESULTS,
+        search_defaults=search_defaults,
         google_credentials=google_credentials,
         data_quality_settings=data_quality_settings,
         export_sections=EXPORT_SECTION_ORDER,

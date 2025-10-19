@@ -40,6 +40,11 @@
                        href="{{ url_for('index') }}">Suche</a>
                 </li>
                 <li class="nav-item">
+                    <a class="nav-link {% if active_page == 'search_results' %}active{% endif %}"
+                       {% if active_page == 'search_results' %}aria-current="page"{% endif %}
+                       href="{{ url_for('searches') }}">Suchergebnisse</a>
+                </li>
+                <li class="nav-item">
                     <a class="nav-link {% if active_page == 'stammdaten' %}active{% endif %}"
                        {% if active_page == 'stammdaten' %}aria-current="page"{% endif %}
                        href="{{ url_for('stammdaten') }}">Stammdaten</a>
@@ -297,6 +302,38 @@
                 </div>
                 <div class="col-12">
                     <button type="submit" class="btn btn-primary">Keyword-Finder-Standardwerte speichern</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <div class="card mb-4">
+        <div class="card-body">
+            <h2 class="h5">Bewertungs-Standardwerte</h2>
+            <p class="text-muted">Diese Werte werden für neue Suchdefinitionen übernommen und können dort bei Bedarf überschrieben werden.</p>
+            <form method="post" class="row g-3">
+                <input type="hidden" name="form_id" value="search-defaults">
+                <div class="col-12">
+                    <label for="search_prompt" class="form-label">Standard-Prompt für Bewertungen</label>
+                    <textarea class="form-control" id="search_prompt" name="search_prompt" rows="6" required>{{ search_defaults.prompt }}</textarea>
+                    <div class="form-text">Legt fest, wie Seiten bewertet und welche Dimensionen ausgegeben werden.</div>
+                </div>
+                <div class="col-md-4 col-12">
+                    <label for="search_model" class="form-label">Standard-Sprachmodell</label>
+                    <input type="text" class="form-control" id="search_model" name="search_model" list="model-options" value="{{ search_defaults.model }}" required>
+                </div>
+                <div class="col-md-4 col-12">
+                    <label for="search_max_results" class="form-label">Max. Treffer pro Schule</label>
+                    <input type="number" class="form-control" id="search_max_results" name="search_max_results" min="1" max="150" value="{{ search_defaults.max_results }}" required>
+                    <div class="form-text">Anzahl der URLs, die je Schule analysiert werden.</div>
+                </div>
+                <div class="col-md-4 col-12">
+                    <label for="search_temperature" class="form-label">Temperatur</label>
+                    <input type="number" step="0.1" min="0" max="2" class="form-control" id="search_temperature" name="search_temperature" value="{{ '%.2f'|format(search_defaults.temperature|default(0.2)) }}" required>
+                    <div class="form-text">Steuert die Varianz der Bewertungen. Höhere Werte liefern diversere Einschätzungen.</div>
+                </div>
+                <div class="col-12">
+                    <button type="submit" class="btn btn-primary">Bewertungs-Standardwerte speichern</button>
                 </div>
             </form>
         </div>

@@ -14,5 +14,11 @@
     "max_results": 150,
     "temperature": 0.3,
     "model": "gpt-4o-mini"
+  },
+  "search_defaults": {
+    "prompt": "Bewertung schulischer KI-Integration Anweisung: Analysiere den folgenden Text einer Schulwebseite. Bewerte, welche der 9 Dimensionen schulischer KI-Integration zutreffen und wie stark sie ausgeprägt sind (1–5). Gib zusätzlich für jede Bewertung eine Sicherheit (0–1) an. Mehrere Dimensionen können gleichzeitig zutreffen. Formatiere das Ergebnis immer exakt im folgenden JSON-Schema: { \"Bewertung\": [ {\"Dimension\": \"Einsatz im Unterricht\", \"Wert\": 0, \"Sicherheit\": 0.0}, {\"Dimension\": \"Medienbildung & KI-Kompetenzen\", \"Wert\": 0, \"Sicherheit\": 0.0}, {\"Dimension\": \"Ethik, Datenschutz & Verantwortung\", \"Wert\": 0, \"Sicherheit\": 0.0}, {\"Dimension\": \"Partizipation & Mitgestaltung\", \"Wert\": 0, \"Sicherheit\": 0.0}, {\"Dimension\": \"Infrastruktur & Zugänglichkeit\", \"Wert\": 0, \"Sicherheit\": 0.0}, {\"Dimension\": \"Schulentwicklung & Steuerung\", \"Wert\": 0, \"Sicherheit\": 0.0}, {\"Dimension\": \"Fortbildung & Professionalisierung\", \"Wert\": 0, \"Sicherheit\": 0.0}, {\"Dimension\": \"Schulkultur & Kommunikation\", \"Wert\": 0, \"Sicherheit\": 0.0}, {\"Dimension\": \"Kooperation & Netzwerke\", \"Wert\": 0, \"Sicherheit\": 0.0} ] } Bewertungslogik Wert Bedeutung 1 Klarer Hinweis auf KI-Aktivität, jedoch nur sporadisch oder punktuell. 2 KI ist im Alltag erkennbar integriert, jedoch ohne formale Konzepte. 3 Schulweite Nutzung oder erkennbare Konzepte und feste Strukturen vorhanden. 4 Klare, ausgearbeitete Konzepte und tiefe Verankerung im Schulalltag. 5 Außergewöhnlich stark ausgeprägt, innovativ, tief reflektiert und strategisch verankert. Text zur Analyse {{CONTENT}}",
+    "max_results": 5,
+    "temperature": 0.2,
+    "model": "gpt-4o-mini"
   }
 }
