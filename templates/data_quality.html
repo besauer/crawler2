@@ -10,6 +10,11 @@
         body { padding-top: 0; }
         .status-badge { font-size: 0.9rem; }
         .table-fixed { table-layout: fixed; }
+        .data-quality-table {
+            max-height: 60vh;
+            overflow-y: auto;
+            overflow-x: auto;
+        }
         .quality-note { font-size: 0.85rem; }
         .history-entry { border-left: 3px solid #0d6efd; padding-left: 0.75rem; margin-bottom: 1rem; }
         .history-entry h6 { font-size: 1rem; margin-bottom: 0.25rem; }
@@ -118,10 +123,11 @@
                     Treffer je Suche: {{ data_quality_settings.max_search_results }} • Schwelle: {{ '%.2f'|format(data_quality_settings.confidence_threshold) }}
                 </div>
             </div>
-            <div class="table-responsive">
+            <div class="table-responsive data-quality-table">
                 <table class="table table-hover table-fixed align-middle" id="schools-table">
                     <thead class="table-light">
                     <tr>
+                        <th style="width: 16rem;">Aktionen</th>
                         <th style="width: 2.5rem;"><input type="checkbox" class="form-check-input" id="select-master"></th>
                         <th style="width: 18rem;">Schule</th>
                         <th style="width: 12rem;">Ort</th>
@@ -129,12 +135,23 @@
                         <th style="width: 10rem;">Status</th>
                         <th style="width: 12rem;">Letzte Prüfung</th>
                         <th style="width: 14rem;">Vorschlag</th>
-                        <th style="width: 16rem;">Aktionen</th>
                     </tr>
                     </thead>
                     <tbody id="schools-body">
                     {% for record in records %}
                         <tr data-school-id="{{ record.schul_id }}">
+                            <td>
+                                <div class="btn-group btn-group-sm" role="group">
+                                    <button class="btn btn-outline-primary" data-action="details">Details</button>
+                                    <button class="btn btn-outline-success" data-action="accept" {% if not record.quality.suggested_url %}disabled{% endif %}>Vorschlag übernehmen</button>
+                                    <button class="btn btn-outline-secondary" data-action="edit">URL ändern</button>
+                                </div>
+                                <div class="btn-group btn-group-sm mt-1" role="group">
+                                    <button class="btn btn-outline-success" data-action="mark-ok">Als korrekt markieren</button>
+                                    <button class="btn btn-outline-warning" data-action="ignore">Ignorieren</button>
+                                    <button class="btn btn-outline-primary" data-action="recheck">Erneut prüfen</button>
+                                </div>
+                            </td>
                             <td><input type="checkbox" class="form-check-input record-checkbox"
                                        value="{{ record.schul_id }}"></td>
                             <td>
@@ -165,18 +182,6 @@
                                 {% else %}
                                     <span class="text-muted">—</span>
                                 {% endif %}
-                            </td>
-                            <td>
-                                <div class="btn-group btn-group-sm" role="group">
-                                    <button class="btn btn-outline-primary" data-action="details">Details</button>
-                                    <button class="btn btn-outline-success" data-action="accept" {% if not record.quality.suggested_url %}disabled{% endif %}>Vorschlag übernehmen</button>
-                                    <button class="btn btn-outline-secondary" data-action="edit">URL ändern</button>
-                                </div>
-                                <div class="btn-group btn-group-sm mt-1" role="group">
-                                    <button class="btn btn-outline-success" data-action="mark-ok">Als korrekt markieren</button>
-                                    <button class="btn btn-outline-warning" data-action="ignore">Ignorieren</button>
-                                    <button class="btn btn-outline-primary" data-action="recheck">Erneut prüfen</button>
-                                </div>
                             </td>
                         </tr>
                     {% endfor %}
@@ -289,13 +294,6 @@
                 const row = document.createElement('tr');
                 row.dataset.schoolId = record.schul_id;
                 row.innerHTML = `
-                    <td><input type="checkbox" class="form-check-input record-checkbox" value="${record.schul_id}"></td>
-                    <td><div class="fw-semibold">${record.schulname || ''}</div><div class="small text-muted">ID: ${record.schul_id}</div></td>
-                    <td>${record.ort || ''}</td>
-                    <td class="text-break">${record.homepage ? `<a href="${record.homepage}" target="_blank" rel="noopener">${record.homepage}</a>` : '<span class="text-muted">—</span>'}</td>
-                    <td><span class="badge bg-secondary status-badge" data-status="${record.status}">${record.status_label}</span>${record.quality.manual_note ? `<div class="text-muted quality-note">${record.quality.manual_note}</div>` : ''}</td>
-                    <td>${record.quality.last_checked ? `<time datetime="${record.quality.last_checked}">${record.quality.last_checked}</time>` : '<span class="text-muted">Noch nicht geprüft</span>'}</td>
-                    <td class="text-break">${record.quality.suggested_url ? `<a href="${record.quality.suggested_url}" target="_blank" rel="noopener">${record.quality.suggested_url}</a>${record.quality.suggested_confidence ? `<div class="text-muted quality-note">Sicherheit: ${Number(record.quality.suggested_confidence).toFixed(2)}</div>` : ''}` : '<span class="text-muted">—</span>'}</td>
                     <td>
                         <div class="btn-group btn-group-sm" role="group">
                             <button class="btn btn-outline-primary" data-action="details">Details</button>
@@ -308,6 +306,13 @@
                             <button class="btn btn-outline-primary" data-action="recheck">Erneut prüfen</button>
                         </div>
                     </td>
+                    <td><input type="checkbox" class="form-check-input record-checkbox" value="${record.schul_id}"></td>
+                    <td><div class="fw-semibold">${record.schulname || ''}</div><div class="small text-muted">ID: ${record.schul_id}</div></td>
+                    <td>${record.ort || ''}</td>
+                    <td class="text-break">${record.homepage ? `<a href="${record.homepage}" target="_blank" rel="noopener">${record.homepage}</a>` : '<span class="text-muted">—</span>'}</td>
+                    <td><span class="badge bg-secondary status-badge" data-status="${record.status}">${record.status_label}</span>${record.quality.manual_note ? `<div class="text-muted quality-note">${record.quality.manual_note}</div>` : ''}</td>
+                    <td>${record.quality.last_checked ? `<time datetime="${record.quality.last_checked}">${record.quality.last_checked}</time>` : '<span class="text-muted">Noch nicht geprüft</span>'}</td>
+                    <td class="text-break">${record.quality.suggested_url ? `<a href="${record.quality.suggested_url}" target="_blank" rel="noopener">${record.quality.suggested_url}</a>${record.quality.suggested_confidence ? `<div class="text-muted quality-note">Sicherheit: ${Number(record.quality.suggested_confidence).toFixed(2)}</div>` : ''}` : '<span class="text-muted">—</span>'}</td>
                 `;
                 tableBody.appendChild(row);
             });
@@ -504,8 +509,8 @@
             const row = button.closest('tr');
             if (!row) return;
             const schoolId = row.dataset.schoolId;
-            const homepage = row.querySelector('td:nth-child(4) a')?.href || '';
-            const schoolName = row.querySelector('td:nth-child(2) .fw-semibold')?.textContent || '';
+            const homepage = row.querySelector('td:nth-child(5) a')?.href || '';
+            const schoolName = row.querySelector('td:nth-child(3) .fw-semibold')?.textContent || '';
             const action = button.dataset.action;
             if (action === 'details') {
                 openDetails(schoolId, schoolName);
