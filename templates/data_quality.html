@@ -128,6 +128,44 @@
                 <p class="mt-2 mb-0 text-muted" id="progress-summary"></p>
                 <ul class="small mt-2 mb-0" id="progress-messages"></ul>
             </div>
+    </div>
+</div>
+
+    <div class="card mb-4">
+        <div class="card-body">
+            <div class="d-flex flex-column flex-lg-row gap-3 align-items-lg-center justify-content-between">
+                <div class="flex-grow-1">
+                    <h2 class="h5 mb-2">Automatische Korrektur</h2>
+                    <p class="text-muted mb-1">Alle als unsicher oder falsch markierten URLs werden automatisiert geprüft und bei ausreichend hoher Sicherheit direkt in den Stammdaten ersetzt.</p>
+                    <div class="text-muted small">
+                        Schwelle: {{ '%.2f'|format(data_quality_settings.correction_confidence_threshold|default(0.9)) }} • Batch: {{ data_quality_settings.correction_batch_size }} • Suche: {{ data_quality_settings.max_search_results }} Treffer ({{ data_quality_settings.search_language|upper }} / {{ data_quality_settings.search_region|upper }})
+                    </div>
+                </div>
+                <div class="d-flex flex-wrap gap-2">
+                    <button class="btn btn-outline-primary" id="start-correction">Korrektur starten</button>
+                    <button class="btn btn-outline-secondary" id="export-correction-results" disabled>Änderungen exportieren</button>
+                </div>
+            </div>
+            <p class="small text-muted mt-3 mb-0" id="correction-status" hidden></p>
+            <div class="mt-3" id="correction-results-section" hidden>
+                <div class="fw-semibold small mb-2" id="correction-summary"></div>
+                <div class="table-responsive">
+                    <table class="table table-sm table-striped mb-0">
+                        <thead class="table-light">
+                        <tr>
+                            <th>Schule</th>
+                            <th>URL alt → neu</th>
+                            <th>Begründung</th>
+                        </tr>
+                        </thead>
+                        <tbody id="correction-results-body">
+                        <tr>
+                            <td colspan="3" class="text-muted">Noch keine automatischen Änderungen.</td>
+                        </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
         </div>
     </div>
 
@@ -138,7 +176,7 @@
                     <h2 class="h5 mb-0">Stammdaten</h2>
                     <div class="text-muted small">
                         Modelle: {{ data_quality_settings.model }} • Treffer pro Lauf: {{ data_quality_settings.batch_size }} •
-                        Treffer je Suche: {{ data_quality_settings.max_search_results }} • Schwelle: {{ '%.2f'|format(data_quality_settings.confidence_threshold) }}
+                        Treffer je Suche: {{ data_quality_settings.max_search_results }} • Schwelle: {{ '%.2f'|format(data_quality_settings.confidence_threshold) }} • Auto-Korrektur: {{ '%.2f'|format(data_quality_settings.correction_confidence_threshold|default(0.9)) }} / {{ data_quality_settings.correction_batch_size }}
                     </div>
                 </div>
                 <div class="btn-group btn-group-sm" role="group">
@@ -279,9 +317,18 @@
         const detailsPanel = detailsPanelEl ? new bootstrap.Offcanvas(detailsPanelEl) : null;
         const detailsContent = document.getElementById('detailsContent');
         const detailsSub = document.getElementById('detailsSub');
+        const correctionStartBtn = document.getElementById('start-correction');
+        const correctionExportBtn = document.getElementById('export-correction-results');
+        const correctionStatusEl = document.getElementById('correction-status');
+        const correctionSummaryEl = document.getElementById('correction-summary');
+        const correctionResultsSection = document.getElementById('correction-results-section');
+        const correctionResultsBody = document.getElementById('correction-results-body');
 
         let currentJobId = null;
         let pollTimer = null;
+        let correctionJobId = null;
+        let correctionPollTimer = null;
+        let lastCorrectionResults = [];
 
         function getSelectedIds() {
             return Array.from(document.querySelectorAll('.record-checkbox:checked')).map(cb => cb.value).filter(Boolean);
@@ -339,6 +386,216 @@
                 tableBody.appendChild(row);
             });
             syncMasterCheckbox();
+        }
+
+        function resetCorrectionPolling() {
+            correctionJobId = null;
+            if (correctionPollTimer) {
+                clearInterval(correctionPollTimer);
+                correctionPollTimer = null;
+            }
+        }
+
+        function updateCorrectionStatusView(text) {
+            if (!correctionStatusEl) return;
+            if (text) {
+                correctionStatusEl.hidden = false;
+                correctionStatusEl.textContent = text;
+            } else {
+                correctionStatusEl.hidden = true;
+                correctionStatusEl.textContent = '';
+            }
+        }
+
+        function updateCorrectionSummary(total, corrected) {
+            if (!correctionSummaryEl) return;
+            correctionSummaryEl.textContent = `Geprüft zur Korrektur: ${total} | Automatisch korrigiert: ${corrected}`;
+        }
+
+        function renderCorrectionResults(changes) {
+            if (!correctionResultsBody) {
+                return;
+            }
+            correctionResultsBody.innerHTML = '';
+            if (!Array.isArray(changes) || !changes.length) {
+                const emptyRow = document.createElement('tr');
+                emptyRow.innerHTML = '<td colspan="3" class="text-muted">Keine automatischen Änderungen.</td>';
+                correctionResultsBody.appendChild(emptyRow);
+                return;
+            }
+            changes.forEach(change => {
+                const row = document.createElement('tr');
+
+                const nameCell = document.createElement('td');
+                nameCell.className = 'text-nowrap';
+                nameCell.textContent = (change.schulname || '').toString() || '—';
+                row.appendChild(nameCell);
+
+                const urlCell = document.createElement('td');
+                urlCell.className = 'text-nowrap';
+                const oldUrl = (change.old_url || '').toString();
+                const newUrl = (change.new_url || '').toString();
+                if (oldUrl) {
+                    const link = document.createElement('a');
+                    link.href = oldUrl;
+                    link.target = '_blank';
+                    link.rel = 'noopener';
+                    link.textContent = oldUrl;
+                    urlCell.appendChild(link);
+                } else {
+                    urlCell.appendChild(document.createTextNode('—'));
+                }
+                if (newUrl) {
+                    if (urlCell.childNodes.length) {
+                        urlCell.appendChild(document.createElement('br'));
+                    }
+                    const span = document.createElement('span');
+                    span.className = 'text-muted';
+                    span.appendChild(document.createTextNode('→ '));
+                    const newLink = document.createElement('a');
+                    newLink.href = newUrl;
+                    newLink.target = '_blank';
+                    newLink.rel = 'noopener';
+                    newLink.textContent = newUrl;
+                    span.appendChild(newLink);
+                    urlCell.appendChild(span);
+                }
+                row.appendChild(urlCell);
+
+                const reasonCell = document.createElement('td');
+                const reasonText = (change.reason || '').toString();
+                reasonCell.textContent = reasonText || '—';
+                row.appendChild(reasonCell);
+
+                correctionResultsBody.appendChild(row);
+            });
+        }
+
+        function handleCorrectionStatus(data) {
+            if (!data) return;
+            const total = Number(data.total || 0);
+            const processed = Number(data.processed || 0);
+            const corrected = Number(data.corrected || 0);
+            lastCorrectionResults = Array.isArray(data.changes) ? data.changes : [];
+            if (data.completed) {
+                if (data.error) {
+                    updateCorrectionStatusView(`Fehler: ${data.error}`);
+                } else {
+                    updateCorrectionStatusView('Korrektur abgeschlossen.');
+                }
+                if (correctionResultsSection) {
+                    correctionResultsSection.hidden = false;
+                }
+                updateCorrectionSummary(total, corrected);
+                renderCorrectionResults(lastCorrectionResults);
+                resetCorrectionPolling();
+                if (correctionStartBtn) {
+                    correctionStartBtn.disabled = false;
+                }
+                if (correctionExportBtn) {
+                    correctionExportBtn.disabled = lastCorrectionResults.length === 0;
+                }
+                refreshData();
+            } else {
+                updateCorrectionStatusView(`Korrektur läuft … ${processed} von ${total} verarbeitet.`);
+                if (correctionResultsSection) {
+                    correctionResultsSection.hidden = true;
+                }
+                if (correctionExportBtn) {
+                    correctionExportBtn.disabled = true;
+                }
+            }
+        }
+
+        function pollCorrectionJob() {
+            if (!correctionJobId) {
+                return;
+            }
+            fetch(`{{ url_for('data_quality_correction_status', job_id='__JOB__') }}`.replace('__JOB__', correctionJobId))
+                .then(resp => resp.json())
+                .then(data => {
+                    if (data.error) {
+                        updateCorrectionStatusView(data.error);
+                        resetCorrectionPolling();
+                        if (correctionStartBtn) {
+                            correctionStartBtn.disabled = false;
+                        }
+                        return;
+                    }
+                    handleCorrectionStatus(data);
+                })
+                .catch(() => {
+                    updateCorrectionStatusView('Status der Korrektur konnte nicht geladen werden.');
+                    resetCorrectionPolling();
+                    if (correctionStartBtn) {
+                        correctionStartBtn.disabled = false;
+                    }
+                });
+        }
+
+        function startCorrectionJob() {
+            resetCorrectionPolling();
+            if (correctionStartBtn) {
+                correctionStartBtn.disabled = true;
+            }
+            const ids = getSelectedIds();
+            updateCorrectionStatusView('Korrektur wird gestartet …');
+            if (correctionResultsSection) {
+                correctionResultsSection.hidden = true;
+            }
+            if (correctionExportBtn) {
+                correctionExportBtn.disabled = true;
+            }
+            fetch('{{ url_for('start_data_quality_correction') }}', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ school_ids: ids })
+            }).then(resp => resp.json()).then(data => {
+                if (data.error) {
+                    updateCorrectionStatusView(data.error);
+                    if (correctionStartBtn) {
+                        correctionStartBtn.disabled = false;
+                    }
+                    return;
+                }
+                correctionJobId = data.job_id;
+                lastCorrectionResults = [];
+                updateCorrectionSummary(0, 0);
+                pollCorrectionJob();
+                if (correctionPollTimer) {
+                    clearInterval(correctionPollTimer);
+                }
+                correctionPollTimer = setInterval(pollCorrectionJob, 4000);
+            }).catch(() => {
+                updateCorrectionStatusView('Korrektur konnte nicht gestartet werden.');
+                if (correctionStartBtn) {
+                    correctionStartBtn.disabled = false;
+                }
+            });
+        }
+
+        function exportCorrectionResults() {
+            if (!lastCorrectionResults.length) {
+                return;
+            }
+            const header = ['Schulname', 'URL alt', 'URL neu', 'Begründung'];
+            const rows = lastCorrectionResults.map(change => {
+                const fields = [change.schulname, change.old_url, change.new_url, change.reason].map(value => {
+                    const text = (value || '').toString().replace(/[\r\n]+/g, ' ').replace(/"/g, "''").replace(/;/g, ',');
+                    return `"${text}"`;
+                });
+                return fields.join(';');
+            });
+            const csv = [header.join(';'), ...rows].join('\n');
+            const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+            const url = URL.createObjectURL(blob);
+            const link = document.createElement('a');
+            link.href = url;
+            link.download = `datenqualitaet_korrekturen_${new Date().toISOString().replace(/[:.]/g, '-')}.csv`;
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+            URL.revokeObjectURL(url);
         }
 
         const densityToggle = document.getElementById('toggle-density');
@@ -530,6 +787,8 @@
         startBtn?.addEventListener('click', startJob);
         cancelBtn?.addEventListener('click', cancelJob);
         refreshBtn?.addEventListener('click', refreshData);
+        correctionStartBtn?.addEventListener('click', startCorrectionJob);
+        correctionExportBtn?.addEventListener('click', exportCorrectionResults);
 
         tableBody?.addEventListener('change', event => {
             if (event.target.classList.contains('record-checkbox')) {
@@ -574,11 +833,17 @@
             if (document.visibilityState === 'visible' && currentJobId) {
                 pollStatus();
             }
+            if (document.visibilityState === 'visible' && correctionJobId) {
+                pollCorrectionJob();
+            }
         });
 
         window.addEventListener('beforeunload', () => {
             if (pollTimer) {
                 clearInterval(pollTimer);
+            }
+            if (correctionPollTimer) {
+                clearInterval(correctionPollTimer);
             }
         });
     })();

@@ -157,12 +157,49 @@
                     <input type="number" class="form-control" id="dq_batch_size" name="dq_batch_size" min="1" max="500"
                            value="{{ data_quality_settings.batch_size }}" required>
                 </div>
+                <div class="col-md-4 col-12">
+                    <label for="dq_search_language" class="form-label">Suchsprache (hl)</label>
+                    <input type="text" class="form-control" id="dq_search_language" name="dq_search_language" maxlength="5"
+                           value="{{ data_quality_settings.search_language }}">
+                    <div class="form-text">ISO-Kürzel, z. B. de oder en.</div>
+                </div>
+                <div class="col-md-4 col-12">
+                    <label for="dq_search_region" class="form-label">Region (gl)</label>
+                    <input type="text" class="form-control" id="dq_search_region" name="dq_search_region" maxlength="5"
+                           value="{{ data_quality_settings.search_region }}">
+                    <div class="form-text">Ländercode für die Google-Suche (z. B. DE).</div>
+                </div>
+                <div class="col-md-4 col-12">
+                    <label for="dq_correction_threshold" class="form-label">Schwelle automatische Korrektur</label>
+                    <input type="number" class="form-control" step="0.05" min="0" max="1" id="dq_correction_threshold" name="dq_correction_threshold"
+                           value="{{ '%.2f'|format(data_quality_settings.correction_confidence_threshold|default(0.9)) }}" required>
+                </div>
+                <div class="col-md-4 col-12">
+                    <label for="dq_correction_batch_size" class="form-label">Batchgröße automatische Korrektur</label>
+                    <input type="number" class="form-control" id="dq_correction_batch_size" name="dq_correction_batch_size" min="1" max="500"
+                           value="{{ data_quality_settings.correction_batch_size }}" required>
+                </div>
+                <div class="col-md-4 col-12">
+                    <label for="dq_correction_rate_limit" class="form-label">Wartezeit zwischen Korrekturen (Sekunden)</label>
+                    <input type="number" class="form-control" step="0.1" min="0" id="dq_correction_rate_limit" name="dq_correction_rate_limit"
+                           value="{{ '%.1f'|format(data_quality_settings.correction_rate_limit|default(0.0)) }}" required>
+                </div>
                 <div class="col-md-4 col-12 d-flex align-items-center">
                     <div class="form-check mt-4">
                         <input class="form-check-input" type="checkbox" value="1" id="dq_dry_run" name="dq_dry_run"
                                {% if data_quality_settings.dry_run %}checked{% endif %}>
                         <label class="form-check-label" for="dq_dry_run">Dry-Run (keine Stammdaten überschreiben)</label>
                     </div>
+                </div>
+                <div class="col-md-6 col-12">
+                    <label for="dq_allowed_domains" class="form-label">Erlaubte Domains (optional)</label>
+                    <textarea class="form-control" id="dq_allowed_domains" name="dq_allowed_domains" rows="3">{{ data_quality_settings.allowed_domains | join('\n') }}</textarea>
+                    <div class="form-text">Eine Domain pro Zeile, leer lassen für keine Einschränkung.</div>
+                </div>
+                <div class="col-md-6 col-12">
+                    <label for="dq_blocked_domains" class="form-label">Ausgeschlossene Domains (optional)</label>
+                    <textarea class="form-control" id="dq_blocked_domains" name="dq_blocked_domains" rows="3">{{ data_quality_settings.blocked_domains | join('\n') }}</textarea>
+                    <div class="form-text">Eine Domain pro Zeile, wird vor der Bewertung verworfen.</div>
                 </div>
                 <div class="col-12">
                     <button type="submit" class="btn btn-primary">Einstellungen speichern</button>

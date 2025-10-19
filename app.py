@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urljoin, urlparse, urlunparse
 
 import requests
 from flask import Flask, jsonify, render_template, request
@@ -110,6 +110,13 @@ DEFAULT_DATA_QUALITY_SETTINGS = {
     "max_search_results": 10,
     "batch_size": 25,
     "dry_run": False,
+    "search_language": "de",
+    "search_region": "de",
+    "correction_confidence_threshold": 0.9,
+    "correction_batch_size": 25,
+    "correction_rate_limit": 1.0,
+    "allowed_domains": [],
+    "blocked_domains": [],
 }
 GOOGLE_SEARCH_API_URL = "https://www.googleapis.com/customsearch/v1"
 GOOGLE_SEARCH_TIMEOUT = 20
@@ -469,6 +476,44 @@ def get_data_quality_settings() -> Dict[str, object]:
         batch_size = defaults["batch_size"]
     result["batch_size"] = max(1, min(batch_size, 200))
     result["dry_run"] = bool(stored.get("dry_run", defaults["dry_run"]))
+    language = str(stored.get("search_language", defaults["search_language"]) or "").strip() or defaults["search_language"]
+    result["search_language"] = language
+    region = str(stored.get("search_region", defaults["search_region"]) or "").strip() or defaults["search_region"]
+    result["search_region"] = region
+    try:
+        correction_threshold = float(
+            stored.get("correction_confidence_threshold", defaults["correction_confidence_threshold"])
+        )
+    except (TypeError, ValueError):
+        correction_threshold = defaults["correction_confidence_threshold"]
+    correction_threshold = max(0.0, min(correction_threshold, 1.0))
+    result["correction_confidence_threshold"] = correction_threshold
+    try:
+        correction_batch_size = int(stored.get("correction_batch_size", defaults["correction_batch_size"]))
+    except (TypeError, ValueError):
+        correction_batch_size = defaults["correction_batch_size"]
+    result["correction_batch_size"] = max(1, min(correction_batch_size, 500))
+    try:
+        rate_limit = float(stored.get("correction_rate_limit", defaults["correction_rate_limit"]))
+    except (TypeError, ValueError):
+        rate_limit = defaults["correction_rate_limit"]
+    result["correction_rate_limit"] = max(0.0, rate_limit)
+    allowed = stored.get("allowed_domains", defaults["allowed_domains"])
+    if isinstance(allowed, str):
+        allowed = [item.strip() for item in allowed.splitlines() if item.strip()]
+    elif isinstance(allowed, list):
+        allowed = [str(item).strip() for item in allowed if str(item).strip()]
+    else:
+        allowed = []
+    result["allowed_domains"] = allowed
+    blocked = stored.get("blocked_domains", defaults["blocked_domains"])
+    if isinstance(blocked, str):
+        blocked = [item.strip() for item in blocked.splitlines() if item.strip()]
+    elif isinstance(blocked, list):
+        blocked = [str(item).strip() for item in blocked if str(item).strip()]
+    else:
+        blocked = []
+    result["blocked_domains"] = blocked
     return result
 
 
@@ -499,6 +544,39 @@ def update_data_quality_settings(values: Dict[str, object]) -> Dict[str, object]
         batch_size = defaults["batch_size"]
     batch_size = max(1, min(batch_size, 200))
     dry_run = bool(values.get("dry_run"))
+    language = str(values.get("search_language", defaults["search_language"]) or "").strip() or defaults["search_language"]
+    region = str(values.get("search_region", defaults["search_region"]) or "").strip() or defaults["search_region"]
+    try:
+        correction_threshold = float(
+            values.get("correction_confidence_threshold", defaults["correction_confidence_threshold"])
+        )
+    except (TypeError, ValueError):
+        correction_threshold = defaults["correction_confidence_threshold"]
+    correction_threshold = max(0.0, min(correction_threshold, 1.0))
+    try:
+        correction_batch_size = int(values.get("correction_batch_size", defaults["correction_batch_size"]))
+    except (TypeError, ValueError):
+        correction_batch_size = defaults["correction_batch_size"]
+    correction_batch_size = max(1, min(correction_batch_size, 500))
+    try:
+        rate_limit = float(values.get("correction_rate_limit", defaults["correction_rate_limit"]))
+    except (TypeError, ValueError):
+        rate_limit = defaults["correction_rate_limit"]
+    rate_limit = max(0.0, rate_limit)
+    allowed_raw = values.get("allowed_domains", "")
+    if isinstance(allowed_raw, str):
+        allowed_domains = [item.strip() for item in allowed_raw.splitlines() if item.strip()]
+    elif isinstance(allowed_raw, list):
+        allowed_domains = [str(item).strip() for item in allowed_raw if str(item).strip()]
+    else:
+        allowed_domains = []
+    blocked_raw = values.get("blocked_domains", "")
+    if isinstance(blocked_raw, str):
+        blocked_domains = [item.strip() for item in blocked_raw.splitlines() if item.strip()]
+    elif isinstance(blocked_raw, list):
+        blocked_domains = [str(item).strip() for item in blocked_raw if str(item).strip()]
+    else:
+        blocked_domains = []
     data["data_quality_settings"] = {
         "model": model,
         "temperature": temperature,
@@ -506,6 +584,13 @@ def update_data_quality_settings(values: Dict[str, object]) -> Dict[str, object]
         "max_search_results": max_search,
         "batch_size": batch_size,
         "dry_run": dry_run,
+        "search_language": language,
+        "search_region": region,
+        "correction_confidence_threshold": correction_threshold,
+        "correction_batch_size": correction_batch_size,
+        "correction_rate_limit": rate_limit,
+        "allowed_domains": allowed_domains,
+        "blocked_domains": blocked_domains,
     }
     save_settings_data(data)
     return get_data_quality_settings()
@@ -2157,13 +2242,22 @@ def assess_school_website_with_llm(
     return parsed
 
 
-def perform_google_search(query: str, api_key: str, cx: str, *, max_results: int) -> List[Dict[str, object]]:
+def perform_google_search(
+    query: str,
+    api_key: str,
+    cx: str,
+    *,
+    max_results: int,
+    language: str = "de",
+    region: str = "de",
+) -> List[Dict[str, object]]:
     params = {
         "key": api_key,
         "cx": cx,
         "q": query,
         "num": max(1, min(max_results, 10)),
-        "hl": "de",
+        "hl": (language or "de")[:5],
+        "gl": (region or "de")[:5],
         "safe": "active",
     }
     try:
@@ -2194,6 +2288,72 @@ def perform_google_search(query: str, api_key: str, cx: str, *, max_results: int
                 }
             )
     return results
+
+
+def _normalise_domain(domain: str) -> str:
+    text = (domain or "").strip().lower()
+    if text.startswith("www."):
+        text = text[4:]
+    return text
+
+
+def _domain_matches(domain: str, candidates: Set[str]) -> bool:
+    if not domain:
+        return False
+    base = _normalise_domain(domain)
+    for candidate in candidates:
+        cand = _normalise_domain(candidate)
+        if not cand:
+            continue
+        if base == cand or base.endswith(f".{cand}"):
+            return True
+    return False
+
+
+def _domain_allowed(url: str, allowed: Set[str], blocked: Set[str]) -> bool:
+    try:
+        parsed = urlparse(url)
+    except ValueError:
+        return False
+    domain = _normalise_domain(parsed.netloc)
+    if not domain:
+        domain = _normalise_domain(parsed.path)
+    if _domain_matches(domain, blocked):
+        return False
+    if allowed and not _domain_matches(domain, allowed):
+        return False
+    return True
+
+
+def _normalise_candidate_url(url: str) -> str:
+    text = (url or "").strip()
+    if not text:
+        return ""
+    parsed = urlparse(text, scheme="https")
+    scheme = parsed.scheme.lower() if parsed.scheme else "https"
+    if scheme not in {"http", "https"}:
+        scheme = "https"
+    netloc = parsed.netloc
+    path = parsed.path
+    if not netloc and parsed.path:
+        netloc = parsed.path
+        path = ""
+    if not netloc:
+        return ""
+    normalised_path = path or "/"
+    return urlunparse((scheme, netloc, normalised_path, "", parsed.query or "", ""))
+
+
+def _urls_equivalent(first: str, second: str) -> bool:
+    def _prep(value: str) -> str:
+        normalised = _normalise_candidate_url(value)
+        if not normalised:
+            return ""
+        parsed = urlparse(normalised)
+        path = parsed.path.rstrip("/") or "/"
+        return urlunparse((parsed.scheme, parsed.netloc.lower(), path, "", parsed.query, ""))
+
+    return _prep(first) == _prep(second)
 
 
 def analyse_search_results_with_llm(
@@ -3260,11 +3420,95 @@ class DataQualityJob:
             self.completed = True
             self.current_school = None
 
-    def request_cancel(self) -> None:
+def request_cancel(self) -> None:
         self.cancel_event.set()
 
 
 data_quality_jobs: Dict[str, DataQualityJob] = {}
+
+
+@dataclass
+class DataQualityCorrectionJob:
+    id: str
+    school_ids: List[str]
+    total: int
+    processed: int = 0
+    corrected: int = 0
+    status: str = "pending"
+    current_school: Optional[str] = None
+    completed: bool = False
+    error: Optional[str] = None
+    changes: List[Dict[str, object]] = field(default_factory=list)
+    messages: List[str] = field(default_factory=list)
+    started_at: float = field(default_factory=time.time)
+    cancel_event: threading.Event = field(default_factory=threading.Event, repr=False, compare=False)
+    _lock: threading.Lock = field(default_factory=threading.Lock, repr=False, compare=False)
+
+    def as_dict(self) -> Dict[str, object]:
+        with self._lock:
+            return {
+                "job_id": self.id,
+                "status": self.status,
+                "processed": self.processed,
+                "total": self.total,
+                "corrected": self.corrected,
+                "current_school": self.current_school,
+                "completed": self.completed,
+                "error": self.error,
+                "changes": list(self.changes),
+                "messages": list(self.messages),
+            }
+
+    def update_progress(
+        self,
+        *,
+        processed_increment: int = 0,
+        corrected_increment: int = 0,
+        current_school: Optional[str] = None,
+        change: Optional[Dict[str, object]] = None,
+        message: Optional[str] = None,
+    ) -> None:
+        with self._lock:
+            if processed_increment:
+                self.processed += processed_increment
+            if corrected_increment:
+                self.corrected += corrected_increment
+            if current_school is not None:
+                self.current_school = current_school
+            if change:
+                self.changes.append(change)
+                if len(self.changes) > 200:
+                    self.changes = self.changes[-200:]
+            if message:
+                self.messages.append(message)
+                if len(self.messages) > 100:
+                    self.messages = self.messages[-100:]
+
+    def mark_running(self) -> None:
+        with self._lock:
+            self.status = "running"
+
+    def mark_completed(self, *, error: Optional[str] = None) -> None:
+        with self._lock:
+            if error:
+                self.error = error
+                self.status = "error"
+            else:
+                self.status = "finished"
+            self.completed = True
+            self.current_school = None
+
+    def request_cancel(self) -> None:
+        self.cancel_event.set()
+
+    def mark_cancelled(self) -> None:
+        with self._lock:
+            self.status = "cancelled"
+            self.completed = True
+            self.current_school = None
+
+
+data_quality_correction_jobs: Dict[str, DataQualityCorrectionJob] = {}
 
 
 def run_crawl_job(job: CrawlJob) -> None:
@@ -3326,6 +3570,16 @@ def run_data_quality_job(job: DataQualityJob) -> None:
         google_key = google_credentials.get("api_key", "").strip()
         google_cx = google_credentials.get("cx", "").strip()
         threshold = float(settings.get("confidence_threshold", DEFAULT_DATA_QUALITY_SETTINGS["confidence_threshold"]))
+        allowed_domains = {
+            _normalise_domain(item)
+            for item in settings.get("allowed_domains", [])
+            if isinstance(item, str) and item.strip()
+        }
+        blocked_domains = {
+            _normalise_domain(item)
+            for item in settings.get("blocked_domains", [])
+            if isinstance(item, str) and item.strip()
+        }
 
         with job._lock:
             job.status = "running"
@@ -3443,12 +3697,20 @@ def run_data_quality_job(job: DataQualityJob) -> None:
                         google_key,
                         google_cx,
                         max_results=int(settings.get("max_search_results", 10)),
+                        language=str(settings.get("search_language", "de")),
+                        region=str(settings.get("search_region", "de")),
                     )
+                    filtered_results = [
+                        result
+                        for result in search_results
+                        if isinstance(result, dict)
+                        and _domain_allowed(result.get("link", ""), allowed_domains, blocked_domains)
+                    ]
                     llm_search = analyse_search_results_with_llm(
                         schulname,
                         ort,
                         homepage,
-                        search_results,
+                        filtered_results,
                         api_key=openai_key,
                         settings=settings,
                     )
@@ -3472,10 +3734,15 @@ def run_data_quality_job(job: DataQualityJob) -> None:
                                 "confidence": suggestion_confidence,
                                 "reason": suggestion_reason,
                                 "signals": suggestion_signals,
-                                "results": search_results,
+                                "results": filtered_results,
                             },
                         )
-                        if suggestion_url and suggestion_confidence is not None and suggestion_confidence >= threshold:
+                        if (
+                            suggestion_url
+                            and _domain_allowed(suggestion_url, allowed_domains, blocked_domains)
+                            and suggestion_confidence is not None
+                            and suggestion_confidence >= threshold
+                        ):
                             status_after_primary = QUALITY_STATUS_INVALID
                     else:
                         append_data_quality_history(
@@ -3529,9 +3796,221 @@ def run_data_quality_job(job: DataQualityJob) -> None:
             )
 
         job.mark_completed()
+
     except Exception as exc:  # pragma: no cover - defensive safety net
         job.mark_completed(error=str(exc))
 
+
+def run_data_quality_correction_job(job: DataQualityCorrectionJob) -> None:
+    try:
+        openai_key = get_api_key()
+        if not openai_key:
+            job.mark_completed(error="OpenAI-Schlüssel erforderlich. Bitte unter Einstellungen speichern.")
+            return
+
+        google_credentials = get_google_search_credentials()
+        google_key = google_credentials.get("api_key", "").strip()
+        google_cx = google_credentials.get("cx", "").strip()
+        if not google_key or not google_cx:
+            job.mark_completed(error="Google Search API-Konfiguration erforderlich.")
+            return
+
+        settings = get_data_quality_settings()
+        allowed_domains = {
+            _normalise_domain(item)
+            for item in settings.get("allowed_domains", [])
+            if isinstance(item, str) and item.strip()
+        }
+        blocked_domains = {
+            _normalise_domain(item)
+            for item in settings.get("blocked_domains", [])
+            if isinstance(item, str) and item.strip()
+        }
+        threshold = float(
+            settings.get(
+                "correction_confidence_threshold",
+                DEFAULT_DATA_QUALITY_SETTINGS["correction_confidence_threshold"],
+            )
+        )
+        language = str(settings.get("search_language", "de"))
+        region = str(settings.get("search_region", "de"))
+        rate_limit = float(settings.get("correction_rate_limit", 0.0))
+        dry_run = bool(settings.get("dry_run", False))
+
+        stammdaten_records = load_stammdaten()
+        records_by_id: Dict[str, Dict[str, object]] = {}
+        for entry in stammdaten_records:
+            schul_id = str(entry.get("schul_id") or "").strip()
+            if schul_id:
+                records_by_id[schul_id] = entry
+
+        quality_results = load_data_quality_results()
+
+        job.mark_running()
+
+        for index, school_id in enumerate(job.school_ids, start=1):
+            if job.cancel_event.is_set():
+                job.mark_cancelled()
+                return
+
+            record = records_by_id.get(school_id)
+            if not record:
+                job.update_progress(
+                    processed_increment=1,
+                    message=f"Keine Stammdaten für Schul-ID {school_id} gefunden.",
+                )
+                continue
+
+            normalized_id = str(school_id)
+
+            quality_entry = quality_results.get(normalized_id) if isinstance(quality_results, dict) else None
+            status = str(quality_entry.get("status") if isinstance(quality_entry, dict) else "") or QUALITY_STATUS_PENDING
+            if status not in {QUALITY_STATUS_UNSURE, QUALITY_STATUS_INVALID}:
+                job.update_progress(
+                    processed_increment=1,
+                    message=f"{record.get('schulname') or school_id}: Status {status} – keine automatische Korrektur.",
+                )
+                continue
+
+            old_url = str(record.get("homepage", "")).strip()
+            if not old_url:
+                job.update_progress(
+                    processed_increment=1,
+                    message=f"{record.get('schulname') or school_id}: Keine URL hinterlegt.",
+                )
+                continue
+
+            display_name = str(record.get("schulname") or school_id)
+            ort = str(record.get("ort") or "")
+
+            job.update_progress(current_school=display_name)
+
+            query = f"{display_name} {ort}".strip()
+            search_results = perform_google_search(
+                query,
+                google_key,
+                google_cx,
+                max_results=int(settings.get("max_search_results", 10)),
+                language=language,
+                region=region,
+            )
+            filtered_results = [
+                result
+                for result in search_results
+                if isinstance(result, dict)
+                and _domain_allowed(result.get("link", ""), allowed_domains, blocked_domains)
+            ]
+            if not filtered_results:
+                job.update_progress(
+                    processed_increment=1,
+                    message=f"{display_name}: Keine geeigneten Treffer gefunden.",
+                )
+                continue
+
+            llm_search = analyse_search_results_with_llm(
+                display_name,
+                ort,
+                old_url,
+                filtered_results,
+                api_key=openai_key,
+                settings=settings,
+            )
+            if not llm_search:
+                job.update_progress(
+                    processed_increment=1,
+                    message=f"{display_name}: Keine Empfehlung aus den Suchtreffern.",
+                )
+                continue
+
+            candidate_url = _normalise_candidate_url(llm_search.get("empfehlung"))
+            try:
+                confidence = float(llm_search.get("confidence"))
+            except (TypeError, ValueError):
+                confidence = None
+            reason = str(llm_search.get("begruendung", "")).strip()
+
+            if not candidate_url or confidence is None or confidence < threshold:
+                job.update_progress(
+                    processed_increment=1,
+                    message=f"{display_name}: Empfehlung nicht übernommen (fehlende Sicherheit).",
+                )
+                continue
+
+            if not _domain_allowed(candidate_url, allowed_domains, blocked_domains):
+                job.update_progress(
+                    processed_increment=1,
+                    message=f"{display_name}: Empfohlene Domain nicht erlaubt.",
+                )
+                continue
+
+            if _urls_equivalent(candidate_url, old_url):
+                job.update_progress(
+                    processed_increment=1,
+                    message=f"{display_name}: URL bereits korrekt.",
+                )
+                continue
+
+            change_entry = {
+                "schulname": display_name,
+                "old_url": old_url,
+                "new_url": candidate_url,
+                "reason": reason or "Automatische Empfehlung",
+            }
+
+            if dry_run:
+                job.update_progress(
+                    processed_increment=1,
+                    message=f"{display_name}: Änderung vorgeschlagen (Dry-Run aktiv).",
+                )
+                continue
+
+            updated = update_stammdaten_url(school_id, candidate_url)
+            if not updated:
+                job.update_progress(
+                    processed_increment=1,
+                    message=f"{display_name}: Änderung konnte nicht gespeichert werden.",
+                )
+                continue
+
+            timestamp = datetime.utcnow().isoformat() + "Z"
+            record_update = {
+                "status": QUALITY_STATUS_PENDING,
+                "manual_note": f"Automatisch korrigiert am {timestamp}",
+                "original_url": old_url,
+                "corrected_url": candidate_url,
+                "correction_reason": reason,
+                "correction_confidence": confidence,
+                "last_checked": timestamp,
+                "last_source": "auto_correction",
+            }
+            new_quality = update_data_quality_record(normalized_id, record_update)
+            if isinstance(quality_results, dict):
+                quality_results[normalized_id] = new_quality
+
+            append_data_quality_history(
+                normalized_id,
+                {
+                    "stage": "auto_correction",
+                    "status": "geändert",
+                    "detail": f"URL automatisch auf {candidate_url} gesetzt.",
+                    "reason": reason,
+                    "confidence": confidence,
+                },
+            )
+
+            job.update_progress(
+                processed_increment=1,
+                corrected_increment=1,
+                change=change_entry,
+                message=f"{display_name}: URL aktualisiert.",
+            )
+
+            if rate_limit > 0 and index < len(job.school_ids):
+                time.sleep(rate_limit)
+
+        job.mark_completed()
+    except Exception as exc:  # pragma: no cover - defensive safety net
+        job.mark_completed(error=str(exc))
 
 
 @app.route("/", methods=["GET", "POST"])
@@ -4090,7 +4569,58 @@ def cancel_data_quality_job(job_id: str) -> ResponseReturnValue:
     if not job:
         return jsonify({"error": "Unbekannte Job-ID"}), 404
     job.request_cancel()
-    return jsonify({"status": "cancelled"})
+    return jsonify({"status": "cancelling"})
+
+
+@app.route("/data-quality/correction/start", methods=["POST"])
+def start_data_quality_correction() -> ResponseReturnValue:
+    payload = request.get_json(silent=True) or {}
+    school_ids_raw = payload.get("school_ids")
+    dataset = build_data_quality_dataset()
+    eligible = [
+        record["schul_id"]
+        for record in dataset
+        if record.get("status") in {QUALITY_STATUS_UNSURE, QUALITY_STATUS_INVALID}
+    ]
+    if isinstance(school_ids_raw, list) and school_ids_raw:
+        requested = [str(item).strip() for item in school_ids_raw if str(item).strip()]
+        school_ids = [sid for sid in requested if sid in eligible]
+    else:
+        school_ids = list(eligible)
+    if not school_ids:
+        return jsonify({"error": "Keine Datensätze mit Status Unsicher oder Falsch ausgewählt."}), 400
+
+    settings = get_data_quality_settings()
+    try:
+        batch_size = int(settings.get("correction_batch_size", len(school_ids)))
+    except (TypeError, ValueError):
+        batch_size = len(school_ids)
+    if batch_size > 0:
+        school_ids = list(dict.fromkeys(school_ids))[:batch_size]
+
+    if not school_ids:
+        return jsonify({"error": "Keine Datensätze für die automatische Korrektur verfügbar."}), 400
+
+    if not has_api_key():
+        return jsonify({"error": "OpenAI-Schlüssel erforderlich."}), 400
+    google_credentials = get_google_search_credentials()
+    if not (google_credentials.get("api_key") and google_credentials.get("cx")):
+        return jsonify({"error": "Google Search API-Key und Suchmaschinen-ID erforderlich."}), 400
+
+    job_id = str(uuid.uuid4())
+    job = DataQualityCorrectionJob(id=job_id, school_ids=school_ids, total=len(school_ids))
+    data_quality_correction_jobs[job_id] = job
+    thread = threading.Thread(target=run_data_quality_correction_job, args=(job,), daemon=True)
+    thread.start()
+    return jsonify({"job_id": job_id})
+
+
+@app.route("/data-quality/correction/status/<job_id>")
+def data_quality_correction_status(job_id: str) -> ResponseReturnValue:
+    job = data_quality_correction_jobs.get(job_id)
+    if not job:
+        return jsonify({"error": "Unbekannte Job-ID"}), 404
+    return jsonify(job.as_dict())
 
 
 @app.route("/data-quality/export")
@@ -4322,6 +4852,13 @@ def settings():
                 "max_search_results": request.form.get("dq_max_search_results"),
                 "batch_size": request.form.get("dq_batch_size"),
                 "dry_run": request.form.get("dq_dry_run"),
+                "search_language": request.form.get("dq_search_language", ""),
+                "search_region": request.form.get("dq_search_region", ""),
+                "correction_confidence_threshold": request.form.get("dq_correction_threshold"),
+                "correction_batch_size": request.form.get("dq_correction_batch_size"),
+                "correction_rate_limit": request.form.get("dq_correction_rate_limit"),
+                "allowed_domains": request.form.get("dq_allowed_domains", ""),
+                "blocked_domains": request.form.get("dq_blocked_domains", ""),
             }
             data_quality_settings = update_data_quality_settings(values)
             message = "Die Einstellungen für die Datenqualität wurden gespeichert."
