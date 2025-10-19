@@ -12,6 +12,7 @@ import threading
 import time
 import unicodedata
 import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from pathlib import Path
@@ -115,6 +116,7 @@ DEFAULT_DATA_QUALITY_SETTINGS = {
     "confidence_threshold": 0.85,
     "max_search_results": 10,
     "batch_size": 25,
+    "parallel_checks": 5,
     "dry_run": False,
     "search_language": "de",
     "search_region": "de",
@@ -480,6 +482,11 @@ def get_data_quality_settings() -> Dict[str, object]:
     except (TypeError, ValueError):
         batch_size = defaults["batch_size"]
     result["batch_size"] = max(1, min(batch_size, 200))
+    try:
+        parallel_checks = int(stored.get("parallel_checks", defaults["parallel_checks"]))
+    except (TypeError, ValueError):
+        parallel_checks = defaults["parallel_checks"]
+    result["parallel_checks"] = max(1, min(parallel_checks, 50))
     result["dry_run"] = bool(stored.get("dry_run", defaults["dry_run"]))
     language = str(stored.get("search_language", defaults["search_language"]) or "").strip() or defaults["search_language"]
     result["search_language"] = language
@@ -548,6 +555,11 @@ def update_data_quality_settings(values: Dict[str, object]) -> Dict[str, object]
     except (TypeError, ValueError):
         batch_size = defaults["batch_size"]
     batch_size = max(1, min(batch_size, 200))
+    try:
+        parallel_checks = int(values.get("parallel_checks", defaults["parallel_checks"]))
+    except (TypeError, ValueError):
+        parallel_checks = defaults["parallel_checks"]
+    parallel_checks = max(1, min(parallel_checks, 50))
     dry_run = bool(values.get("dry_run"))
     language = str(values.get("search_language", defaults["search_language"]) or "").strip() or defaults["search_language"]
     region = str(values.get("search_region", defaults["search_region"]) or "").strip() or defaults["search_region"]
@@ -588,6 +600,7 @@ def update_data_quality_settings(values: Dict[str, object]) -> Dict[str, object]
         "confidence_threshold": threshold,
         "max_search_results": max_search,
         "batch_size": batch_size,
+        "parallel_checks": parallel_checks,
         "dry_run": dry_run,
         "search_language": language,
         "search_region": region,
@@ -2049,6 +2062,70 @@ def _truncate_text(text: str, limit: int) -> str:
     if len(collapsed) <= limit:
         return collapsed
     return collapsed[: limit - 3] + "..."
+
+
+def _strip_accents(text: str) -> str:
+    decomposed = unicodedata.normalize("NFKD", text or "")
+    return "".join(ch for ch in decomposed if not unicodedata.combining(ch))
+
+
+def _normalise_for_match(text: str) -> str:
+    return re.sub(r"\s+", " ", _strip_accents(text).casefold()).strip()
+
+
+def _extract_city_names(text: str) -> List[str]:
+    candidates: List[str] = []
+    if not text:
+        return candidates
+    for match in re.finditer(r"\b\d{5}\s+([A-Za-zÄÖÜäöüß\- ]{2,})", text):
+        city = match.group(1).strip()
+        if city:
+            candidates.append(city)
+    return candidates
+
+
+def _check_impressum_location(snapshot: Dict[str, object], ort: str) -> Tuple[bool, Optional[str], Optional[str]]:
+    """Return (match?, context, mismatch_hint)."""
+
+    location_norm = _normalise_for_match(ort)
+    if not location_norm:
+        return True, None, None
+
+    impressum_text = str(snapshot.get("impressum_excerpt", "") or "")
+    structured = snapshot.get("structured_signals")
+    if not isinstance(structured, dict):
+        structured = {}
+
+    addresses = structured.get("addresses") if isinstance(structured.get("addresses"), list) else []
+    mismatch_hint: Optional[str] = None
+
+    def _check_text(source_text: str) -> Optional[str]:
+        normalised = _normalise_for_match(source_text)
+        if location_norm and location_norm in normalised:
+            return source_text.strip()
+        return None
+
+    # Check structured address lines first
+    for address in addresses:
+        context = _check_text(str(address))
+        if context:
+            return True, context, None
+        for city in _extract_city_names(str(address)):
+            city_norm = _normalise_for_match(city)
+            if city_norm and city_norm != location_norm:
+                mismatch_hint = city.strip()
+
+    # Check the impressum excerpt itself
+    if impressum_text:
+        context = _check_text(impressum_text)
+        if context:
+            return True, context, None
+        for city in _extract_city_names(impressum_text):
+            city_norm = _normalise_for_match(city)
+            if city_norm and city_norm != location_norm:
+                mismatch_hint = city.strip()
+
+    return False, None, mismatch_hint
 
 
 def fetch_url_text(url: str) -> Optional[str]:
@@ -3517,16 +3594,24 @@ def run_data_quality_job(job: DataQualityJob) -> None:
             for item in settings.get("blocked_domains", [])
             if isinstance(item, str) and item.strip()
         }
+        try:
+            parallel_checks = int(settings.get("parallel_checks", DEFAULT_DATA_QUALITY_SETTINGS["parallel_checks"]))
+        except (TypeError, ValueError):
+            parallel_checks = DEFAULT_DATA_QUALITY_SETTINGS["parallel_checks"]
+        parallel_checks = max(1, min(parallel_checks, 50))
 
         with job._lock:
             job.status = "running"
 
-        for school_id in job.school_ids:
+        executor = ThreadPoolExecutor(max_workers=parallel_checks)
+        futures = []
+
+        def process_school(raw_school_id: object) -> None:
+            school_id = str(raw_school_id)
             if job.cancel_event.is_set():
-                job.mark_cancelled()
                 return
 
-            record = records_by_id.get(str(school_id))
+            record = records_by_id.get(school_id)
             if not record:
                 job.update_progress(
                     processed_increment=1,
@@ -3534,14 +3619,14 @@ def run_data_quality_job(job: DataQualityJob) -> None:
                     message=f"Keine Stammdaten für Schul-ID {school_id} gefunden.",
                 )
                 append_data_quality_history(
-                    str(school_id),
+                    school_id,
                     {
                         "stage": "info",
                         "status": "fehlend",
                         "detail": "Keine Stammdaten gefunden.",
                     },
                 )
-                continue
+                return
 
             homepage = str(record.get("homepage", "")).strip()
             schulname = str(record.get("schulname", "")).strip() or str(record.get("Schulname", "")).strip()
@@ -3554,18 +3639,36 @@ def run_data_quality_job(job: DataQualityJob) -> None:
                     message=f"Keine URL in den Stammdaten für {schulname or school_id}.",
                 )
                 append_data_quality_history(
-                    str(school_id),
+                    school_id,
                     {
                         "stage": "info",
                         "status": "fehlend",
                         "detail": "Keine URL in den Stammdaten hinterlegt.",
                     },
                 )
-                continue
+                return
 
-            job.update_progress(current_school=str(school_id))
+            job.update_progress(current_school=school_id)
 
             snapshot = collect_site_snapshot(homepage)
+            location_match, location_context, mismatch_hint = _check_impressum_location(snapshot, ort)
+            structured = snapshot.get("structured_signals")
+            if not isinstance(structured, dict):
+                structured = {}
+            structured["impressum_location_match"] = location_match
+            if location_context:
+                structured["impressum_location_context"] = location_context
+            if mismatch_hint:
+                structured["impressum_location_mismatch"] = mismatch_hint
+            snapshot["structured_signals"] = structured
+
+            if not location_match:
+                expected = ort or "(kein Ort hinterlegt)"
+                hint = mismatch_hint or "Ort nicht gefunden"
+                job.update_progress(
+                    message=f"Ort-Abgleich fehlgeschlagen für {schulname or school_id}: erwartet {expected}, gefunden {hint}.",
+                )
+
             llm_result = assess_school_website_with_llm(
                 schulname,
                 ort,
@@ -3599,12 +3702,27 @@ def run_data_quality_job(job: DataQualityJob) -> None:
             else:
                 status_after_primary = status_primary
 
+            if location_match and location_context:
+                primary_signals.append(f"Ort bestätigt: {location_context}")
+            elif not location_match:
+                primary_signals.append("Ort im Impressum stimmt nicht überein")
+                if primary_reason:
+                    primary_reason = primary_reason.rstrip('.') + ". Ort im Impressum stimmt nicht mit den Stammdaten überein."
+                else:
+                    primary_reason = "Ort im Impressum stimmt nicht mit den Stammdaten überein."
+                status_after_primary = QUALITY_STATUS_INVALID
+                if primary_confidence is not None and primary_confidence > threshold:
+                    primary_confidence = threshold - 0.01
+
             history_entry_site = {
                 "stage": "site",
                 "status": status_primary,
                 "confidence": primary_confidence,
                 "reason": primary_reason,
                 "signals": primary_signals,
+                "location_match": location_match,
+                "location_context": location_context,
+                "location_mismatch": mismatch_hint,
                 "snapshot": {
                     "title": snapshot.get("title"),
                     "description": snapshot.get("description"),
@@ -3612,9 +3730,10 @@ def run_data_quality_job(job: DataQualityJob) -> None:
                     "impressum_excerpt": snapshot.get("impressum_excerpt"),
                     "structured_signals": snapshot.get("structured_signals"),
                     "errors": snapshot.get("errors"),
+                    "fetched_urls": snapshot.get("fetched_urls"),
                 },
             }
-            append_data_quality_history(str(school_id), history_entry_site)
+            append_data_quality_history(school_id, history_entry_site)
 
             suggestion_url: Optional[str] = None
             suggestion_confidence: Optional[float] = None
@@ -3663,7 +3782,7 @@ def run_data_quality_job(job: DataQualityJob) -> None:
                         if isinstance(signals_raw, list):
                             suggestion_signals = [str(item) for item in signals_raw if str(item).strip()]
                         append_data_quality_history(
-                            str(school_id),
+                            school_id,
                             {
                                 "stage": "search",
                                 "status": status_after_primary,
@@ -3683,7 +3802,7 @@ def run_data_quality_job(job: DataQualityJob) -> None:
                             status_after_primary = QUALITY_STATUS_INVALID
                     else:
                         append_data_quality_history(
-                            str(school_id),
+                            school_id,
                             {
                                 "stage": "search",
                                 "status": "fehlgeschlagen",
@@ -3718,8 +3837,11 @@ def run_data_quality_job(job: DataQualityJob) -> None:
                 "school_name": schulname,
                 "school_location": ort,
                 "original_url": homepage,
+                "impressum_location_match": location_match,
+                "impressum_location_context": location_context,
+                "impressum_location_mismatch": mismatch_hint,
             }
-            update_data_quality_record(str(school_id), record_update)
+            update_data_quality_record(school_id, record_update)
 
             job.update_progress(
                 processed_increment=1,
@@ -3729,10 +3851,30 @@ def run_data_quality_job(job: DataQualityJob) -> None:
                     "confidence": primary_confidence,
                     "suggested_url": suggestion_url,
                     "suggested_confidence": suggestion_confidence,
+                    "location_match": location_match,
                 },
             )
 
-        job.mark_completed()
+        try:
+            for school_id in job.school_ids:
+                if job.cancel_event.is_set():
+                    break
+                futures.append(executor.submit(process_school, school_id))
+
+            for future in as_completed(futures):
+                if job.cancel_event.is_set():
+                    break
+                try:
+                    future.result()
+                except Exception as exc:
+                    job.update_progress(message=f"Fehler bei der Datenqualitätsprüfung: {exc}")
+        finally:
+            executor.shutdown(wait=True, cancel_futures=True)
+
+        if job.cancel_event.is_set():
+            job.mark_cancelled()
+        else:
+            job.mark_completed()
 
     except Exception as exc:  # pragma: no cover - defensive safety net
         job.mark_completed(error=str(exc))
