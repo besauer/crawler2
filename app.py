@@ -167,6 +167,16 @@ IMPORT_SESSION_LIMIT = 8
 AUDIT_LOG_PATH = Path("audit_log.json")
 audit_log_lock = threading.Lock()
 
+
+@app.context_processor
+def inject_export_import_metadata() -> Dict[str, Any]:
+    """Make export/import metadata available to all templates."""
+
+    return {
+        "export_sections": EXPORT_SECTION_ORDER,
+        "export_definitions": EXPORT_SECTION_DEFINITIONS,
+    }
+
 _import_sessions: Dict[str, Dict[str, Any]] = {}
 import_sessions_lock = threading.Lock()
 QUALITY_STATUS_PENDING = "pending"

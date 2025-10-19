@@ -1,0 +1,358 @@
+<div class="modal fade" id="exportModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-lg modal-dialog-scrollable">
+        <div class="modal-content">
+            <form id="exportForm">
+                <div class="modal-header">
+                    <h5 class="modal-title">Vollständiger Export</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Schließen"></button>
+                </div>
+                <div class="modal-body">
+                    <p class="text-muted">Wählen Sie die Bereiche, die in die Sicherungsdatei aufgenommen werden sollen.</p>
+                    <div class="alert alert-warning" role="alert">
+                        Die Exportdatei enthält alle ausgewählten Daten unverändert. Prüfen Sie vor dem Download, ob sensible Inhalte (API-Schlüssel) enthalten sind.
+                    </div>
+                    <div class="row g-3 mb-3">
+                        {% for key in export_sections %}
+                            {% set meta = export_definitions[key] %}
+                            <div class="col-md-6 col-12">
+                                <div class="form-check">
+                                    <input class="form-check-input" type="checkbox" value="{{ key }}" id="export-section-{{ key }}" name="sections" checked>
+                                    <label class="form-check-label" for="export-section-{{ key }}">
+                                        <strong>{{ meta.label }}</strong><br>
+                                        <span class="text-muted small">{{ meta.description }}</span>
+                                    </label>
+                                </div>
+                            </div>
+                        {% endfor %}
+                    </div>
+                    <div id="exportStatus" class="small text-muted mb-2"></div>
+                    <div id="exportSummary" class="small"></div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Abbrechen</button>
+                    <button type="submit" class="btn btn-primary">Export starten</button>
+                </div>
+            </form>
+        </div>
+    </div>
+</div>
+
+<div class="modal fade" id="importModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-xl modal-dialog-scrollable">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">Vollständigen Import durchführen</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Schließen"></button>
+            </div>
+            <div class="modal-body">
+                <div class="mb-3">
+                    <label for="importFile" class="form-label">Exportdatei (.json)</label>
+                    <input type="file" class="form-control" id="importFile" accept="application/json">
+                    <div class="form-text">Die Datei muss mit der Exportfunktion dieser Anwendung erstellt worden sein.</div>
+                </div>
+                <div class="d-flex flex-wrap gap-2 mb-3">
+                    <button type="button" class="btn btn-secondary" id="loadImportPreview">Vorschau laden</button>
+                    <button type="button" class="btn btn-outline-secondary" id="resetImportPreview">Zurücksetzen</button>
+                </div>
+                <div id="importAlert" class="alert alert-warning d-none" role="alert"></div>
+                <div id="importSummary" class="mb-3"></div>
+                <div class="form-check form-switch mb-2">
+                    <input class="form-check-input" type="checkbox" id="importDryRun" checked>
+                    <label class="form-check-label" for="importDryRun">Probe-Import (Dry-Run ohne Änderungen)</label>
+                </div>
+                <div class="form-check mb-3 d-none" id="importSensitiveGroup">
+                    <input class="form-check-input" type="checkbox" id="importConfirmSensitive">
+                    <label class="form-check-label" for="importConfirmSensitive">Ich verstehe, dass sensible Daten (API-Schlüssel) überschrieben werden.</label>
+                </div>
+                <div id="importStatus" class="small text-muted"></div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Schließen</button>
+                <button type="button" class="btn btn-primary" id="startImport" disabled>Import starten</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+    document.addEventListener('DOMContentLoaded', () => {
+        const exportModalEl = document.getElementById('exportModal');
+        const importModalEl = document.getElementById('importModal');
+        if (!exportModalEl || !importModalEl) {
+            return;
+        }
+
+        const exportModal = new bootstrap.Modal(exportModalEl);
+        const importModal = new bootstrap.Modal(importModalEl);
+
+        const exportForm = document.getElementById('exportForm');
+        const exportStatus = document.getElementById('exportStatus');
+        const exportSummary = document.getElementById('exportSummary');
+
+        const importFile = document.getElementById('importFile');
+        const loadImportPreview = document.getElementById('loadImportPreview');
+        const resetImportPreview = document.getElementById('resetImportPreview');
+        const importSummary = document.getElementById('importSummary');
+        const importStatus = document.getElementById('importStatus');
+        const importAlert = document.getElementById('importAlert');
+        const importDryRun = document.getElementById('importDryRun');
+        const importSensitiveGroup = document.getElementById('importSensitiveGroup');
+        const importConfirmSensitive = document.getElementById('importConfirmSensitive');
+        const startImport = document.getElementById('startImport');
+
+        let currentImportSession = null;
+        let currentImportSummary = null;
+
+        function resetExportModal() {
+            exportStatus.textContent = '';
+            exportSummary.innerHTML = '';
+            exportForm.querySelectorAll('input[name="sections"]').forEach((cb) => {
+                cb.checked = true;
+            });
+        }
+
+        function resetImportModal() {
+            currentImportSession = null;
+            currentImportSummary = null;
+            importFile.value = '';
+            importSummary.innerHTML = '';
+            importStatus.textContent = '';
+            importAlert.classList.add('d-none');
+            importAlert.textContent = '';
+            importSensitiveGroup.classList.add('d-none');
+            importConfirmSensitive.checked = false;
+            startImport.disabled = true;
+            importDryRun.checked = true;
+        }
+
+        function renderSectionSummary(summary) {
+            if (!summary || !summary.sections) {
+                return '';
+            }
+            const rows = Object.entries(summary.sections).map(([key, info]) => {
+                const label = info.label || key;
+                const details = Object.entries(info)
+                    .filter(([k]) => k !== 'label')
+                    .map(([k, value]) => `<span class="badge bg-light text-dark me-1 mb-1">${k.replace(/_/g, ' ')}: ${value}</span>`)
+                    .join('');
+                return `<tr><th scope="row">${label}</th><td>${details || '<span class=\"text-muted\">Keine Details</span>'}</td></tr>`;
+            }).join('');
+            return `<div class="table-responsive"><table class="table table-sm align-middle"><tbody>${rows}</tbody></table></div>`;
+        }
+
+        function b64ToBlob(base64, type = 'application/json') {
+            const binary = atob(base64);
+            const array = new Uint8Array(binary.length);
+            for (let i = 0; i < binary.length; i += 1) {
+                array[i] = binary.charCodeAt(i);
+            }
+            return new Blob([array], { type });
+        }
+
+        function handleExportTrigger(event) {
+            event.preventDefault();
+            resetExportModal();
+            exportModal.show();
+        }
+
+        function handleImportTrigger(event) {
+            event.preventDefault();
+            resetImportModal();
+            importModal.show();
+        }
+
+        document.querySelectorAll('[data-bundle-action="export"]').forEach((element) => {
+            element.addEventListener('click', handleExportTrigger);
+        });
+
+        document.querySelectorAll('[data-bundle-action="import"]').forEach((element) => {
+            element.addEventListener('click', handleImportTrigger);
+        });
+
+        exportForm.addEventListener('submit', async (event) => {
+            event.preventDefault();
+            exportStatus.innerHTML = '<span class="text-muted">Export wird vorbereitet…</span>';
+            exportSummary.innerHTML = '';
+            const sections = Array.from(exportForm.querySelectorAll('input[name="sections"]:checked')).map((cb) => cb.value);
+            try {
+                const response = await fetch('{{ url_for('export_data_bundle') }}', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ sections }),
+                });
+                if (!response.ok) {
+                    throw new Error('Export konnte nicht erstellt werden.');
+                }
+                const payload = await response.json();
+                if (payload.status !== 'ok') {
+                    throw new Error(payload.message || 'Export konnte nicht erstellt werden.');
+                }
+                exportStatus.innerHTML = '';
+                exportSummary.innerHTML = `
+                    ${renderSectionSummary(payload.summary)}
+                    <div class="alert alert-info mt-3" role="alert">
+                        Datei <strong>${payload.filename}</strong> mit ${payload.filesize} Byte wurde erstellt.${payload.contains_sensitive ? ' <strong>Sensible Daten enthalten.</strong>' : ''}
+                    </div>
+                `;
+                const blob = b64ToBlob(payload.download);
+                const downloadUrl = URL.createObjectURL(blob);
+                const link = document.createElement('a');
+                link.href = downloadUrl;
+                link.download = payload.filename;
+                document.body.appendChild(link);
+                link.click();
+                document.body.removeChild(link);
+                URL.revokeObjectURL(downloadUrl);
+                exportStatus.innerHTML = '<span class="text-success">Export abgeschlossen. Die Datei wurde heruntergeladen.</span>';
+            } catch (error) {
+                exportStatus.innerHTML = `<span class="text-danger">${error.message}</span>`;
+            }
+        });
+
+        resetImportPreview.addEventListener('click', resetImportModal);
+
+        loadImportPreview.addEventListener('click', async () => {
+            if (!importFile.files.length) {
+                importAlert.textContent = 'Bitte wählen Sie zunächst eine Exportdatei aus.';
+                importAlert.classList.remove('d-none');
+                return;
+            }
+            importAlert.classList.add('d-none');
+            importAlert.textContent = '';
+            importStatus.textContent = 'Datei wird geprüft…';
+            importSummary.innerHTML = '';
+            startImport.disabled = true;
+            importSensitiveGroup.classList.add('d-none');
+            importConfirmSensitive.checked = false;
+
+            const formData = new FormData();
+            formData.append('file', importFile.files[0]);
+            try {
+                const response = await fetch('{{ url_for('import_preview') }}', {
+                    method: 'POST',
+                    body: formData,
+                });
+                const payload = await response.json();
+                if (!response.ok || payload.status !== 'ok') {
+                    throw new Error(payload.message || 'Die Datei ist ungültig.');
+                }
+                currentImportSession = payload.session_id;
+                currentImportSummary = payload.summary;
+                importStatus.textContent = '';
+                const sectionRows = Object.entries(payload.summary.sections || {}).map(([key, info]) => {
+                    const label = info.label || key;
+                    const radios = ['replace', 'merge', 'ignore'].map((mode) => {
+                        const id = `import-${key}-${mode}`;
+                        const checked = mode === 'merge' ? 'checked' : '';
+                        return `
+                            <div class="form-check form-check-inline">
+                                <input class="form-check-input" type="radio" name="import-action-${key}" id="${id}" value="${mode}" ${checked}>
+                                <label class="form-check-label" for="${id}">${mode === 'replace' ? 'Ersetzen' : mode === 'merge' ? 'Zusammenführen' : 'Ignorieren'}</label>
+                            </div>`;
+                    }).join('');
+                    const details = Object.entries(info)
+                        .filter(([k]) => k !== 'label')
+                        .map(([k, value]) => `<span class="badge bg-light text-dark me-1 mb-1">${k.replace(/_/g, ' ')}: ${value}</span>`)
+                        .join('');
+                    return `
+                        <tr data-section="${key}">
+                            <th scope="row">${label}</th>
+                            <td>${details || '<span class="text-muted">Keine Details</span>'}</td>
+                            <td>${radios}</td>
+                        </tr>`;
+                }).join('');
+                importSummary.innerHTML = `
+                    <div class="table-responsive">
+                        <table class="table table-sm align-middle">
+                            <thead>
+                                <tr><th>Bereich</th><th>Inhalt</th><th>Aktion</th></tr>
+                            </thead>
+                            <tbody>${sectionRows}</tbody>
+                        </table>
+                    </div>
+                `;
+                if (payload.contains_sensitive) {
+                    importSensitiveGroup.classList.remove('d-none');
+                }
+                startImport.disabled = false;
+            } catch (error) {
+                importStatus.textContent = '';
+                importAlert.textContent = error.message;
+                importAlert.classList.remove('d-none');
+            }
+        });
+
+        startImport.addEventListener('click', async () => {
+            if (!currentImportSession) {
+                importAlert.textContent = 'Bitte laden Sie zuerst eine Vorschau.';
+                importAlert.classList.remove('d-none');
+                return;
+            }
+            if (!currentImportSummary || !currentImportSummary.sections || Object.keys(currentImportSummary.sections).length === 0) {
+                importAlert.textContent = 'Die Exportdatei enthält keine importierbaren Bereiche.';
+                importAlert.classList.remove('d-none');
+                return;
+            }
+            if (!importDryRun.checked && !importConfirmSensitive.checked && !importSensitiveGroup.classList.contains('d-none')) {
+                importAlert.textContent = 'Bitte bestätigen Sie die Verarbeitung sensibler Daten.';
+                importAlert.classList.remove('d-none');
+                return;
+            }
+            importAlert.classList.add('d-none');
+            importAlert.textContent = '';
+            importStatus.textContent = 'Import wird ausgeführt…';
+            const actions = {};
+            Object.keys(currentImportSummary.sections).forEach((key) => {
+                const selected = document.querySelector(`input[name="import-action-${key}"]:checked`);
+                actions[key] = selected ? selected.value : 'ignore';
+            });
+            try {
+                const response = await fetch('{{ url_for('import_apply_route') }}', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        session_id: currentImportSession,
+                        actions,
+                        dry_run: importDryRun.checked,
+                        confirm_sensitive: importConfirmSensitive.checked,
+                    }),
+                });
+                const payload = await response.json();
+                if (!response.ok || payload.status !== 'ok') {
+                    throw new Error(payload.message || 'Import fehlgeschlagen.');
+                }
+                importStatus.innerHTML = payload.dry_run
+                    ? '<span class="text-info">Probe-Import abgeschlossen. Es wurden keine Dateien überschrieben.</span>'
+                    : '<span class="text-success">Import erfolgreich abgeschlossen.</span>';
+                const resultRows = Object.entries(payload.result.results || {}).map(([key, info]) => {
+                    const label = (currentImportSummary.sections[key] && currentImportSummary.sections[key].label) || key;
+                    const detail = Object.entries(info)
+                        .map(([k, value]) => `<span class="badge bg-light text-dark me-1 mb-1">${k.replace(/_/g, ' ')}: ${value}</span>`)
+                        .join('');
+                    return `<tr><th scope="row">${label}</th><td>${detail || '<span class="text-muted">Keine Details</span>'}</td></tr>`;
+                }).join('');
+                importSummary.innerHTML = `
+                    <div class="table-responsive">
+                        <table class="table table-sm align-middle">
+                            <tbody>${resultRows}</tbody>
+                        </table>
+                    </div>
+                `;
+                if (!payload.dry_run) {
+                    currentImportSession = null;
+                    startImport.disabled = true;
+                }
+            } catch (error) {
+                importStatus.textContent = '';
+                importAlert.textContent = error.message;
+                importAlert.classList.remove('d-none');
+            }
+        });
+
+        exportModalEl.addEventListener('hidden.bs.modal', resetExportModal);
+        importModalEl.addEventListener('hidden.bs.modal', resetImportModal);
+
+        window.openExportModal = handleExportTrigger;
+        window.openImportModal = handleImportTrigger;
+    });
+</script>
