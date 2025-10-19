@@ -20,6 +20,8 @@
         .history-entry h6 { font-size: 1rem; margin-bottom: 0.25rem; }
         .history-entry time { font-size: 0.8rem; color: #6c757d; }
         .offcanvas-lg { --bs-offcanvas-width: min(700px, 90vw); }
+        .status-cell { white-space: nowrap; }
+        .status-cell .quality-note { display: inline-block; margin-left: 0.5rem; }
     </style>
 </head>
 <body>
@@ -160,10 +162,10 @@
                             </td>
                             <td>{{ record.ort }}</td>
                             <td class="text-break"><a href="{{ record.homepage }}" target="_blank" rel="noopener">{{ record.homepage }}</a></td>
-                            <td>
+                            <td class="status-cell">
                                 <span class="badge bg-secondary status-badge" data-status="{{ record.status }}">{{ record.status_label }}</span>
                                 {% if record.quality.manual_note %}
-                                    <div class="text-muted quality-note">{{ record.quality.manual_note }}</div>
+                                    <span class="text-muted quality-note">{{ record.quality.manual_note }}</span>
                                 {% endif %}
                             </td>
                             <td>
@@ -310,7 +312,7 @@
                     <td><div class="fw-semibold">${record.schulname || ''}</div><div class="small text-muted">ID: ${record.schul_id}</div></td>
                     <td>${record.ort || ''}</td>
                     <td class="text-break">${record.homepage ? `<a href="${record.homepage}" target="_blank" rel="noopener">${record.homepage}</a>` : '<span class="text-muted">—</span>'}</td>
-                    <td><span class="badge bg-secondary status-badge" data-status="${record.status}">${record.status_label}</span>${record.quality.manual_note ? `<div class="text-muted quality-note">${record.quality.manual_note}</div>` : ''}</td>
+                    <td class="status-cell"><span class="badge bg-secondary status-badge" data-status="${record.status}">${record.status_label}</span>${record.quality.manual_note ? `<span class="text-muted quality-note">${record.quality.manual_note}</span>` : ''}</td>
                     <td>${record.quality.last_checked ? `<time datetime="${record.quality.last_checked}">${record.quality.last_checked}</time>` : '<span class="text-muted">Noch nicht geprüft</span>'}</td>
                     <td class="text-break">${record.quality.suggested_url ? `<a href="${record.quality.suggested_url}" target="_blank" rel="noopener">${record.quality.suggested_url}</a>${record.quality.suggested_confidence ? `<div class="text-muted quality-note">Sicherheit: ${Number(record.quality.suggested_confidence).toFixed(2)}</div>` : ''}` : '<span class="text-muted">—</span>'}</td>
                 `;
