@@ -9,10 +9,25 @@
     <style>
         body { padding-top: 0; }
         .status-badge { font-size: 0.9rem; }
-        .table-fixed { table-layout: fixed; }
         .data-quality-table {
             max-height: 60vh;
             overflow-y: auto;
+        }
+        .data-quality-grid {
+            white-space: nowrap;
+            width: max-content;
+            min-width: 100%;
+        }
+        .data-quality-grid thead th,
+        .data-quality-grid tbody td {
+            vertical-align: middle;
+        }
+        .data-quality-grid.compact-rows thead th,
+        .data-quality-grid.compact-rows tbody td {
+            padding-top: 0.35rem;
+            padding-bottom: 0.35rem;
+        }
+        .data-quality-wrapper {
             overflow-x: auto;
         }
         .quality-note { font-size: 0.85rem; }
@@ -119,30 +134,35 @@
     <div class="card">
         <div class="card-body">
             <div class="d-flex flex-column flex-lg-row align-items-lg-center justify-content-between gap-2 mb-3">
-                <h2 class="h5 mb-0">Stammdaten</h2>
-                <div class="text-muted small">
-                    Modelle: {{ data_quality_settings.model }} • Treffer pro Lauf: {{ data_quality_settings.batch_size }} •
-                    Treffer je Suche: {{ data_quality_settings.max_search_results }} • Schwelle: {{ '%.2f'|format(data_quality_settings.confidence_threshold) }}
+                <div>
+                    <h2 class="h5 mb-0">Stammdaten</h2>
+                    <div class="text-muted small">
+                        Modelle: {{ data_quality_settings.model }} • Treffer pro Lauf: {{ data_quality_settings.batch_size }} •
+                        Treffer je Suche: {{ data_quality_settings.max_search_results }} • Schwelle: {{ '%.2f'|format(data_quality_settings.confidence_threshold) }}
+                    </div>
+                </div>
+                <div class="btn-group btn-group-sm" role="group">
+                    <button class="btn btn-outline-secondary" id="toggle-density" data-mode="compact">Kompakte Zeilen</button>
                 </div>
             </div>
-            <div class="table-responsive data-quality-table">
-                <table class="table table-hover table-fixed align-middle" id="schools-table">
+            <div class="table-responsive data-quality-table data-quality-wrapper">
+                <table class="table table-hover align-middle data-quality-grid" id="schools-table">
                     <thead class="table-light">
                     <tr>
-                        <th style="width: 16rem;">Aktionen</th>
-                        <th style="width: 2.5rem;"><input type="checkbox" class="form-check-input" id="select-master"></th>
-                        <th style="width: 18rem;">Schule</th>
-                        <th style="width: 12rem;">Ort</th>
+                        <th>Aktionen</th>
+                        <th><input type="checkbox" class="form-check-input" id="select-master"></th>
+                        <th>Schule</th>
+                        <th>Ort</th>
                         <th>Aktuelle URL</th>
-                        <th style="width: 10rem;">Status</th>
-                        <th style="width: 12rem;">Letzte Prüfung</th>
-                        <th style="width: 14rem;">Vorschlag</th>
+                        <th>Status</th>
+                        <th>Letzte Prüfung</th>
+                        <th>Vorschlag</th>
                     </tr>
                     </thead>
                     <tbody id="schools-body">
                     {% for record in records %}
                         <tr data-school-id="{{ record.schul_id }}">
-                            <td>
+                            <td class="text-nowrap">
                                 <div class="btn-group btn-group-sm" role="group">
                                     <button class="btn btn-outline-primary" data-action="details">Details</button>
                                     <button class="btn btn-outline-success" data-action="accept" {% if not record.quality.suggested_url %}disabled{% endif %}>Vorschlag übernehmen</button>
@@ -156,26 +176,26 @@
                             </td>
                             <td><input type="checkbox" class="form-check-input record-checkbox"
                                        value="{{ record.schul_id }}"></td>
-                            <td>
+                            <td class="text-nowrap">
                                 <div class="fw-semibold">{{ record.schulname }}</div>
                                 <div class="small text-muted">ID: {{ record.schul_id }}</div>
                             </td>
-                            <td>{{ record.ort }}</td>
-                            <td class="text-break"><a href="{{ record.homepage }}" target="_blank" rel="noopener">{{ record.homepage }}</a></td>
+                            <td class="text-nowrap">{{ record.ort }}</td>
+                            <td class="text-nowrap"><a href="{{ record.homepage }}" target="_blank" rel="noopener">{{ record.homepage }}</a></td>
                             <td class="status-cell">
                                 <span class="badge bg-secondary status-badge" data-status="{{ record.status }}">{{ record.status_label }}</span>
                                 {% if record.quality.manual_note %}
                                     <span class="text-muted quality-note">{{ record.quality.manual_note }}</span>
                                 {% endif %}
                             </td>
-                            <td>
+                            <td class="text-nowrap">
                                 {% if record.quality.last_checked %}
                                     <time datetime="{{ record.quality.last_checked }}">{{ record.quality.last_checked }}</time>
                                 {% else %}
                                     <span class="text-muted">Noch nicht geprüft</span>
                                 {% endif %}
                             </td>
-                            <td class="text-break">
+                            <td class="text-nowrap">
                                 {% if record.quality.suggested_url %}
                                     <a href="{{ record.quality.suggested_url }}" target="_blank" rel="noopener">{{ record.quality.suggested_url }}</a>
                                     {% if record.quality.suggested_confidence %}
@@ -296,7 +316,7 @@
                 const row = document.createElement('tr');
                 row.dataset.schoolId = record.schul_id;
                 row.innerHTML = `
-                    <td>
+                    <td class="text-nowrap">
                         <div class="btn-group btn-group-sm" role="group">
                             <button class="btn btn-outline-primary" data-action="details">Details</button>
                             <button class="btn btn-outline-success" data-action="accept" ${record.quality.suggested_url ? '' : 'disabled'}>Vorschlag übernehmen</button>
@@ -309,16 +329,28 @@
                         </div>
                     </td>
                     <td><input type="checkbox" class="form-check-input record-checkbox" value="${record.schul_id}"></td>
-                    <td><div class="fw-semibold">${record.schulname || ''}</div><div class="small text-muted">ID: ${record.schul_id}</div></td>
-                    <td>${record.ort || ''}</td>
-                    <td class="text-break">${record.homepage ? `<a href="${record.homepage}" target="_blank" rel="noopener">${record.homepage}</a>` : '<span class="text-muted">—</span>'}</td>
+                    <td class="text-nowrap"><div class="fw-semibold">${record.schulname || ''}</div><div class="small text-muted">ID: ${record.schul_id}</div></td>
+                    <td class="text-nowrap">${record.ort || ''}</td>
+                    <td class="text-nowrap">${record.homepage ? `<a href="${record.homepage}" target="_blank" rel="noopener">${record.homepage}</a>` : '<span class="text-muted">—</span>'}</td>
                     <td class="status-cell"><span class="badge bg-secondary status-badge" data-status="${record.status}">${record.status_label}</span>${record.quality.manual_note ? `<span class="text-muted quality-note">${record.quality.manual_note}</span>` : ''}</td>
-                    <td>${record.quality.last_checked ? `<time datetime="${record.quality.last_checked}">${record.quality.last_checked}</time>` : '<span class="text-muted">Noch nicht geprüft</span>'}</td>
-                    <td class="text-break">${record.quality.suggested_url ? `<a href="${record.quality.suggested_url}" target="_blank" rel="noopener">${record.quality.suggested_url}</a>${record.quality.suggested_confidence ? `<div class="text-muted quality-note">Sicherheit: ${Number(record.quality.suggested_confidence).toFixed(2)}</div>` : ''}` : '<span class="text-muted">—</span>'}</td>
+                    <td class="text-nowrap">${record.quality.last_checked ? `<time datetime="${record.quality.last_checked}">${record.quality.last_checked}</time>` : '<span class="text-muted">Noch nicht geprüft</span>'}</td>
+                    <td class="text-nowrap">${record.quality.suggested_url ? `<a href="${record.quality.suggested_url}" target="_blank" rel="noopener">${record.quality.suggested_url}</a>${record.quality.suggested_confidence ? `<div class="text-muted quality-note">Sicherheit: ${Number(record.quality.suggested_confidence).toFixed(2)}</div>` : ''}` : '<span class="text-muted">—</span>'}</td>
                 `;
                 tableBody.appendChild(row);
             });
             syncMasterCheckbox();
+        }
+
+        const densityToggle = document.getElementById('toggle-density');
+        const tableEl = document.getElementById('schools-table');
+
+        if (densityToggle && tableEl) {
+            densityToggle.addEventListener('click', () => {
+                tableEl.classList.toggle('compact-rows');
+                const compact = tableEl.classList.contains('compact-rows');
+                densityToggle.dataset.mode = compact ? 'normal' : 'compact';
+                densityToggle.textContent = compact ? 'Normale Zeilen' : 'Kompakte Zeilen';
+            });
         }
 
         function refreshData() {
