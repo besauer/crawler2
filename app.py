@@ -4549,18 +4549,20 @@ def start_data_quality_correction() -> ResponseReturnValue:
     payload = request.get_json(silent=True) or {}
     school_ids_raw = payload.get("school_ids")
     dataset = build_data_quality_dataset()
-    eligible = [
-        record["schul_id"]
-        for record in dataset
-        if record.get("status") in {QUALITY_STATUS_UNSURE, QUALITY_STATUS_INVALID}
-    ]
+    dataset_ids = list(
+        dict.fromkeys(
+            str(record.get("schul_id"))
+            for record in dataset
+            if isinstance(record, dict) and record.get("schul_id")
+        )
+    )
     if isinstance(school_ids_raw, list) and school_ids_raw:
         requested = [str(item).strip() for item in school_ids_raw if str(item).strip()]
-        school_ids = [sid for sid in requested if sid in eligible]
+        school_ids = [sid for sid in requested if sid in dataset_ids]
     else:
-        school_ids = list(eligible)
+        school_ids = list(dataset_ids)
     if not school_ids:
-        return jsonify({"error": "Keine Datensätze mit Status Unsicher oder Falsch ausgewählt."}), 400
+        return jsonify({"error": "Keine Schulen ausgewählt."}), 400
 
     settings = get_data_quality_settings()
     try:
