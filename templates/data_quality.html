@@ -129,24 +129,22 @@
                 <div class="flex-grow-1">
                     <h2 class="h5 mb-2">Prüfung steuern</h2>
                     <p class="text-muted mb-0">Ausgewählte Schulen werden asynchron geprüft. Während der Lauf aktiv ist,
-                        erhalten Sie Live-Statusmeldungen.</p>
+                        erhalten Sie Live-Statusmeldungen sowie eine Übersicht der gefundenen Vorschläge.</p>
                 </div>
                 <div class="d-flex flex-wrap gap-2">
-                    <button class="btn btn-outline-secondary btn-sm" id="select-all">Alle auswählen</button>
-                    <button class="btn btn-outline-secondary btn-sm" id="select-none">Keine auswählen</button>
-                    <button class="btn btn-outline-primary" id="start-quality-check">Ausgewählte Aktionen starten</button>
-                    <button class="btn btn-outline-danger" id="cancel-quality-check" disabled>Abbrechen</button>
+                    <button type="button" class="btn btn-outline-secondary btn-sm" id="select-all">Alle auswählen</button>
+                    <button type="button" class="btn btn-outline-secondary btn-sm" id="select-none">Keine auswählen</button>
+                    <button type="button" class="btn btn-outline-primary" id="start-quality-check">Prüfung starten</button>
+                    <button type="button" class="btn btn-outline-danger" id="cancel-quality-check" disabled>Abbrechen</button>
                 </div>
             </div>
-            <div class="mt-3 d-flex flex-wrap align-items-center gap-3">
-                <span class="text-muted small text-uppercase fw-semibold">Aktionen</span>
-                <div class="form-check form-check-inline mb-0">
-                    <input class="form-check-input" type="checkbox" id="action-check" checked>
-                    <label class="form-check-label" for="action-check">Prüfung</label>
-                </div>
-                <div class="form-check form-check-inline mb-0">
-                    <input class="form-check-input" type="checkbox" id="action-correction" checked>
-                    <label class="form-check-label" for="action-correction">Automatische Korrektur</label>
+            <div class="mt-3 d-flex flex-wrap align-items-center gap-2">
+                <span class="text-muted small text-uppercase fw-semibold">Schnellauswahl</span>
+                <div class="btn-group btn-group-sm" role="group">
+                    <button type="button" class="btn btn-outline-secondary" data-select-pending="100">100 „Noch nicht geprüft“</button>
+                    <button type="button" class="btn btn-outline-secondary" data-select-pending="200">200 „Noch nicht geprüft“</button>
+                    <button type="button" class="btn btn-outline-secondary" data-select-pending="500">500 „Noch nicht geprüft“</button>
+                    <button type="button" class="btn btn-outline-secondary" data-select-pending="1000">1000 „Noch nicht geprüft“</button>
                 </div>
             </div>
             <div class="mt-3" id="progress-container" hidden>
@@ -160,39 +158,20 @@
                 <p class="mt-2 mb-0 text-muted" id="progress-summary"></p>
                 <ul class="small mt-2 mb-0" id="progress-messages"></ul>
             </div>
-    </div>
-</div>
-
-    <div class="card mb-4">
-        <div class="card-body">
-            <div class="d-flex flex-column flex-lg-row gap-3 align-items-lg-center justify-content-between">
-                <div class="flex-grow-1">
-                    <h2 class="h5 mb-2">Automatische Korrektur</h2>
-                    <p class="text-muted mb-1">Alle ausgewählten Schulen werden geprüft und – bei ausreichender Sicherheit – automatisch korrigiert, unabhängig vom aktuellen Status.</p>
-                    <div class="text-muted small">
-                        Schwelle: {{ '%.2f'|format(data_quality_settings.correction_confidence_threshold|default(0.9)) }} • Batch: {{ data_quality_settings.correction_batch_size }} • Suche: {{ data_quality_settings.max_search_results }} Treffer ({{ data_quality_settings.search_language|upper }} / {{ data_quality_settings.search_region|upper }})
-                    </div>
-                </div>
-                <div class="d-flex flex-wrap gap-2">
-                    <button class="btn btn-outline-primary" id="start-correction">Korrektur starten</button>
-                    <button class="btn btn-outline-secondary" id="export-correction-results" disabled>Änderungen exportieren</button>
-                </div>
-            </div>
-            <p class="small text-muted mt-3 mb-0" id="correction-status" hidden></p>
-            <div class="mt-3" id="correction-results-section" hidden>
-                <div class="fw-semibold small mb-2" id="correction-summary"></div>
+            <div class="mt-3" id="progress-results-section" hidden>
+                <h3 class="h6 mb-2">Ergebnisse der aktuellen Prüfung</h3>
                 <div class="table-responsive">
                     <table class="table table-sm table-striped mb-0">
                         <thead class="table-light">
                         <tr>
                             <th>Schule</th>
-                            <th>URL alt → neu</th>
-                            <th>Begründung</th>
+                            <th>Status</th>
+                            <th>Empfehlung</th>
                         </tr>
                         </thead>
-                        <tbody id="correction-results-body">
+                        <tbody id="progress-results-body">
                         <tr>
-                            <td colspan="3" class="text-muted">Noch keine automatischen Änderungen.</td>
+                            <td colspan="3" class="text-muted">Noch keine Ergebnisse.</td>
                         </tr>
                         </tbody>
                     </table>
@@ -208,7 +187,7 @@
                     <h2 class="h5 mb-0">Stammdaten</h2>
                     <div class="text-muted small">
                         Modelle: {{ data_quality_settings.model }} • Treffer pro Lauf: {{ data_quality_settings.batch_size }} •
-                        Treffer je Suche: {{ data_quality_settings.max_search_results }} • Schwelle: {{ '%.2f'|format(data_quality_settings.confidence_threshold) }} • Auto-Korrektur: {{ '%.2f'|format(data_quality_settings.correction_confidence_threshold|default(0.9)) }} / {{ data_quality_settings.correction_batch_size }}
+                        Treffer je Suche: {{ data_quality_settings.max_search_results }} • Schwelle: {{ '%.2f'|format(data_quality_settings.confidence_threshold) }}
                     </div>
                 </div>
                 <div class="btn-group btn-group-sm" role="group">
@@ -228,7 +207,7 @@
                     </thead>
                     <tbody id="schools-body">
                     {% for record in records %}
-                        <tr data-school-id="{{ record.schul_id }}">
+                        <tr data-school-id="{{ record.schul_id }}" data-status="{{ record.status }}" data-school-label="{{ record.schulname|default('')|e }}">
                             <td class="text-nowrap">
                                 <div class="dropdown">
                                     <button class="btn btn-sm btn-outline-primary dropdown-toggle" type="button" data-bs-toggle="dropdown" aria-expanded="false">
@@ -256,6 +235,9 @@
                                 </div>
                                 <div class="school-status">
                                     <span class="badge bg-secondary status-badge" data-status="{{ record.status }}">{{ record.status_label }}</span>
+                                    {% if record.correction_applied %}
+                                        <span class="badge bg-success-subtle text-success border border-success-subtle ms-1">Richtiger Wert übernommen</span>
+                                    {% endif %}
                                     {% if record.quality.manual_note %}
                                         <span class="text-muted quality-note d-block">{{ record.quality.manual_note }}</span>
                                     {% endif %}
@@ -355,20 +337,14 @@
         const detailsPanel = detailsPanelEl ? new bootstrap.Offcanvas(detailsPanelEl) : null;
         const detailsContent = document.getElementById('detailsContent');
         const detailsSub = document.getElementById('detailsSub');
-        const correctionStartBtn = document.getElementById('start-correction');
-        const correctionExportBtn = document.getElementById('export-correction-results');
-        const correctionStatusEl = document.getElementById('correction-status');
-        const correctionSummaryEl = document.getElementById('correction-summary');
-        const correctionResultsSection = document.getElementById('correction-results-section');
-        const correctionResultsBody = document.getElementById('correction-results-body');
-        const actionCheck = document.getElementById('action-check');
-        const actionCorrection = document.getElementById('action-correction');
+        const progressResultsSection = document.getElementById('progress-results-section');
+        const progressResultsBody = document.getElementById('progress-results-body');
+        const pendingButtons = document.querySelectorAll('[data-select-pending]');
+        const statusLabels = {{ status_labels|tojson }};
 
         let currentJobId = null;
         let pollTimer = null;
-        let correctionJobId = null;
-        let correctionPollTimer = null;
-        let lastCorrectionResults = [];
+        const recordIndex = new Map();
 
         function escapeHtml(value) {
             return (value == null ? '' : String(value)).replace(/[&<>"']/g, (char) => {
@@ -408,17 +384,6 @@
             return Array.from(document.querySelectorAll('.record-checkbox:checked')).map(cb => cb.value).filter(Boolean);
         }
 
-        function getSelectedActions() {
-            const actions = [];
-            if (actionCheck && actionCheck.checked) {
-                actions.push('check');
-            }
-            if (actionCorrection && actionCorrection.checked) {
-                actions.push('correction');
-            }
-            return actions;
-        }
-
         function setAllCheckboxes(state) {
             document.querySelectorAll('.record-checkbox').forEach(cb => cb.checked = state);
             if (selectMaster) {
@@ -442,11 +407,47 @@
             }
         }
 
+        function rebuildRecordIndexFromDom() {
+            recordIndex.clear();
+            document.querySelectorAll('#schools-body tr[data-school-id]').forEach(row => {
+                const id = row.dataset.schoolId;
+                if (!id) {
+                    return;
+                }
+                const name = row.dataset.schoolLabel || row.querySelector('.school-name')?.textContent?.trim() || '';
+                const homepage = row.querySelector('.school-url a')?.href || '';
+                recordIndex.set(id, {
+                    schul_id: id,
+                    schulname: name,
+                    homepage,
+                    status: row.dataset.status || '',
+                });
+            });
+        }
+
+        function selectPending(limit) {
+            const rows = Array.from(document.querySelectorAll('#schools-body tr[data-school-id]'));
+            const pendingRows = rows.filter(row => (row.dataset.status || '').toLowerCase() === 'pending');
+            setAllCheckboxes(false);
+            const max = typeof limit === 'number' && Number.isFinite(limit) ? Math.min(limit, pendingRows.length) : pendingRows.length;
+            for (let index = 0; index < max; index += 1) {
+                const checkbox = pendingRows[index].querySelector('.record-checkbox');
+                if (checkbox) {
+                    checkbox.checked = true;
+                }
+            }
+            syncMasterCheckbox();
+        }
+
         function updateTable(records) {
             tableBody.innerHTML = '';
+            recordIndex.clear();
             records.forEach(record => {
                 const row = document.createElement('tr');
                 row.dataset.schoolId = record.schul_id ?? '';
+                row.dataset.status = record.status ?? '';
+                row.dataset.schoolLabel = record.schulname ?? '';
+                recordIndex.set(record.schul_id, record);
                 const suggestionUrl = record?.quality?.suggested_url ? String(record.quality.suggested_url) : '';
                 const suggestionConfidence = record?.quality?.suggested_confidence;
                 const suggestionConfidenceText = suggestionConfidence != null && !Number.isNaN(Number(suggestionConfidence))
@@ -463,7 +464,10 @@
                 const manualNote = manualNoteText ? `<span class="text-muted quality-note d-block">${manualNoteText}</span>` : '';
                 const lastChecked = record?.quality?.last_checked ? `<time datetime="${escapeHtml(record.quality.last_checked)}">${escapeHtml(record.quality.last_checked)}</time>` : '<span class="text-muted">Noch nicht geprüft</span>';
                 const statusBadge = `<span class="badge bg-secondary status-badge" data-status="${escapeHtml(record.status)}">${escapeHtml(record.status_label)}</span>`;
-                const inlineStatus = `<div class="school-status">${statusBadge}${manualNote}</div>`;
+                const correctionBadge = (record?.quality?.correction_applied ?? record?.correction_applied)
+                    ? '<span class="badge bg-success-subtle text-success border border-success-subtle ms-1">Richtiger Wert übernommen</span>'
+                    : '';
+                const inlineStatus = `<div class="school-status">${statusBadge}${correctionBadge}${manualNote}</div>`;
 
                 row.innerHTML = `
                     <td class="text-nowrap">
@@ -492,225 +496,55 @@
             syncMasterCheckbox();
         }
 
-        function resetCorrectionPolling() {
-            correctionJobId = null;
-            if (correctionPollTimer) {
-                clearInterval(correctionPollTimer);
-                correctionPollTimer = null;
-            }
-        }
-
-        function updateCorrectionStatusView(text) {
-            if (!correctionStatusEl) return;
-            if (text) {
-                correctionStatusEl.hidden = false;
-                correctionStatusEl.textContent = text;
-            } else {
-                correctionStatusEl.hidden = true;
-                correctionStatusEl.textContent = '';
-            }
-        }
-
-        function updateCorrectionSummary(total, corrected) {
-            if (!correctionSummaryEl) return;
-            correctionSummaryEl.textContent = `Geprüft zur Korrektur: ${total} | Automatisch korrigiert: ${corrected}`;
-        }
-
-        function renderCorrectionResults(changes) {
-            if (!correctionResultsBody) {
+        function renderProgressResults(results) {
+            if (!progressResultsBody || !progressResultsSection) {
                 return;
             }
-            correctionResultsBody.innerHTML = '';
-            if (!Array.isArray(changes) || !changes.length) {
-                const emptyRow = document.createElement('tr');
-                emptyRow.innerHTML = '<td colspan="3" class="text-muted">Keine automatischen Änderungen.</td>';
-                correctionResultsBody.appendChild(emptyRow);
+            const entries = Array.isArray(results) ? results.filter(item => item && typeof item === 'object') : [];
+            progressResultsBody.innerHTML = '';
+            if (!entries.length) {
+                const empty = document.createElement('tr');
+                empty.innerHTML = '<td colspan="3" class="text-muted">Noch keine Ergebnisse.</td>';
+                progressResultsBody.appendChild(empty);
+                progressResultsSection.hidden = true;
                 return;
             }
-            changes.forEach(change => {
-                const row = document.createElement('tr');
+            progressResultsSection.hidden = false;
+            entries.forEach(result => {
+                const tr = document.createElement('tr');
+                const record = recordIndex.get(result.schul_id || '') || {};
+                const label = result.school_name || record.schulname || result.schul_id || '—';
+                const schoolCell = document.createElement('td');
+                const originalUrl = result.original_url || record.homepage || '';
+                schoolCell.innerHTML = `<div class="fw-semibold">${escapeHtml(label)}</div><div class="small text-muted">ID: ${escapeHtml(result.schul_id || '')}</div>`;
+                if (originalUrl) {
+                    schoolCell.innerHTML += `<div class="small"><a href="${escapeHtml(originalUrl)}" target="_blank" rel="noopener">${formatUrl(originalUrl)}</a></div>`;
+                }
+                tr.appendChild(schoolCell);
 
-                const nameCell = document.createElement('td');
-                nameCell.className = 'text-nowrap';
-                nameCell.textContent = (change.schulname || '').toString() || '—';
-                row.appendChild(nameCell);
+                const statusCell = document.createElement('td');
+                const statusKey = (result.status || '').toString();
+                const statusLabel = result.status_label || statusLabels[statusKey] || statusKey || '—';
+                const confidence = result.confidence != null && !Number.isNaN(Number(result.confidence))
+                    ? `<div class="small text-muted">Bewertung: ${Number(result.confidence).toFixed(2)}</div>`
+                    : '';
+                statusCell.innerHTML = `<span class="badge bg-secondary">${escapeHtml(statusLabel)}</span>${confidence}`;
+                tr.appendChild(statusCell);
 
-                const urlCell = document.createElement('td');
-                urlCell.className = 'text-nowrap';
-                const oldUrl = (change.old_url || '').toString();
-                const newUrl = (change.new_url || '').toString();
-                if (oldUrl) {
-                    const link = document.createElement('a');
-                    link.href = oldUrl;
-                    link.target = '_blank';
-                    link.rel = 'noopener';
-                    link.textContent = oldUrl;
-                    urlCell.appendChild(link);
+                const suggestionCell = document.createElement('td');
+                if (result.suggested_url) {
+                    const confidenceSuggestion = result.suggested_confidence != null && !Number.isNaN(Number(result.suggested_confidence))
+                        ? `<div class="small text-muted">Sicherheit: ${Number(result.suggested_confidence).toFixed(2)}</div>`
+                        : '';
+                    const reason = result.suggested_reason ? `<div class="small text-muted">${escapeHtml(result.suggested_reason)}</div>` : '';
+                    suggestionCell.innerHTML = `<a href="${escapeHtml(result.suggested_url)}" target="_blank" rel="noopener">${formatUrl(result.suggested_url)}</a>${confidenceSuggestion}${reason}`;
                 } else {
-                    urlCell.appendChild(document.createTextNode('—'));
+                    suggestionCell.innerHTML = '<span class="text-muted">—</span>';
                 }
-                if (newUrl) {
-                    if (urlCell.childNodes.length) {
-                        urlCell.appendChild(document.createElement('br'));
-                    }
-                    const span = document.createElement('span');
-                    span.className = 'text-muted';
-                    span.appendChild(document.createTextNode('→ '));
-                    const newLink = document.createElement('a');
-                    newLink.href = newUrl;
-                    newLink.target = '_blank';
-                    newLink.rel = 'noopener';
-                    newLink.textContent = newUrl;
-                    span.appendChild(newLink);
-                    urlCell.appendChild(span);
-                }
-                row.appendChild(urlCell);
+                tr.appendChild(suggestionCell);
 
-                const reasonCell = document.createElement('td');
-                const reasonText = (change.reason || '').toString();
-                reasonCell.textContent = reasonText || '—';
-                row.appendChild(reasonCell);
-
-                correctionResultsBody.appendChild(row);
+                progressResultsBody.appendChild(tr);
             });
-        }
-
-        function handleCorrectionStatus(data) {
-            if (!data) return;
-            const total = Number(data.total || 0);
-            const processed = Number(data.processed || 0);
-            const corrected = Number(data.corrected || 0);
-            lastCorrectionResults = Array.isArray(data.changes) ? data.changes : [];
-            if (data.completed) {
-                if (data.error) {
-                    updateCorrectionStatusView(`Fehler: ${data.error}`);
-                } else {
-                    updateCorrectionStatusView('Korrektur abgeschlossen.');
-                }
-                if (correctionResultsSection) {
-                    correctionResultsSection.hidden = false;
-                }
-                updateCorrectionSummary(total, corrected);
-                renderCorrectionResults(lastCorrectionResults);
-                resetCorrectionPolling();
-                if (correctionStartBtn) {
-                    correctionStartBtn.disabled = false;
-                }
-                if (correctionExportBtn) {
-                    correctionExportBtn.disabled = lastCorrectionResults.length === 0;
-                }
-                refreshData();
-            } else {
-                updateCorrectionStatusView(`Korrektur läuft … ${processed} von ${total} verarbeitet.`);
-                if (correctionResultsSection) {
-                    correctionResultsSection.hidden = true;
-                }
-                if (correctionExportBtn) {
-                    correctionExportBtn.disabled = true;
-                }
-            }
-        }
-
-        function pollCorrectionJob() {
-            if (!correctionJobId) {
-                return;
-            }
-            fetch(`{{ url_for('data_quality_correction_status', job_id='__JOB__') }}`.replace('__JOB__', correctionJobId))
-                .then(resp => resp.json())
-                .then(data => {
-                    if (data.error) {
-                        updateCorrectionStatusView(data.error);
-                        resetCorrectionPolling();
-                        if (correctionStartBtn) {
-                            correctionStartBtn.disabled = false;
-                        }
-                        return;
-                    }
-                    handleCorrectionStatus(data);
-                })
-                .catch(() => {
-                    updateCorrectionStatusView('Status der Korrektur konnte nicht geladen werden.');
-                    resetCorrectionPolling();
-                    if (correctionStartBtn) {
-                        correctionStartBtn.disabled = false;
-                    }
-                });
-        }
-
-        function triggerCorrection(preselectedIds = null) {
-            resetCorrectionPolling();
-            if (correctionStartBtn) {
-                correctionStartBtn.disabled = true;
-            }
-            const ids = Array.isArray(preselectedIds) && preselectedIds.length ? preselectedIds : getSelectedIds();
-            if (!ids.length) {
-                updateCorrectionStatusView('Bitte wählen Sie mindestens eine Schule aus.');
-                if (correctionStartBtn) {
-                    correctionStartBtn.disabled = false;
-                }
-                return Promise.resolve();
-            }
-            updateCorrectionStatusView('Korrektur wird gestartet …');
-            if (correctionResultsSection) {
-                correctionResultsSection.hidden = true;
-            }
-            if (correctionExportBtn) {
-                correctionExportBtn.disabled = true;
-            }
-            return fetch('{{ url_for('start_data_quality_correction') }}', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ school_ids: ids })
-            }).then(resp => resp.json()).then(data => {
-                if (data.error) {
-                    updateCorrectionStatusView(data.error);
-                    const handledError = new Error(data.error);
-                    handledError.handled = true;
-                    return Promise.reject(handledError);
-                }
-                correctionJobId = data.job_id;
-                lastCorrectionResults = [];
-                updateCorrectionSummary(0, 0);
-                pollCorrectionJob();
-                if (correctionPollTimer) {
-                    clearInterval(correctionPollTimer);
-                }
-                correctionPollTimer = setInterval(pollCorrectionJob, 4000);
-                return data;
-            }).catch(error => {
-                if (!error || !error.handled) {
-                    updateCorrectionStatusView('Korrektur konnte nicht gestartet werden.');
-                }
-                throw error;
-            }).finally(() => {
-                if (correctionStartBtn) {
-                    correctionStartBtn.disabled = false;
-                }
-            });
-        }
-
-        function exportCorrectionResults() {
-            if (!lastCorrectionResults.length) {
-                return;
-            }
-            const header = ['Schulname', 'URL alt', 'URL neu', 'Begründung'];
-            const rows = lastCorrectionResults.map(change => {
-                const fields = [change.schulname, change.old_url, change.new_url, change.reason].map(value => {
-                    const text = (value || '').toString().replace(/[\r\n]+/g, ' ').replace(/"/g, "''").replace(/;/g, ',');
-                    return `"${text}"`;
-                });
-                return fields.join(';');
-            });
-            const csv = [header.join(';'), ...rows].join('\n');
-            const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
-            const url = URL.createObjectURL(blob);
-            const link = document.createElement('a');
-            link.href = url;
-            link.download = `datenqualitaet_korrekturen_${new Date().toISOString().replace(/[:.]/g, '-')}.csv`;
-            document.body.appendChild(link);
-            link.click();
-            document.body.removeChild(link);
-            URL.revokeObjectURL(url);
         }
 
         const densityToggle = document.getElementById('toggle-density');
@@ -781,6 +615,9 @@
                     if (Array.isArray(status.messages)) {
                         status.messages.forEach(msg => appendMessage(msg));
                     }
+                    if (Array.isArray(status.results)) {
+                        renderProgressResults(status.results);
+                    }
                     if (status.completed) {
                         resetProgress();
                         refreshData();
@@ -796,6 +633,7 @@
                 appendMessage('Bitte wählen Sie mindestens eine Schule aus.');
                 return Promise.resolve();
             }
+            renderProgressResults([]);
             return fetch('{{ url_for('start_data_quality_job') }}', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -828,28 +666,8 @@
 
         function startQualityWorkflow() {
             const ids = getSelectedIds();
-            const actions = getSelectedActions();
-            if (!actions.length) {
-                appendMessage('Bitte wählen Sie mindestens eine Aktion aus.');
-                return;
-            }
-            if (!ids.length) {
-                appendMessage('Bitte wählen Sie mindestens eine Schule aus.');
-                return;
-            }
-            const tasks = [];
             startBtn.disabled = true;
-            if (actions.includes('check')) {
-                tasks.push(sendQualityCheckRequest(ids));
-            }
-            if (actions.includes('correction')) {
-                tasks.push(triggerCorrection(ids));
-            }
-            if (!tasks.length) {
-                startBtn.disabled = false;
-                return;
-            }
-            Promise.allSettled(tasks).finally(() => {
+            sendQualityCheckRequest(ids).finally(() => {
                 startBtn.disabled = false;
             });
         }
@@ -939,8 +757,12 @@
         startBtn?.addEventListener('click', startQualityWorkflow);
         cancelBtn?.addEventListener('click', cancelJob);
         refreshBtn?.addEventListener('click', refreshData);
-        correctionStartBtn?.addEventListener('click', () => triggerCorrection());
-        correctionExportBtn?.addEventListener('click', exportCorrectionResults);
+        pendingButtons.forEach(button => {
+            button.addEventListener('click', () => {
+                const limit = Number(button.dataset.selectPending);
+                selectPending(Number.isFinite(limit) ? limit : null);
+            });
+        });
 
         tableBody?.addEventListener('change', event => {
             if (event.target.classList.contains('record-checkbox')) {
@@ -954,8 +776,8 @@
             const row = button.closest('tr');
             if (!row) return;
             const schoolId = row.dataset.schoolId;
-            const homepage = row.querySelector('td:nth-child(5) a')?.href || '';
-            const schoolName = row.querySelector('td:nth-child(3) .fw-semibold')?.textContent || '';
+            const homepage = row.querySelector('.school-url a')?.href || '';
+            const schoolName = row.dataset.schoolLabel || row.querySelector('.school-name')?.textContent?.trim() || '';
             const action = button.dataset.action;
             if (action === 'details') {
                 openDetails(schoolId, schoolName);
@@ -985,19 +807,15 @@
             if (document.visibilityState === 'visible' && currentJobId) {
                 pollStatus();
             }
-            if (document.visibilityState === 'visible' && correctionJobId) {
-                pollCorrectionJob();
-            }
         });
 
         window.addEventListener('beforeunload', () => {
             if (pollTimer) {
                 clearInterval(pollTimer);
             }
-            if (correctionPollTimer) {
-                clearInterval(correctionPollTimer);
-            }
         });
+
+        rebuildRecordIndexFromDom();
     })();
 </script>
 {% include '_data_management_modals.html' %}
