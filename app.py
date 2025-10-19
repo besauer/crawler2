@@ -31,6 +31,7 @@ from crawler import (
     crawl_site,
     MAX_PAGES_DEFAULT,
 )
+from storage import storage
 
 app = Flask(__name__)
 
@@ -44,19 +45,14 @@ def template_break_every(value: object, interval: int = 30) -> Markup:
     chunks = [escape(text[i : i + interval]) for i in range(0, len(text), interval)]
     return Markup("<wbr>".join(chunks))
 
-SAVED_SEARCHES_PATH = Path("saved_searches.json")
 saved_search_lock = threading.Lock()
 DEFAULT_CONCURRENCY = 5
 MAX_CONCURRENCY = 150
 MAX_MAX_PAGES = 1000
 DEFAULT_RESPECT_ROBOTS = True
-STAMMDATEN_PATH = Path("stammdaten.json")
 stammdaten_lock = threading.Lock()
-SETTINGS_PATH = Path("settings.json")
 settings_lock = threading.Lock()
-SYNONYM_CACHE_PATH = Path("synonym_cache.json")
 synonym_cache_lock = threading.Lock()
-KEYWORD_FINDER_CACHE_PATH = Path("keyword_finder_cache.json")
 keyword_finder_cache_lock = threading.Lock()
 OPENAI_CHAT_COMPLETIONS_URL = "https://api.openai.com/v1/chat/completions"
 OPENAI_MODELS_URL = "https://api.openai.com/v1/models?limit=1"
@@ -99,7 +95,6 @@ AVAILABLE_OPENAI_MODELS = [
     "gpt-3.5-turbo",
     "llama-3.1-70b",
 ]
-DATA_QUALITY_RESULTS_PATH = Path("data_quality_results.json")
 data_quality_lock = threading.Lock()
 DATA_QUALITY_SITE_PROMPT = (
     "Du prüfst, ob eine Webseite zur angegebenen Schule gehört. Du erhältst Schulname und Ort sowie komprimierte "
@@ -175,7 +170,6 @@ EXPORT_SECTION_ORDER = [
 IMPORT_SESSION_TTL_SECONDS = 600
 IMPORT_SESSION_LIMIT = 8
 
-AUDIT_LOG_PATH = Path("audit_log.json")
 audit_log_lock = threading.Lock()
 
 
@@ -276,13 +270,7 @@ def _default_synonym_settings() -> Dict[str, object]:
 
 
 def _read_settings_unlocked() -> Dict[str, object]:
-    if not SETTINGS_PATH.exists():
-        return {}
-    try:
-        with SETTINGS_PATH.open("r", encoding="utf-8") as handle:
-            data = json.load(handle)
-    except (json.JSONDecodeError, OSError):
-        return {}
+    data = storage.get_json("settings", "data", {})
     if isinstance(data, dict):
         return data
     return {}
@@ -295,11 +283,7 @@ def load_settings_data() -> Dict[str, object]:
 
 def save_settings_data(data: Dict[str, object]) -> None:
     with settings_lock:
-        try:
-            with SETTINGS_PATH.open("w", encoding="utf-8") as handle:
-                json.dump(data, handle, ensure_ascii=False, indent=2)
-        except OSError:
-            pass
+        storage.set_json("settings", "data", data)
 
 
 def get_synonym_defaults() -> Dict[str, object]:
@@ -666,24 +650,14 @@ def update_crawl_defaults(values: Dict[str, object]) -> Dict[str, int]:
 
 
 def _read_synonym_cache_unlocked() -> Dict[str, object]:
-    if not SYNONYM_CACHE_PATH.exists():
-        return {}
-    try:
-        with SYNONYM_CACHE_PATH.open("r", encoding="utf-8") as handle:
-            data = json.load(handle)
-    except (json.JSONDecodeError, OSError):
-        return {}
+    data = storage.get_json("synonym_cache", "entries", {})
     if isinstance(data, dict):
         return data
     return {}
 
 
 def _write_synonym_cache_unlocked(data: Dict[str, object]) -> None:
-    try:
-        with SYNONYM_CACHE_PATH.open("w", encoding="utf-8") as handle:
-            json.dump(data, handle, ensure_ascii=False, indent=2)
-    except OSError:
-        pass
+    storage.set_json("synonym_cache", "entries", data)
 
 
 def load_synonym_cache() -> Dict[str, object]:
@@ -733,24 +707,14 @@ def synonym_cache_key(keyword: str, prompt: str, model: str, temperature: float)
 
 
 def _read_keyword_finder_cache_unlocked() -> Dict[str, object]:
-    if not KEYWORD_FINDER_CACHE_PATH.exists():
-        return {}
-    try:
-        with KEYWORD_FINDER_CACHE_PATH.open("r", encoding="utf-8") as handle:
-            data = json.load(handle)
-    except (json.JSONDecodeError, OSError):
-        return {}
+    data = storage.get_json("keyword_finder_cache", "entries", {})
     if isinstance(data, dict):
         return data
     return {}
 
 
 def _write_keyword_finder_cache_unlocked(data: Dict[str, object]) -> None:
-    try:
-        with KEYWORD_FINDER_CACHE_PATH.open("w", encoding="utf-8") as handle:
-            json.dump(data, handle, ensure_ascii=False, indent=2)
-    except OSError:
-        pass
+    storage.set_json("keyword_finder_cache", "entries", data)
 
 
 def load_keyword_finder_cache() -> Dict[str, object]:
@@ -785,16 +749,7 @@ def get_keyword_finder_cache_entry(key: str) -> Optional[Dict[str, object]]:
 
 
 def _read_audit_log_unlocked() -> List[Dict[str, Any]]:
-    if not AUDIT_LOG_PATH.exists():
-        return []
-    try:
-        with AUDIT_LOG_PATH.open("r", encoding="utf-8") as handle:
-            data = json.load(handle)
-    except (json.JSONDecodeError, OSError):
-        return []
-    if isinstance(data, list):
-        return [entry for entry in data if isinstance(entry, dict)]
-    return []
+    return [entry for entry in storage.read_audit_log() if isinstance(entry, dict)]
 
 
 def append_audit_event(action: str, details: Dict[str, Any]) -> None:
@@ -804,13 +759,7 @@ def append_audit_event(action: str, details: Dict[str, Any]) -> None:
         "details": details,
     }
     with audit_log_lock:
-        data = _read_audit_log_unlocked()
-        data.append(entry)
-        try:
-            with AUDIT_LOG_PATH.open("w", encoding="utf-8") as handle:
-                json.dump(data, handle, ensure_ascii=False, indent=2)
-        except OSError:
-            pass
+        storage.append_audit_log(entry)
 
 
 def record_audit_event(action: str, details: Dict[str, Any]) -> None:
@@ -1427,8 +1376,10 @@ def set_api_key(value: str) -> None:
         _api_key_value = sanitized or None
         if sanitized:
             os.environ["OPENAI_API_KEY"] = sanitized
+            storage.set_json("api_keys", "openai", {"value": sanitized})
         else:
             os.environ.pop("OPENAI_API_KEY", None)
+            storage.delete("api_keys", ["openai"])
 
 
 def clear_api_key() -> None:
@@ -1436,6 +1387,7 @@ def clear_api_key() -> None:
         global _api_key_value
         _api_key_value = None
         os.environ.pop("OPENAI_API_KEY", None)
+        storage.delete("api_keys", ["openai"])
 
 
 def get_api_key() -> Optional[str]:
@@ -1445,7 +1397,15 @@ def get_api_key() -> Optional[str]:
             global _api_key_value
             _api_key_value = env_value
             return env_value
-        return _api_key_value
+        if _api_key_value:
+            return _api_key_value
+        stored = storage.get_json("api_keys", "openai", {})
+        if isinstance(stored, dict):
+            value = str(stored.get("value", "")).strip()
+            if value:
+                _api_key_value = value
+                return value
+        return None
 
 
 def has_api_key() -> bool:
@@ -1459,8 +1419,10 @@ def set_keyword_planner_key(value: str) -> None:
         _google_api_key_value = sanitized or None
         if sanitized:
             os.environ["GOOGLE_KEYWORD_PLANNER_KEY"] = sanitized
+            storage.set_json("api_keys", "google_keyword_planner", {"value": sanitized})
         else:
             os.environ.pop("GOOGLE_KEYWORD_PLANNER_KEY", None)
+            storage.delete("api_keys", ["google_keyword_planner"])
 
 
 def clear_keyword_planner_key() -> None:
@@ -1468,6 +1430,7 @@ def clear_keyword_planner_key() -> None:
         global _google_api_key_value
         _google_api_key_value = None
         os.environ.pop("GOOGLE_KEYWORD_PLANNER_KEY", None)
+        storage.delete("api_keys", ["google_keyword_planner"])
 
 
 def get_keyword_planner_key() -> Optional[str]:
@@ -1477,7 +1440,15 @@ def get_keyword_planner_key() -> Optional[str]:
             global _google_api_key_value
             _google_api_key_value = env_value
             return env_value
-        return _google_api_key_value
+        if _google_api_key_value:
+            return _google_api_key_value
+        stored = storage.get_json("api_keys", "google_keyword_planner", {})
+        if isinstance(stored, dict):
+            value = str(stored.get("value", "")).strip()
+            if value:
+                _google_api_key_value = value
+                return value
+        return None
 
 
 def has_keyword_planner_key() -> bool:
@@ -2714,16 +2685,7 @@ def evaluate_keywords() -> ResponseReturnValue:
 
 
 def _read_saved_searches_unlocked() -> List[Dict[str, object]]:
-    if not SAVED_SEARCHES_PATH.exists():
-        return []
-    try:
-        with SAVED_SEARCHES_PATH.open("r", encoding="utf-8") as handle:
-            data = json.load(handle)
-    except (json.JSONDecodeError, OSError):
-        return []
-    if isinstance(data, list):
-        return data
-    return []
+    return list(storage.list_saved_searches())
 
 
 def load_saved_searches() -> List[Dict[str, object]]:
@@ -2733,33 +2695,16 @@ def load_saved_searches() -> List[Dict[str, object]]:
 
 def append_saved_search(entry: Dict[str, object]) -> None:
     with saved_search_lock:
-        data = _read_saved_searches_unlocked()
-        data.append(entry)
-        try:
-            with SAVED_SEARCHES_PATH.open("w", encoding="utf-8") as handle:
-                json.dump(data, handle, ensure_ascii=False, indent=2)
-        except OSError:
-            # If persisting fails we silently ignore to avoid breaking the crawl UI.
-            pass
+        storage.append_saved_search(entry)
 
 
 def replace_saved_searches(entries: List[Dict[str, object]]) -> None:
     with saved_search_lock:
-        try:
-            with SAVED_SEARCHES_PATH.open("w", encoding="utf-8") as handle:
-                json.dump(entries, handle, ensure_ascii=False, indent=2)
-        except OSError:
-            pass
+        storage.replace_saved_searches(entries)
 
 
 def _read_data_quality_results_unlocked() -> Dict[str, Dict[str, object]]:
-    if not DATA_QUALITY_RESULTS_PATH.exists():
-        return {}
-    try:
-        with DATA_QUALITY_RESULTS_PATH.open("r", encoding="utf-8") as handle:
-            data = json.load(handle)
-    except (json.JSONDecodeError, OSError):
-        return {}
+    data = storage.get_json("data_quality", "results", {})
     if isinstance(data, dict):
         cleaned: Dict[str, Dict[str, object]] = {}
         for key, value in data.items():
@@ -2777,21 +2722,13 @@ def load_data_quality_results() -> Dict[str, Dict[str, object]]:
 def save_data_quality_results(payload: Dict[str, Dict[str, object]]) -> None:
     with data_quality_lock:
         data = {key: value for key, value in payload.items() if isinstance(key, str) and isinstance(value, dict)}
-        try:
-            with DATA_QUALITY_RESULTS_PATH.open("w", encoding="utf-8") as handle:
-                json.dump(data, handle, ensure_ascii=False, indent=2)
-        except OSError:
-            pass
+        storage.set_json("data_quality", "results", data)
 
 
 def replace_data_quality_results(payload: Dict[str, Dict[str, object]]) -> None:
     with data_quality_lock:
         data = payload if isinstance(payload, dict) else {}
-        try:
-            with DATA_QUALITY_RESULTS_PATH.open("w", encoding="utf-8") as handle:
-                json.dump(data, handle, ensure_ascii=False, indent=2)
-        except OSError:
-            pass
+        storage.set_json("data_quality", "results", data)
 
 
 def update_data_quality_record(school_id: str, updates: Dict[str, object]) -> Dict[str, object]:
@@ -2804,11 +2741,7 @@ def update_data_quality_record(school_id: str, updates: Dict[str, object]) -> Di
             record = {}
         record.update(updates)
         data[school_id] = record
-        try:
-            with DATA_QUALITY_RESULTS_PATH.open("w", encoding="utf-8") as handle:
-                json.dump(data, handle, ensure_ascii=False, indent=2)
-        except OSError:
-            pass
+        storage.set_json("data_quality", "results", data)
         return dict(record)
 
 
@@ -2831,11 +2764,7 @@ def append_data_quality_history(school_id: str, entry: Dict[str, object]) -> Non
             history = history[-MAX_DATA_QUALITY_HISTORY:]
         record["history"] = history
         data[school_id] = record
-        try:
-            with DATA_QUALITY_RESULTS_PATH.open("w", encoding="utf-8") as handle:
-                json.dump(data, handle, ensure_ascii=False, indent=2)
-        except OSError:
-            pass
+        storage.set_json("data_quality", "results", data)
 
 
 def _normalize_header(value: str) -> str:
@@ -2965,61 +2894,52 @@ def _coerce_bool(value: object, *, default: bool = True) -> bool:
 
 def load_stammdaten() -> List[Dict[str, object]]:
     with stammdaten_lock:
-        if not STAMMDATEN_PATH.exists():
-            return []
-        try:
-            with STAMMDATEN_PATH.open("r", encoding="utf-8") as handle:
-                raw_data = json.load(handle)
-        except (json.JSONDecodeError, OSError):
+        raw_data = storage.get_json("stammdaten", "records", [])
+        if not isinstance(raw_data, list):
             return []
 
         records: List[Dict[str, object]] = []
-        if isinstance(raw_data, list):
-            for entry in raw_data:
-                if not isinstance(entry, dict):
-                    continue
+        for entry in raw_data:
+            if not isinstance(entry, dict):
+                continue
 
-                record: Dict[str, object] = {}
-                for field in STAMMDATEN_FIELDS:
-                    key = field["key"]
-                    field_type = field.get("type", "text")
-                    value = entry.get(key)
-                    if value is None:
-                        for alias in LEGACY_STAMMDATEN_ALIASES.get(key, []):
-                            if alias in entry:
-                                value = entry.get(alias)
-                                if value is not None:
-                                    break
-                    if field_type == "numeric":
-                        record[key] = _coerce_int(value)
-                    elif field_type == "bool":
-                        record[key] = _coerce_bool(value, default=False)
-                    else:
-                        record[key] = _coerce_str(value)
+            record: Dict[str, object] = {}
+            for field in STAMMDATEN_FIELDS:
+                key = field["key"]
+                field_type = field.get("type", "text")
+                value = entry.get(key)
+                if value is None:
+                    for alias in LEGACY_STAMMDATEN_ALIASES.get(key, []):
+                        if alias in entry:
+                            value = entry.get(alias)
+                            if value is not None:
+                                break
+                if field_type == "numeric":
+                    record[key] = _coerce_int(value)
+                elif field_type == "bool":
+                    record[key] = _coerce_bool(value, default=False)
+                else:
+                    record[key] = _coerce_str(value)
 
-                homepage = _coerce_str(
-                    record.get("homepage")
-                    or entry.get("homepage")
-                    or entry.get("url")
-                )
-                if not homepage:
-                    continue
-                record["homepage"] = homepage
+            homepage = _coerce_str(
+                record.get("homepage")
+                or entry.get("homepage")
+                or entry.get("url")
+            )
+            if not homepage:
+                continue
+            record["homepage"] = homepage
 
-                if not record.get("schulname"):
-                    record["schulname"] = _coerce_str(entry.get("name"))
+            if not record.get("schulname"):
+                record["schulname"] = _coerce_str(entry.get("name"))
 
-                records.append(record)
+            records.append(record)
         return records
 
 
 def save_stammdaten(records: List[Dict[str, object]]) -> None:
     with stammdaten_lock:
-        try:
-            with STAMMDATEN_PATH.open("w", encoding="utf-8") as handle:
-                json.dump(records, handle, ensure_ascii=False, indent=2)
-        except OSError:
-            pass
+        storage.set_json("stammdaten", "records", records)
 
 
 def parse_stammdaten_excel(file_storage) -> List[Dict[str, object]]:
@@ -3130,36 +3050,32 @@ def restore_from_backup() -> None:
         return
 
     settings_data = snapshot.get("settings")
-    if settings_data and (not SETTINGS_PATH.exists() or SETTINGS_PATH.stat().st_size == 0):
+    if settings_data and not load_settings_data():
         if isinstance(settings_data, dict):
             save_settings_data(settings_data)
 
     stammdaten_data = snapshot.get("stammdaten")
-    if stammdaten_data and (not STAMMDATEN_PATH.exists() or STAMMDATEN_PATH.stat().st_size == 0):
+    if stammdaten_data and not load_stammdaten():
         if isinstance(stammdaten_data, list):
             save_stammdaten(stammdaten_data)
 
     saved_searches_data = snapshot.get("saved_searches")
-    if saved_searches_data and (not SAVED_SEARCHES_PATH.exists() or SAVED_SEARCHES_PATH.stat().st_size == 0):
+    if saved_searches_data and not load_saved_searches():
         if isinstance(saved_searches_data, list):
             replace_saved_searches(saved_searches_data)
 
     synonym_cache_data = snapshot.get("synonym_cache")
-    if synonym_cache_data and (not SYNONYM_CACHE_PATH.exists() or SYNONYM_CACHE_PATH.stat().st_size == 0):
+    if synonym_cache_data and not load_synonym_cache():
         if isinstance(synonym_cache_data, dict):
             replace_synonym_cache(synonym_cache_data)
 
     keyword_finder_cache_data = snapshot.get("keyword_finder_cache")
-    if keyword_finder_cache_data and (
-        not KEYWORD_FINDER_CACHE_PATH.exists() or KEYWORD_FINDER_CACHE_PATH.stat().st_size == 0
-    ):
+    if keyword_finder_cache_data and not load_keyword_finder_cache():
         if isinstance(keyword_finder_cache_data, dict):
             replace_keyword_finder_cache(keyword_finder_cache_data)
 
     data_quality_results_data = snapshot.get("data_quality_results")
-    if data_quality_results_data and (
-        not DATA_QUALITY_RESULTS_PATH.exists() or DATA_QUALITY_RESULTS_PATH.stat().st_size == 0
-    ):
+    if data_quality_results_data and not load_data_quality_results():
         if isinstance(data_quality_results_data, dict):
             replace_data_quality_results(data_quality_results_data)
 
@@ -4541,7 +4457,7 @@ def stammdaten():
         stammdaten_fields=STAMMDATEN_FIELDS,
         stammdaten_primary_fields=STAMMDATEN_PRIMARY_FIELDS,
         stammdaten_boolean_fields=STAMMDATEN_BOOLEAN_FIELDS,
-        storage_file=STAMMDATEN_PATH.name,
+        storage_file=storage.path.name,
         active_page="stammdaten",
     )
 
