@@ -1748,7 +1748,7 @@ class CrawlJob:
     progress_percent: int = 0
     started_at: float = field(default_factory=time.time)
     completed: bool = False
-    result_pairs: Set[Tuple[str, str, str, str]] = field(default_factory=set, repr=False, compare=False)
+    result_pairs: Set[Tuple[str, str, str]] = field(default_factory=set, repr=False, compare=False)
     cancel_event: threading.Event = field(default_factory=threading.Event, repr=False, compare=False)
     cancelled: bool = False
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False, compare=False)
@@ -1843,7 +1843,6 @@ class CrawlJob:
                 dedupe_signature = context_signature or lowered
                 key = (
                     progress.result.source_url,
-                    progress.result.target_url,
                     lowered,
                     dedupe_signature,
                 )

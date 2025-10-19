@@ -277,7 +277,7 @@ def crawl_site(
     visited: Set[str] = set()
     allowed_urls: Set[str] = {normalized_start}
     results: List[CrawlResult] = []
-    result_pairs: Set[Tuple[str, str, str, str]] = set()
+    result_pairs: Set[Tuple[str, str, str]] = set()
     snippet_counts: Dict[str, int] = {}
     snippet_lock = threading.Lock()
 
@@ -438,7 +438,7 @@ def crawl_site(
             lowered_match = match.lower()
             dedupe_signature = context_signature or lowered_match
             with state_lock:
-                key = (result.source_url, result.target_url, lowered_match, dedupe_signature)
+                key = (result.source_url, lowered_match, dedupe_signature)
                 if key not in result_pairs:
                     result_pairs.add(key)
                     results.append(result)
@@ -585,7 +585,7 @@ def crawl_site(
             lowered_match = match.lower()
             dedupe_signature = context_signature or lowered_match
             with state_lock:
-                key = (result_local.source_url, result_local.target_url, lowered_match, dedupe_signature)
+                key = (result_local.source_url, lowered_match, dedupe_signature)
                 if key not in result_pairs:
                     result_pairs.add(key)
                     results.append(result_local)
