@@ -115,7 +115,7 @@ DEFAULT_DATA_QUALITY_SETTINGS = {
     "temperature": 0.1,
     "confidence_threshold": 0.85,
     "max_search_results": 10,
-    "batch_size": 25,
+    "batch_size": 5000,
     "parallel_checks": 5,
     "dry_run": False,
     "search_language": "de",
@@ -478,7 +478,7 @@ def get_data_quality_settings() -> Dict[str, object]:
         batch_size = int(stored.get("batch_size", defaults["batch_size"]))
     except (TypeError, ValueError):
         batch_size = defaults["batch_size"]
-    result["batch_size"] = max(1, min(batch_size, 200))
+    result["batch_size"] = max(1, batch_size)
     try:
         parallel_checks = int(stored.get("parallel_checks", defaults["parallel_checks"]))
     except (TypeError, ValueError):
@@ -533,7 +533,7 @@ def update_data_quality_settings(values: Dict[str, object]) -> Dict[str, object]
         batch_size = int(values.get("batch_size", defaults["batch_size"]))
     except (TypeError, ValueError):
         batch_size = defaults["batch_size"]
-    batch_size = max(1, min(batch_size, 200))
+    batch_size = max(1, batch_size)
     try:
         parallel_checks = int(values.get("parallel_checks", defaults["parallel_checks"]))
     except (TypeError, ValueError):

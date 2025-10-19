@@ -44,6 +44,7 @@
         .school-status { margin-top: 0.25rem; }
         .school-meta { color: #6c757d; }
         .school-meta strong { color: inherit; font-weight: 600; }
+        .quick-select-input { width: 200px; }
     </style>
 </head>
 <body>
@@ -145,6 +146,11 @@
                     <button type="button" class="btn btn-outline-secondary" data-select-pending="200">200 „Noch nicht geprüft“</button>
                     <button type="button" class="btn btn-outline-secondary" data-select-pending="500">500 „Noch nicht geprüft“</button>
                     <button type="button" class="btn btn-outline-secondary" data-select-pending="1000">1000 „Noch nicht geprüft“</button>
+                </div>
+                <button type="button" class="btn btn-outline-secondary btn-sm" data-select-pending="all">Alle Datensätze</button>
+                <div class="input-group input-group-sm quick-select-input">
+                    <input type="number" class="form-control" id="pending-count-input" min="1" placeholder="Anzahl wählen">
+                    <button class="btn btn-outline-secondary" type="button" id="apply-pending-count">Übernehmen</button>
                 </div>
             </div>
             <div class="mt-3" id="progress-container" hidden>
@@ -340,6 +346,8 @@
         const progressResultsSection = document.getElementById('progress-results-section');
         const progressResultsBody = document.getElementById('progress-results-body');
         const pendingButtons = document.querySelectorAll('[data-select-pending]');
+        const pendingCountInput = document.getElementById('pending-count-input');
+        const applyPendingCountBtn = document.getElementById('apply-pending-count');
         const statusLabels = {{ status_labels|tojson }};
 
         let currentJobId = null;
@@ -762,6 +770,26 @@
                 const limit = Number(button.dataset.selectPending);
                 selectPending(Number.isFinite(limit) ? limit : null);
             });
+        });
+
+        applyPendingCountBtn?.addEventListener('click', () => {
+            if (!pendingCountInput) {
+                return;
+            }
+            const value = Number(pendingCountInput.value);
+            if (Number.isFinite(value) && value > 0) {
+                selectPending(value);
+            }
+        });
+
+        pendingCountInput?.addEventListener('keydown', event => {
+            if (event.key === 'Enter') {
+                event.preventDefault();
+                const value = Number(pendingCountInput.value);
+                if (Number.isFinite(value) && value > 0) {
+                    selectPending(value);
+                }
+            }
         });
 
         tableBody?.addEventListener('change', event => {
