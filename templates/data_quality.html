@@ -511,23 +511,12 @@
             syncMasterCheckbox();
         }
 
-        function collectInvalidRows() {
-            return Array.from(document.querySelectorAll('#schools-body tr[data-school-id]')).filter(row => {
-                const status = (row.dataset.status || '').toLowerCase();
-                const hasSuggestion = (row.dataset.hasSuggestion || '').trim() !== '' || (row.dataset.suggestedUrl || '').trim() !== '';
-                return status === 'invalid' && hasSuggestion;
-            });
-        }
-
         function performBulkAccept(ids) {
-            if (!ids.length) {
-                appendMessage('Keine als falsch markierten Vorschläge gefunden.');
-                return Promise.resolve();
-            }
+            const payload = Array.isArray(ids) && ids.length ? { school_ids: ids } : {};
             return fetch(bulkAcceptUrl, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ school_ids: ids })
+                body: JSON.stringify(payload)
             }).then(resp => resp.json()).then(data => {
                 if (data.records) {
                     updateTable(data.records);
@@ -817,22 +806,8 @@
         });
 
         acceptInvalidBtn?.addEventListener('click', () => {
-            const rows = collectInvalidRows();
-            if (!rows.length) {
-                appendMessage('Keine als falsch markierten Vorschläge gefunden.');
-                return;
-            }
-            setAllCheckboxes(false);
-            rows.forEach(row => {
-                const checkbox = row.querySelector('.record-checkbox');
-                if (checkbox) {
-                    checkbox.checked = true;
-                }
-            });
-            syncMasterCheckbox();
             acceptInvalidBtn.disabled = true;
-            const ids = rows.map(row => row.dataset.schoolId).filter(Boolean);
-            performBulkAccept(ids).finally(() => {
+            performBulkAccept(null).finally(() => {
                 acceptInvalidBtn.disabled = false;
             });
         });
