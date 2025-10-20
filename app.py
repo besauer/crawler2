@@ -586,7 +586,7 @@ def get_data_quality_settings() -> Dict[str, object]:
         max_search = int(stored.get("max_search_results", defaults["max_search_results"]))
     except (TypeError, ValueError):
         max_search = defaults["max_search_results"]
-    result["max_search_results"] = max(1, min(max_search, 50))
+    result["max_search_results"] = max(1, min(max_search, 100))
     try:
         batch_size = int(stored.get("batch_size", defaults["batch_size"]))
     except (TypeError, ValueError):
@@ -641,7 +641,7 @@ def update_data_quality_settings(values: Dict[str, object]) -> Dict[str, object]
         max_search = int(values.get("max_search_results", defaults["max_search_results"]))
     except (TypeError, ValueError):
         max_search = defaults["max_search_results"]
-    max_search = max(1, min(max_search, 50))
+    max_search = max(1, min(max_search, 100))
     try:
         batch_size = int(values.get("batch_size", defaults["batch_size"]))
     except (TypeError, ValueError):
@@ -2548,43 +2548,64 @@ def perform_google_search(
     language: str = "de",
     region: str = "de",
 ) -> List[Dict[str, object]]:
-    params = {
-        "key": api_key,
-        "cx": cx,
-        "q": query,
-        "num": max(1, min(max_results, 10)),
-        "hl": (language or "de")[:5],
-        "gl": (region or "de")[:5],
-        "safe": "active",
-    }
-    try:
-        response = requests.get(GOOGLE_SEARCH_API_URL, params=params, timeout=GOOGLE_SEARCH_TIMEOUT)
-    except requests.RequestException:
-        return []
-    if response.status_code >= 400:
-        return []
-    try:
-        payload = response.json()
-    except ValueError:
-        return []
-    items = payload.get("items") if isinstance(payload, dict) else None
-    results: List[Dict[str, object]] = []
-    if isinstance(items, list):
+    max_results = max(1, min(int(max_results), 100))
+    collected: List[Dict[str, object]] = []
+    seen_links: Set[str] = set()
+    start_index = 1
+    while len(collected) < max_results:
+        remaining = max_results - len(collected)
+        batch_size = max(1, min(remaining, 10))
+        params = {
+            "key": api_key,
+            "cx": cx,
+            "q": query,
+            "num": batch_size,
+            "start": start_index,
+            "hl": (language or "de")[:5],
+            "gl": (region or "de")[:5],
+            "safe": "active",
+        }
+        try:
+            response = requests.get(GOOGLE_SEARCH_API_URL, params=params, timeout=GOOGLE_SEARCH_TIMEOUT)
+        except requests.RequestException:
+            break
+        if response.status_code >= 400:
+            break
+        try:
+            payload = response.json()
+        except ValueError:
+            break
+        items = payload.get("items") if isinstance(payload, dict) else None
+        if not isinstance(items, list) or not items:
+            break
+        added = 0
         for item in items:
             if not isinstance(item, dict):
                 continue
-            link = item.get("link")
-            if not link:
+            link_raw = item.get("link")
+            if not link_raw:
                 continue
-            results.append(
+            link = str(link_raw)
+            if link in seen_links:
+                continue
+            seen_links.add(link)
+            collected.append(
                 {
                     "title": _collapse_whitespace(str(item.get("title", ""))),
                     "snippet": _collapse_whitespace(str(item.get("snippet", ""))),
                     "displayLink": str(item.get("displayLink", "")),
-                    "link": str(link),
+                    "link": link,
                 }
             )
-    return results
+            added += 1
+            if len(collected) >= max_results:
+                break
+        if added == 0:
+            break
+        start_index += max(1, len(items))
+        if start_index > 100:
+            break
+    return collected
 
 
 def _extract_domain_from_url(url: str) -> str:
@@ -3982,6 +4003,7 @@ class DataQualityJob:
     id: str
     school_ids: List[str]
     total: int
+    mode: str = "full"
     processed: int = 0
     status: str = "pending"  # pending, running, cancelled, finished, error
     current_school: Optional[str] = None
@@ -4202,9 +4224,14 @@ def run_data_quality_job(job: DataQualityJob) -> None:
                 records_by_id[schul_id] = entry
 
         settings = get_data_quality_settings()
+        mode = getattr(job, "mode", "full") or "full"
+        force_google = mode == "google_search"
         google_credentials = get_google_search_credentials()
         google_key = google_credentials.get("api_key", "").strip()
         google_cx = google_credentials.get("cx", "").strip()
+        if force_google and (not google_key or not google_cx):
+            job.mark_completed(error="Google Search API-Konfiguration erforderlich.")
+            return
         threshold = float(settings.get("confidence_threshold", DEFAULT_DATA_QUALITY_SETTINGS["confidence_threshold"]))
         allowed_domains = {
             _normalise_domain(item)
@@ -4363,18 +4390,29 @@ def run_data_quality_job(job: DataQualityJob) -> None:
             suggestion_signals: List[str] = []
             stage_source = "site"
 
-            if status_after_primary != QUALITY_STATUS_OK:
+            should_run_google = force_google or status_after_primary != QUALITY_STATUS_OK
+            if should_run_google:
                 if not google_key or not google_cx:
                     job.update_progress(
                         message="Google Search API-Konfiguration fehlt. Zweite Prüfung übersprungen.",
                     )
                 else:
+                    try:
+                        max_setting = int(settings.get("max_search_results", 10))
+                    except (TypeError, ValueError):
+                        max_setting = 10
+                    max_results = 100 if force_google else max_setting
+                    max_results = max(1, min(max_results, 100))
                     query = f"{schulname} {ort}".strip()
+                    if force_google:
+                        job.update_progress(
+                            message=f"Google-Suche mit {max_results} Treffern für {schulname or school_id} …",
+                        )
                     search_results = perform_google_search(
                         query,
                         google_key,
                         google_cx,
-                        max_results=int(settings.get("max_search_results", 10)),
+                        max_results=max_results,
                         language=str(settings.get("search_language", "de")),
                         region=str(settings.get("search_region", "de")),
                     )
@@ -4393,7 +4431,7 @@ def run_data_quality_job(job: DataQualityJob) -> None:
                         settings=settings,
                     )
                     if llm_search:
-                        stage_source = "site+google"
+                        stage_source = "google" if force_google else "site+google"
                         suggestion_url = str(llm_search.get("empfehlung") or "").strip() or None
                         try:
                             suggestion_confidence = float(llm_search.get("confidence"))
@@ -5484,6 +5522,15 @@ def start_data_quality_job() -> ResponseReturnValue:
     school_ids = [sid for sid in school_ids if sid]
     if not school_ids:
         return jsonify({"error": "Keine Schulen ausgewählt."}), 400
+    mode_raw = payload.get("mode")
+    if isinstance(mode_raw, str):
+        candidate = mode_raw.strip().lower()
+        if candidate in {"google", "google_search", "google-only"}:
+            mode = "google_search"
+        else:
+            mode = "full"
+    else:
+        mode = "full"
     settings = get_data_quality_settings()
     try:
         batch_size = int(settings.get("batch_size", len(school_ids)))
@@ -5493,7 +5540,7 @@ def start_data_quality_job() -> ResponseReturnValue:
         school_ids = school_ids[:batch_size]
 
     job_id = str(uuid.uuid4())
-    job = DataQualityJob(id=job_id, school_ids=school_ids, total=len(school_ids))
+    job = DataQualityJob(id=job_id, school_ids=school_ids, total=len(school_ids), mode=mode)
     data_quality_jobs[job_id] = job
     thread = threading.Thread(target=run_data_quality_job, args=(job,), daemon=True)
     thread.start()
