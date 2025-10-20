@@ -60,6 +60,11 @@
                        href="{{ url_for('data_quality') }}">Datenqualität</a>
                 </li>
                 <li class="nav-item">
+                    <a class="nav-link {% if active_page == 'debug' %}active{% endif %}"
+                       {% if active_page == 'debug' %}aria-current="page"{% endif %}
+                       href="{{ url_for('debug_page') }}">Debugging</a>
+                </li>
+                <li class="nav-item">
                     <a class="nav-link {% if active_page == 'settings' %}active{% endif %}"
                        {% if active_page == 'settings' %}aria-current="page"{% endif %}
                        href="{{ url_for('settings') }}">Einstellungen</a>

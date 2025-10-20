@@ -65,6 +65,10 @@
                        {% if active_page == 'data_quality' %}aria-current="page"{% endif %}>Datenqualität</a>
                 </li>
                 <li class="nav-item">
+                    <a class="nav-link {% if active_page == 'debug' %}active{% endif %}" href="{{ url_for('debug_page') }}"
+                       {% if active_page == 'debug' %}aria-current="page"{% endif %}>Debugging</a>
+                </li>
+                <li class="nav-item">
                     <a class="nav-link {% if active_page == 'settings' %}active{% endif %}" href="{{ url_for('settings') }}"
                        {% if active_page == 'settings' %}aria-current="page"{% endif %}>Einstellungen</a>
                 </li>
@@ -134,6 +138,7 @@
                     <div class="btn-group" role="group">
                         <button type="button" class="btn btn-outline-primary" id="action-start" disabled>Suche starten</button>
                         <button type="button" class="btn btn-outline-warning" id="action-cancel" disabled>Suche abbrechen</button>
+                        <button type="button" class="btn btn-outline-info" id="action-edit" disabled>Bearbeiten</button>
                         <button type="button" class="btn btn-outline-secondary" id="action-duplicate" disabled>Duplizieren</button>
                         <button type="button" class="btn btn-outline-danger" id="action-delete" disabled>Löschen</button>
                     </div>
@@ -266,6 +271,7 @@
         const actionCancel = document.getElementById('action-cancel');
         const actionDuplicate = document.getElementById('action-duplicate');
         const actionDelete = document.getElementById('action-delete');
+        const actionEdit = document.getElementById('action-edit');
         const progressCard = document.getElementById('progress-card');
         const progressBar = document.getElementById('progress-bar');
         const progressSummary = document.getElementById('progress-summary');
@@ -290,6 +296,7 @@
         const initialDefinitions = {{ definitions|tojson }};
         const initialRuns = {{ runs|tojson }};
         const initialJobs = {{ active_jobs|tojson }};
+        const editBaseUrl = '{{ url_for('index') }}';
 
         const state = {
             definitions: initialDefinitions || [],
@@ -383,6 +390,9 @@
             actionStart.disabled = false;
             actionDuplicate.disabled = false;
             actionDelete.disabled = false;
+            if (actionEdit) {
+                actionEdit.disabled = false;
+            }
 
             const activeJob = Object.values(state.jobs).find(job => job.definition_id === definitionId && !job.completed);
             if (activeJob) {
@@ -425,6 +435,9 @@
             detailStatus.textContent = '–';
             detailError.textContent = '–';
             actionStart.disabled = actionCancel.disabled = actionDuplicate.disabled = actionDelete.disabled = true;
+            if (actionEdit) {
+                actionEdit.disabled = true;
+            }
             progressCard.classList.add('d-none');
             resultsCard.classList.add('d-none');
             clearPoll();
@@ -799,6 +812,13 @@
                     }
                 });
         });
+
+        if (actionEdit) {
+            actionEdit.addEventListener('click', () => {
+                if (!state.selectedDefinitionId) return;
+                window.location.href = `${editBaseUrl}?definition=${encodeURIComponent(state.selectedDefinitionId)}`;
+            });
+        }
 
         actionCancel.addEventListener('click', () => {
             if (!state.selectedRunId) return;

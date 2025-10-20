@@ -85,32 +85,86 @@
             && window.bootstrap
             && typeof window.bootstrap.Modal === 'function') ? window.bootstrap : null;
 
-        if (!bootstrapLib) {
-            const notify = () => window.alert(
-                'Die Import- und Export-Dialoge benötigen das Bootstrap-JavaScript. '
-                + 'Bitte stellen Sie sicher, dass die CDN-Ressourcen geladen werden konnten.'
-            );
-            exportTriggers.forEach((element) => {
-                element.addEventListener('click', (event) => {
-                    event.preventDefault();
-                    notify();
-                });
-            });
-            importTriggers.forEach((element) => {
-                element.addEventListener('click', (event) => {
-                    event.preventDefault();
-                    notify();
-                });
-            });
-            return;
-        }
-
         if (!exportModalEl || !importModalEl) {
             return;
         }
 
-        const exportModal = new bootstrapLib.Modal(exportModalEl);
-        const importModal = new bootstrapLib.Modal(importModalEl);
+        function createFallbackModal(element, onHide) {
+            let backdrop = null;
+            let escListener = null;
+
+            function cleanupBody() {
+                const anyVisible = document.querySelectorAll('.modal.show').length > 0;
+                if (!anyVisible) {
+                    document.body.classList.remove('modal-open');
+                }
+            }
+
+            function hide() {
+                if (!element.classList.contains('show')) {
+                    return;
+                }
+                element.classList.remove('show');
+                element.style.display = 'none';
+                element.setAttribute('aria-hidden', 'true');
+                element.removeAttribute('aria-modal');
+                if (backdrop && backdrop.parentNode) {
+                    backdrop.parentNode.removeChild(backdrop);
+                }
+                backdrop = null;
+                if (escListener) {
+                    document.removeEventListener('keydown', escListener);
+                    escListener = null;
+                }
+                cleanupBody();
+                if (typeof onHide === 'function') {
+                    onHide();
+                }
+            }
+
+            function show() {
+                if (element.classList.contains('show')) {
+                    return;
+                }
+                element.classList.add('show');
+                element.style.display = 'block';
+                element.removeAttribute('aria-hidden');
+                element.setAttribute('aria-modal', 'true');
+                backdrop = document.createElement('div');
+                backdrop.className = 'modal-backdrop fade show';
+                document.body.appendChild(backdrop);
+                document.body.classList.add('modal-open');
+                escListener = (event) => {
+                    if (event.key === 'Escape') {
+                        event.preventDefault();
+                        hide();
+                    }
+                };
+                document.addEventListener('keydown', escListener);
+            }
+
+            element.querySelectorAll('[data-bs-dismiss="modal"]').forEach((btn) => {
+                btn.addEventListener('click', (event) => {
+                    event.preventDefault();
+                    hide();
+                });
+            });
+
+            element.addEventListener('click', (event) => {
+                if (event.target === element) {
+                    hide();
+                }
+            });
+
+            return { show, hide };
+        }
+
+        const exportModalController = bootstrapLib
+            ? new bootstrapLib.Modal(exportModalEl)
+            : createFallbackModal(exportModalEl, resetExportModal);
+        const importModalController = bootstrapLib
+            ? new bootstrapLib.Modal(importModalEl)
+            : createFallbackModal(importModalEl, resetImportModal);
 
         const exportForm = document.getElementById('exportForm');
         const exportStatus = document.getElementById('exportStatus');
@@ -179,13 +233,13 @@
         function handleExportTrigger(event) {
             event.preventDefault();
             resetExportModal();
-            exportModal.show();
+            exportModalController?.show();
         }
 
         function handleImportTrigger(event) {
             event.preventDefault();
             resetImportModal();
-            importModal.show();
+            importModalController?.show();
         }
 
         exportTriggers.forEach((element) => {
@@ -376,8 +430,10 @@
             }
         });
 
-        exportModalEl.addEventListener('hidden.bs.modal', resetExportModal);
-        importModalEl.addEventListener('hidden.bs.modal', resetImportModal);
+        if (bootstrapLib) {
+            exportModalEl.addEventListener('hidden.bs.modal', resetExportModal);
+            importModalEl.addEventListener('hidden.bs.modal', resetImportModal);
+        }
 
         window.openExportModal = handleExportTrigger;
         window.openImportModal = handleImportTrigger;

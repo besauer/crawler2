@@ -10,6 +10,7 @@ import re
 import subprocess
 import threading
 import time
+import traceback
 import unicodedata
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -20,11 +21,13 @@ from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 from urllib.parse import urljoin, urlparse, urlunparse
 
 import requests
-from flask import Flask, jsonify, render_template, request
+from flask import Flask, Response, jsonify, render_template, request
+from flask.signals import got_request_exception
 from flask.typing import ResponseReturnValue
 from openpyxl import load_workbook
 from bs4 import BeautifulSoup
 from markupsafe import Markup, escape
+from werkzeug.exceptions import HTTPException
 
 from crawler import (
     CrawlProgress,
@@ -206,6 +209,10 @@ EXPORT_SECTION_DEFINITIONS: Dict[str, Dict[str, str]] = {
         "label": "API-Schlüssel & Tokens",
         "description": "OpenAI-, Google- und weitere Zugangsdaten.",
     },
+    "debug": {
+        "label": "Debugging-Protokolle",
+        "description": "Gesammelte Fehlermeldungen und Kontextinformationen.",
+    },
 }
 EXPORT_SECTION_ORDER = [
     "stammdaten",
@@ -213,6 +220,7 @@ EXPORT_SECTION_ORDER = [
     "searches",
     "settings",
     "data_quality",
+    "debug",
     "api_keys",
 ]
 
@@ -220,6 +228,7 @@ IMPORT_SESSION_TTL_SECONDS = 600
 IMPORT_SESSION_LIMIT = 8
 
 audit_log_lock = threading.Lock()
+error_log_lock = threading.Lock()
 
 
 @app.context_processor
@@ -861,6 +870,74 @@ def record_audit_event(action: str, details: Dict[str, Any]) -> None:
     append_audit_event(action, sanitized)
 
 
+def _sanitize_log_value(value: Any, depth: int = 0) -> Any:
+    if depth > 3:
+        return str(value)
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    if isinstance(value, dict):
+        result: Dict[str, Any] = {}
+        for key, item in value.items():
+            key_str = str(key)
+            if key_str.lower() in {"authorization", "cookie", "set-cookie"}:
+                result[key_str] = "<redacted>"
+            else:
+                result[key_str] = _sanitize_log_value(item, depth + 1)
+        return result
+    if isinstance(value, (list, tuple, set)):
+        return [_sanitize_log_value(item, depth + 1) for item in list(value)[:20]]
+    return str(value)
+
+
+def log_error_event(category: str, message: str, *, details: Optional[Dict[str, Any]] = None, stack: Optional[str] = None) -> None:
+    entry: Dict[str, Any] = {
+        "timestamp": datetime.utcnow().isoformat() + "Z",
+        "category": str(category or "error"),
+        "message": str(message or "Unbekannter Fehler"),
+    }
+    if details:
+        entry["details"] = _sanitize_log_value(details)
+    if stack:
+        entry["stack"] = stack if isinstance(stack, str) else str(stack)
+    with error_log_lock:
+        storage.append_error_log(entry)
+
+
+def list_error_log_entries(limit: Optional[int] = 200) -> List[Dict[str, Any]]:
+    with error_log_lock:
+        return list(storage.list_error_log(limit))
+
+
+def replace_error_log_entries(entries: Iterable[Dict[str, Any]]) -> None:
+    with error_log_lock:
+        storage.replace_error_log(entries)
+
+
+def capture_request_exception(sender, exception, **extra) -> None:  # pragma: no cover - defensive logging
+    if isinstance(exception, HTTPException) and getattr(exception, "code", 500) < 500:
+        return
+    details: Dict[str, Any] = {"type": type(exception).__name__}
+    try:
+        details.update(
+            {
+                "method": request.method,
+                "path": request.path,
+                "query_string": request.query_string.decode("utf-8", "ignore"),
+                "remote_addr": request.remote_addr,
+                "user_agent": request.headers.get("User-Agent"),
+                "status_code": getattr(exception, "code", None),
+                "content_length": request.content_length,
+            }
+        )
+    except RuntimeError:
+        details["request"] = "außerhalb des Request-Kontexts"
+    stack = "".join(traceback.format_exception(type(exception), exception, exception.__traceback__))
+    log_error_event("flask-request", str(exception), details=details, stack=stack)
+
+
+got_request_exception.connect(capture_request_exception, app)
+
+
 def _cleanup_import_sessions_locked() -> None:
     now = time.time()
     expired = [
@@ -1032,6 +1109,13 @@ def summarize_section(section: str, data: Any) -> Dict[str, Any]:
             base["records"] = len(records)
         else:
             base["records"] = 0
+    elif section == "debug":
+        if isinstance(data, list):
+            base["entries"] = len(data)
+        elif isinstance(data, dict) and "logs" in data and isinstance(data["logs"], list):
+            base["entries"] = len(data["logs"])
+        else:
+            base["entries"] = 0
     elif section == "api_keys":
         openai_key = ""
         keyword_key = ""
@@ -1106,6 +1190,11 @@ def build_export_payload(selected_sections: Set[str]) -> Tuple[Dict[str, Any], D
         dq_payload = {"records": load_data_quality_results()}
         payload["sections"]["data_quality"] = dq_payload
         summary["sections"]["data_quality"] = summarize_section("data_quality", dq_payload)
+
+    if "debug" in requested:
+        debug_payload = list_error_log_entries(limit=None)
+        payload["sections"]["debug"] = debug_payload
+        summary["sections"]["debug"] = summarize_section("debug", debug_payload)
 
     if "api_keys" in requested:
         api_payload = {
@@ -1549,6 +1638,27 @@ def apply_api_keys_import(data: Any, mode: str, dry_run: bool) -> Dict[str, Any]
     }
 
 
+def apply_debug_import(data: Any, mode: str, dry_run: bool) -> Dict[str, Any]:
+    if isinstance(data, dict) and "logs" in data:
+        payload = data.get("logs")
+    else:
+        payload = data
+    if not isinstance(payload, list):
+        return {"status": "skipped", "reason": "Ungültiges Format"}
+    entries = [entry for entry in payload if isinstance(entry, dict)]
+    if dry_run:
+        return {"status": "preview", "entries": len(entries)}
+    if mode == "replace":
+        replace_error_log_entries(entries)
+        return {"status": "replaced", "entries": len(entries)}
+    if mode == "merge" and entries:
+        with error_log_lock:
+            for entry in entries:
+                storage.append_error_log(entry)
+        return {"status": "merged", "entries": len(entries)}
+    return {"status": "skipped", "reason": "Keine verwertbaren Einträge"}
+
+
 def apply_import(payload: Dict[str, Any], actions: Dict[str, str], dry_run: bool) -> Dict[str, Any]:
     sections = payload.get("sections")
     if not isinstance(sections, dict):
@@ -1574,6 +1684,8 @@ def apply_import(payload: Dict[str, Any], actions: Dict[str, str], dry_run: bool
             results[section] = apply_settings_import(data, mode, dry_run)
         elif section == "data_quality":
             results[section] = apply_data_quality_import(data, mode, dry_run)
+        elif section == "debug":
+            results[section] = apply_debug_import(data, mode, dry_run)
         elif section == "api_keys":
             results[section] = apply_api_keys_import(data, mode, dry_run)
         else:
@@ -4279,6 +4391,16 @@ def run_crawl_job(job: CrawlJob) -> None:
             job.mark_completed()
     except Exception as exc:  # pragma: no cover - defensive safety net
         job.mark_completed(error=str(exc))
+        log_error_event(
+            "crawl-job-error",
+            str(exc),
+            details={
+                "job_id": job.id,
+                "keywords": job.keywords,
+                "current_start_url": getattr(job, "current_start_url", None),
+            },
+            stack="".join(traceback.format_exception(type(exc), exc, exc.__traceback__)),
+        )
 
 
 
@@ -4605,6 +4727,15 @@ def run_data_quality_job(job: DataQualityJob) -> None:
                     future.result()
                 except Exception as exc:
                     job.update_progress(message=f"Fehler bei der Datenqualitätsprüfung: {exc}")
+                    log_error_event(
+                        "data-quality-worker-error",
+                        str(exc),
+                        details={
+                            "job_id": job.id,
+                            "school": getattr(job, "current_school", None),
+                        },
+                        stack="".join(traceback.format_exception(type(exc), exc, exc.__traceback__)),
+                    )
         finally:
             executor.shutdown(wait=True, cancel_futures=True)
 
@@ -4615,6 +4746,12 @@ def run_data_quality_job(job: DataQualityJob) -> None:
 
     except Exception as exc:  # pragma: no cover - defensive safety net
         job.mark_completed(error=str(exc))
+        log_error_event(
+            "data-quality-job-error",
+            str(exc),
+            details={"job_id": job.id},
+            stack="".join(traceback.format_exception(type(exc), exc, exc.__traceback__)),
+        )
 
 
 def run_search_job(job: SearchJob) -> None:
@@ -4812,6 +4949,17 @@ def run_search_job(job: SearchJob) -> None:
             status=SEARCH_STATUS_NEW,
             last_error=message,
         )
+        log_error_event(
+            "search-job-error",
+            message,
+            details={
+                "job_id": job.id,
+                "definition_id": job.definition_id,
+                "keywords": job.keywords,
+                "current_school": getattr(job, "current_school", None),
+            },
+            stack="".join(traceback.format_exception(type(exc), exc, exc.__traceback__)),
+        )
     finally:
         with search_jobs_lock:
             search_jobs.pop(job.id, None)
@@ -4825,6 +4973,23 @@ def index() -> ResponseReturnValue:
     defaults = get_search_defaults()
     google_credentials = get_google_search_credentials()
     google_configured = bool(google_credentials.get("api_key") and google_credentials.get("cx"))
+    prefill_id = request.args.get("definition")
+    prefill_definition: Optional[Dict[str, Any]] = None
+    if prefill_id:
+        existing = get_search_definition(prefill_id)
+        if existing:
+            prefill_definition = {
+                "id": existing.get("id"),
+                "name": existing.get("name"),
+                "description": existing.get("description"),
+                "keywords": existing.get("keywords", []),
+                "school_ids": existing.get("school_ids", []),
+                "prompt": existing.get("prompt"),
+                "max_results": existing.get("max_results", defaults.get("max_results")),
+                "model": existing.get("model", defaults.get("model")),
+                "temperature": existing.get("temperature", defaults.get("temperature")),
+                "category": existing.get("category"),
+            }
     return render_template(
         "index.html",
         active_page="search_create",
@@ -4839,6 +5004,7 @@ def index() -> ResponseReturnValue:
         has_api_key=has_api_key(),
         google_configured=google_configured,
         search_dimensions=SEARCH_DIMENSIONS,
+        prefill_definition=prefill_definition,
     )
 
 
@@ -4963,7 +5129,7 @@ def search_probe() -> ResponseReturnValue:
     if not search_results and homepage:
         search_results = [{"link": homepage, "title": record.get("schulname"), "snippet": ""}]
     if not search_results:
-        return jsonify({"error": "Es konnten keine Ergebnisse für den Probelauf ermittelt werden."}), 404
+        return jsonify({"message": "Keine Ergebnisse für diese Suche gefunden.", "preview": None, "status": "empty"})
 
     candidate = search_results[0]
     link = str(candidate.get("link") or "").strip()
@@ -5469,6 +5635,39 @@ def data_quality() -> ResponseReturnValue:
         },
         active_page="data_quality",
     )
+
+
+@app.route("/debug")
+def debug_page() -> ResponseReturnValue:
+    logs = list_error_log_entries()
+    return render_template(
+        "debug.html",
+        active_page="debug",
+        initial_logs=logs,
+    )
+
+
+@app.get("/debug/logs")
+def debug_logs() -> ResponseReturnValue:
+    limit = request.args.get("limit", default=200, type=int)
+    if limit is None:
+        limit = 200
+    limit = max(1, min(limit, 2000))
+    return jsonify({"logs": list_error_log_entries(limit)})
+
+
+@app.get("/debug/export")
+def debug_export() -> Response:
+    logs = list_error_log_entries(limit=None)
+    payload = {
+        "generated_at": datetime.utcnow().isoformat() + "Z",
+        "logs": logs,
+    }
+    raw = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
+    filename = f"crawler-debug-{datetime.utcnow().strftime('%Y%m%d-%H%M%S')}.json"
+    response = Response(raw, mimetype="application/json")
+    response.headers["Content-Disposition"] = f"attachment; filename={filename}"
+    return response
 
 
 @app.route("/data-quality/data")

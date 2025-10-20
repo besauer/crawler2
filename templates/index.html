@@ -64,6 +64,10 @@
                        {% if active_page == 'data_quality' %}aria-current="page"{% endif %}>Datenqualität</a>
                 </li>
                 <li class="nav-item">
+                    <a class="nav-link {% if active_page == 'debug' %}active{% endif %}" href="{{ url_for('debug_page') }}"
+                       {% if active_page == 'debug' %}aria-current="page"{% endif %}>Debugging</a>
+                </li>
+                <li class="nav-item">
                     <a class="nav-link {% if active_page == 'settings' %}active{% endif %}" href="{{ url_for('settings') }}"
                        {% if active_page == 'settings' %}aria-current="page"{% endif %}>Einstellungen</a>
                 </li>
@@ -77,6 +81,12 @@
             <h1 class="mb-1">Suche anlegen</h1>
             <p class="text-muted mb-0">Konfigurieren Sie eine neue Suche, wählen Sie die passenden Schulen und hinterlegen Sie
                 Keywords sowie einen Bewertungsprompt.</p>
+            {% if prefill_definition %}
+                <div class="alert alert-info py-2 px-3 mt-3 mb-0">
+                    Sie bearbeiten aktuell die gespeicherte Suche
+                    <strong>{{ prefill_definition.name or 'Ohne Titel' }}</strong>.
+                </div>
+            {% endif %}
         </div>
         <div class="text-end small text-muted">
             {% if not has_api_key %}
@@ -356,6 +366,9 @@
 <script>
     (function () {
         let categories = {{ categories|tojson }};
+        const prefillDefinition = {{ prefill_definition|tojson|default('null', true) }};
+        let currentDefinitionId = prefillDefinition ? (prefillDefinition.id || null) : null;
+        let prefillApplied = false;
         const defaultCategory = {{ default_category|tojson }};
         const hasApiKey = {{ 'true' if has_api_key else 'false' }} === 'true';
         const googleConfigured = {{ 'true' if google_configured else 'false' }} === 'true';
@@ -379,6 +392,22 @@
         const removeCategoryModal = bootstrapLib && removeCategoryModalElement ? new bootstrapLib.Modal(removeCategoryModalElement) : null;
         const schoolCheckboxes = Array.from(document.querySelectorAll('.school-checkbox'));
         const selectionCount = document.getElementById('selection-count');
+
+        async function readJson(response) {
+            const contentType = response.headers ? (response.headers.get('Content-Type') || '') : '';
+            if (contentType.includes('application/json')) {
+                return response.json();
+            }
+            const text = await response.text();
+            if (!text) {
+                return {};
+            }
+            try {
+                return JSON.parse(text);
+            } catch (error) {
+                return { error: text.trim() };
+            }
+        }
 
         function renderCategories(values) {
             categories = Array.isArray(values) ? [...values] : [];
@@ -409,15 +438,68 @@
 
         renderCategories(categories);
 
+        function applyPrefill() {
+            if (prefillApplied || !prefillDefinition) {
+                return;
+            }
+            prefillApplied = true;
+            if (prefillDefinition.category) {
+                const categoryValue = prefillDefinition.category;
+                if (!categories.includes(categoryValue)) {
+                    categories.push(categoryValue);
+                    renderCategories(categories);
+                }
+                categorySelect.value = categoryValue;
+            }
+            if (typeof prefillDefinition.name === 'string') {
+                searchNameInput.value = prefillDefinition.name;
+            }
+            if (typeof prefillDefinition.description === 'string') {
+                searchDescriptionInput.value = prefillDefinition.description;
+            }
+            if (Array.isArray(prefillDefinition.keywords)) {
+                keywordsInput.value = prefillDefinition.keywords.join('\n');
+            }
+            if (typeof prefillDefinition.prompt === 'string') {
+                promptInput.value = prefillDefinition.prompt;
+            }
+            if (typeof prefillDefinition.max_results === 'number') {
+                maxResultsInput.value = prefillDefinition.max_results;
+            }
+            if (typeof prefillDefinition.model === 'string') {
+                const hasModel = Array.from(modelSelect.options).some(option => option.value === prefillDefinition.model);
+                if (!hasModel) {
+                    const option = document.createElement('option');
+                    option.value = prefillDefinition.model;
+                    option.textContent = prefillDefinition.model;
+                    modelSelect.appendChild(option);
+                }
+                modelSelect.value = prefillDefinition.model;
+            }
+            if (typeof prefillDefinition.temperature === 'number') {
+                temperatureInput.value = prefillDefinition.temperature;
+            }
+            if (Array.isArray(prefillDefinition.school_ids)) {
+                const idSet = new Set(prefillDefinition.school_ids.map(String));
+                schoolCheckboxes.forEach(cb => {
+                    cb.checked = idSet.has(cb.value);
+                });
+            }
+            updateSelectionCount();
+            updateQueryPreview();
+        }
+
+        applyPrefill();
+
         async function createCategoryRequest(name) {
             const response = await fetch('{{ url_for('create_search_category_route') }}', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ name })
             });
-            const data = await response.json();
+            const data = await readJson(response);
             if (!response.ok) {
-                throw new Error(data.error || 'Kategorie konnte nicht angelegt werden.');
+                throw new Error(data.error || `Kategorie konnte nicht angelegt werden (Status ${response.status}).`);
             }
             renderCategories(data.categories);
             categorySelect.value = name;
@@ -427,9 +509,9 @@
             const response = await fetch(`${'{{ url_for('delete_search_category_route', category_name='__NAME__') }}'.replace('__NAME__', encodeURIComponent(name))}`, {
                 method: 'DELETE'
             });
-            const data = await response.json();
+            const data = await readJson(response);
             if (!response.ok) {
-                throw new Error(data.error || 'Kategorie konnte nicht gelöscht werden.');
+                throw new Error(data.error || `Kategorie konnte nicht gelöscht werden (Status ${response.status}).`);
             }
             renderCategories(data.categories);
         }
@@ -621,6 +703,7 @@
 
         function buildPayload() {
             return {
+                id: currentDefinitionId,
                 category: categorySelect.value || null,
                 name: searchNameInput.value.trim(),
                 description: searchDescriptionInput.value.trim(),
@@ -659,9 +742,9 @@
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify(payload)
                 });
-                const data = await response.json();
+                const data = await readJson(response);
                 if (!response.ok) {
-                    throw new Error(data.error || 'Test fehlgeschlagen.');
+                    throw new Error(data.error || `Test fehlgeschlagen (Status ${response.status}).`);
                 }
                 feedbackBox.className = 'mt-3 alert alert-success';
                 feedbackBox.textContent = data.message || 'Test erfolgreich durchgeführt.';
@@ -678,7 +761,7 @@
                 }
             } catch (error) {
                 feedbackBox.className = 'mt-3 alert alert-danger';
-                feedbackBox.textContent = error.message;
+                feedbackBox.textContent = error && error.message ? error.message : 'Unbekannter Fehler beim Test.';
             }
         });
 
@@ -696,9 +779,9 @@
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify(payload)
                 });
-                const data = await response.json();
+                const data = await readJson(response);
                 if (!response.ok) {
-                    throw new Error(data.error || 'Probelauf fehlgeschlagen.');
+                    throw new Error(data.error || `Probelauf fehlgeschlagen (Status ${response.status}).`);
                 }
                 feedbackBox.className = 'mt-3 alert alert-success';
                 feedbackBox.textContent = data.message || 'Probelauf erfolgreich.';
@@ -725,7 +808,7 @@
                 }
             } catch (error) {
                 feedbackBox.className = 'mt-3 alert alert-danger';
-                feedbackBox.textContent = error.message;
+                feedbackBox.textContent = error && error.message ? error.message : 'Unbekannter Fehler beim Probelauf.';
             }
         });
 
@@ -753,15 +836,17 @@
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify(payload)
                 });
-                const data = await response.json();
+                const data = await readJson(response);
                 if (!response.ok) {
-                    throw new Error(data.error || 'Suche konnte nicht gespeichert werden.');
+                    throw new Error(data.error || `Suche konnte nicht gespeichert werden (Status ${response.status}).`);
                 }
                 feedbackBox.className = 'mt-3 alert alert-success';
-                feedbackBox.textContent = `Suche "${data.definition.name}" wurde gespeichert.`;
+                const savedName = data.definition && data.definition.name ? data.definition.name : payload.name || 'Unbenannte Suche';
+                feedbackBox.textContent = `Suche "${savedName}" wurde gespeichert.`;
+                currentDefinitionId = data.definition && data.definition.id ? data.definition.id : currentDefinitionId;
             } catch (error) {
                 feedbackBox.className = 'mt-3 alert alert-danger';
-                feedbackBox.textContent = error.message;
+                feedbackBox.textContent = error && error.message ? error.message : 'Unbekannter Fehler beim Speichern.';
             }
         });
     })();

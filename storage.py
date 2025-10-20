@@ -14,7 +14,12 @@ class SQLiteStorage:
         self._init_lock = threading.Lock()
         self._ensure_initialized()
 
+    def ensure_schema(self) -> None:
+        """Ensure the SQLite schema exists (idempotent)."""
+        self._ensure_initialized()
+
     def _get_connection(self) -> sqlite3.Connection:
+        self.ensure_schema()
         conn = getattr(self._local, "connection", None)
         if conn is None:
             conn = sqlite3.connect(
@@ -89,8 +94,14 @@ class SQLiteStorage:
 
                     CREATE INDEX IF NOT EXISTS idx_search_runs_definition ON search_runs(definition_id);
                     CREATE INDEX IF NOT EXISTS idx_search_results_run ON search_results(run_id);
-                    """
-                )
+                    CREATE TABLE IF NOT EXISTS error_log (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        payload TEXT NOT NULL,
+                        created_at TEXT DEFAULT CURRENT_TIMESTAMP
+                    );
+                    CREATE INDEX IF NOT EXISTS idx_error_log_created ON error_log(created_at DESC);
+                """
+            )
                 conn.commit()
             finally:
                 conn.close()
@@ -190,6 +201,44 @@ class SQLiteStorage:
             except json.JSONDecodeError:
                 continue
             yield data
+
+    # Error log -------------------------------------------------------
+    def append_error_log(self, payload: Dict[str, Any]) -> None:
+        conn = self._get_connection()
+        raw = json.dumps(payload, ensure_ascii=False)
+        with conn:
+            conn.execute(
+                "INSERT INTO error_log(payload) VALUES(?)",
+                (raw,),
+            )
+
+    def list_error_log(self, limit: Optional[int] = None) -> Iterable[Dict[str, Any]]:
+        conn = self._get_connection()
+        query = "SELECT id, payload, created_at FROM error_log ORDER BY created_at DESC, id DESC"
+        if limit is not None:
+            cursor = conn.execute(query + " LIMIT ?", (int(limit),))
+        else:
+            cursor = conn.execute(query)
+        for row in cursor:
+            try:
+                data = json.loads(row["payload"])
+            except json.JSONDecodeError:
+                continue
+            if isinstance(data, dict):
+                data.setdefault("id", row["id"])
+                data.setdefault("created_at", row["created_at"])
+                yield data
+
+    def replace_error_log(self, entries: Iterable[Dict[str, Any]]) -> None:
+        conn = self._get_connection()
+        serialised = [json.dumps(entry, ensure_ascii=False) for entry in entries if isinstance(entry, dict)]
+        with conn:
+            conn.execute("DELETE FROM error_log")
+            if serialised:
+                conn.executemany(
+                    "INSERT INTO error_log(payload) VALUES(?)",
+                    [(item,) for item in serialised],
+                )
 
     # Search definitions ---------------------------------------------
     def list_search_definitions(self) -> Iterable[Dict[str, Any]]:
