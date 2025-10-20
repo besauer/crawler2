@@ -4725,6 +4725,17 @@ def run_search_job(job: SearchJob) -> None:
                 region="de",
             )
 
+            if not search_results:
+                school_display = str(record.get("schulname") or school_id)
+                with job._lock:
+                    job.processed_tasks += 1
+                    job.current_school = school_display
+                    job.current_keyword = keyword
+                    job.current_url = None
+                    job.messages.append(f"Keine Google-Ergebnisse für {school_display} – {keyword} gefunden.")
+                persist_search_job_state(job)
+                continue
+
             page_entries: List[Dict[str, Any]] = []
             for item in search_results:
                 link = str(item.get("link") or "").strip()
@@ -5322,16 +5333,25 @@ def search_run_results(run_id: str) -> ResponseReturnValue:
             }
         )
 
+    total_results = len(results)
+    filtered_results = len(filtered)
+    message: Optional[str] = None
+    if total_results == 0:
+        message = "Keine Ergebnisse für diese Suche gefunden."
+    elif filtered_results == 0:
+        message = "Keine Ergebnisse entsprechen den aktuellen Filtern."
+
     return jsonify(
         {
             "run": run,
-            "total_results": len(results),
-            "filtered_results": len(filtered),
+            "total_results": total_results,
+            "filtered_results": filtered_results,
             "results": filtered,
             "dimension_summary": list(dimension_summary.values()),
             "dimension_matrix": dimension_matrix,
             "school_summary": list(school_summary.values()),
             "keyword_summary": list(keyword_summary.values()),
+            "message": message,
         }
     )
 

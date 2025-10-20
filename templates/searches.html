@@ -277,8 +277,9 @@
         const viewSchools = document.getElementById('view-schools');
         const viewDimensions = document.getElementById('view-dimensions');
         const viewKeywords = document.getElementById('view-keywords');
+        const bootstrapLib = (typeof window !== 'undefined' && window.bootstrap && typeof window.bootstrap.Modal === 'function') ? window.bootstrap : null;
         const editModalElement = document.getElementById('modal-edit-result');
-        const editModal = new bootstrap.Modal(editModalElement);
+        const editModal = bootstrapLib && editModalElement ? new bootstrapLib.Modal(editModalElement) : null;
         const editDimensionsBody = document.getElementById('edit-dimensions-body');
         const editResultId = document.getElementById('edit-result-id');
         const editTargetUrl = document.getElementById('edit-target-url');
@@ -524,7 +525,17 @@
                 return;
             }
             resultsCard.classList.remove('d-none');
-            resultsSummary.textContent = `${data.filtered_results || 0} von ${data.total_results || 0} Ergebnissen angezeigt.`;
+            const totalResults = data.total_results || 0;
+            const filteredResults = data.filtered_results || 0;
+            if (data.message) {
+                resultsSummary.textContent = data.message;
+            } else if (!totalResults) {
+                resultsSummary.textContent = 'Keine Ergebnisse für diese Suche gefunden.';
+            } else if (filteredResults !== totalResults) {
+                resultsSummary.textContent = `${filteredResults} von ${totalResults} Ergebnissen angezeigt.`;
+            } else {
+                resultsSummary.textContent = `${totalResults} Ergebnisse gefunden.`;
+            }
             renderSchoolResults(data.results);
             renderDimensionResults(data.dimension_matrix || []);
             renderKeywordResults(data.keyword_summary || []);
@@ -532,6 +543,10 @@
         }
 
         function renderSchoolResults(results) {
+            if (!Array.isArray(results) || !results.length) {
+                viewSchools.innerHTML = '<div class="alert alert-info">Keine Ergebnisse für diese Suche gefunden.</div>';
+                return;
+            }
             const table = document.createElement('table');
             table.className = 'table table-sm table-hover align-middle results-table';
             table.innerHTML = `
@@ -711,7 +726,11 @@
                 `;
                 editDimensionsBody.appendChild(tr);
             });
-            editModal.show();
+            if (editModal) {
+                editModal.show();
+            } else {
+                window.alert('Bearbeitung ohne Dialogunterstützung nicht verfügbar. Bitte Änderungen manuell notieren.');
+            }
         }
 
         document.getElementById('edit-save').addEventListener('click', () => {
@@ -740,12 +759,12 @@
             })
                 .then(response => response.json())
                 .then(() => {
-                    editModal.hide();
+                    editModal?.hide();
                     state.resultsCache[state.selectedRunId] = null;
                     loadResults(state.selectedRunId);
                 })
                 .catch(() => {
-                    editModal.hide();
+                    editModal?.hide();
                 });
         });
 

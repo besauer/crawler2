@@ -372,6 +372,7 @@
         const testOutput = document.getElementById('search-test-output');
         const probeOutput = document.getElementById('search-probe-output');
         const bootstrapLib = (typeof window !== 'undefined' && window.bootstrap && typeof window.bootstrap.Modal === 'function') ? window.bootstrap : null;
+        const categoryMenuButton = document.getElementById('category-menu');
         const addCategoryModalElement = document.getElementById('modal-add-category');
         const removeCategoryModalElement = document.getElementById('modal-remove-category');
         const addCategoryModal = bootstrapLib && addCategoryModalElement ? new bootstrapLib.Modal(addCategoryModalElement) : null;
@@ -471,6 +472,56 @@
             schoolCheckboxes.forEach(cb => cb.checked = false);
             updateSelectionCount();
         });
+
+        if (categoryMenuButton && !bootstrapLib) {
+            categoryMenuButton.addEventListener('click', event => {
+                event.preventDefault();
+                const choice = window.prompt('Kategorie hinzufügen (h) oder löschen (l)?', 'h');
+                if (!choice) {
+                    return;
+                }
+                const normalized = choice.trim().toLowerCase();
+                if (normalized.startsWith('h')) {
+                    document.getElementById('new-category-name').value = '';
+                    document.getElementById('new-category-feedback').textContent = '';
+                    const name = window.prompt('Neue Kategorie anlegen');
+                    if (!name || !name.trim()) {
+                        return;
+                    }
+                    clearFeedback();
+                    createCategoryRequest(name.trim())
+                        .then(() => {
+                            feedbackBox.className = 'mt-3 alert alert-success';
+                            feedbackBox.textContent = `Kategorie "${name.trim()}" wurde gespeichert.`;
+                        })
+                        .catch(error => {
+                            feedbackBox.className = 'mt-3 alert alert-danger';
+                            feedbackBox.textContent = error.message;
+                        });
+                } else if (normalized.startsWith('l')) {
+                    if (!categories.length) {
+                        feedbackBox.className = 'mt-3 alert alert-info';
+                        feedbackBox.textContent = 'Es sind keine Kategorien vorhanden.';
+                        return;
+                    }
+                    const suggestion = categorySelect.value || categories[0];
+                    const name = window.prompt('Kategorie zum Löschen auswählen', suggestion);
+                    if (!name || !name.trim()) {
+                        return;
+                    }
+                    clearFeedback();
+                    deleteCategoryRequest(name.trim())
+                        .then(() => {
+                            feedbackBox.className = 'mt-3 alert alert-success';
+                            feedbackBox.textContent = `Kategorie "${name.trim()}" wurde gelöscht.`;
+                        })
+                        .catch(error => {
+                            feedbackBox.className = 'mt-3 alert alert-danger';
+                            feedbackBox.textContent = error.message;
+                        });
+                }
+            });
+        }
 
         document.querySelectorAll('[data-category-action="add"]').forEach(btn => btn.addEventListener('click', async event => {
             event.preventDefault();
