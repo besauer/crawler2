@@ -350,7 +350,7 @@
         integrity="sha384-HoA0FmB07pCg0M8N7TqyXMR9E7QPFhK9l6t84uLQ+W8sELpAo0P5PLf4KJIp4jK" crossorigin="anonymous"></script>
 <script>
     (function () {
-        const categories = {{ categories|tojson }};
+        let categories = {{ categories|tojson }};
         const defaultCategory = {{ default_category|tojson }};
         const hasApiKey = {{ 'true' if has_api_key else 'false' }} === 'true';
         const googleConfigured = {{ 'true' if google_configured else 'false' }} === 'true';
@@ -366,10 +366,16 @@
         const feedbackBox = document.getElementById('search-feedback');
         const testOutput = document.getElementById('search-test-output');
         const probeOutput = document.getElementById('search-probe-output');
+        const bootstrapLib = (typeof window !== 'undefined' && window.bootstrap && typeof window.bootstrap.Modal === 'function') ? window.bootstrap : null;
+        const addCategoryModalElement = document.getElementById('modal-add-category');
+        const removeCategoryModalElement = document.getElementById('modal-remove-category');
+        const addCategoryModal = bootstrapLib && addCategoryModalElement ? new bootstrapLib.Modal(addCategoryModalElement) : null;
+        const removeCategoryModal = bootstrapLib && removeCategoryModalElement ? new bootstrapLib.Modal(removeCategoryModalElement) : null;
         const schoolCheckboxes = Array.from(document.querySelectorAll('.school-checkbox'));
         const selectionCount = document.getElementById('selection-count');
 
         function renderCategories(values) {
+            categories = Array.isArray(values) ? [...values] : [];
             categorySelect.innerHTML = '';
             values.forEach(value => {
                 const option = document.createElement('option');
@@ -396,6 +402,31 @@
         }
 
         renderCategories(categories);
+
+        async function createCategoryRequest(name) {
+            const response = await fetch('{{ url_for('create_search_category_route') }}', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ name })
+            });
+            const data = await response.json();
+            if (!response.ok) {
+                throw new Error(data.error || 'Kategorie konnte nicht angelegt werden.');
+            }
+            renderCategories(data.categories);
+            categorySelect.value = name;
+        }
+
+        async function deleteCategoryRequest(name) {
+            const response = await fetch(`${'{{ url_for('delete_search_category_route', category_name='__NAME__') }}'.replace('__NAME__', encodeURIComponent(name))}`, {
+                method: 'DELETE'
+            });
+            const data = await response.json();
+            if (!response.ok) {
+                throw new Error(data.error || 'Kategorie konnte nicht gelöscht werden.');
+            }
+            renderCategories(data.categories);
+        }
 
         function selectedSchools() {
             return schoolCheckboxes.filter(cb => cb.checked).map(cb => ({
@@ -436,18 +467,56 @@
             updateSelectionCount();
         });
 
-        const addCategoryModal = new bootstrap.Modal(document.getElementById('modal-add-category'));
-        const removeCategoryModal = new bootstrap.Modal(document.getElementById('modal-remove-category'));
-        document.querySelectorAll('[data-category-action="add"]').forEach(btn => btn.addEventListener('click', event => {
+        document.querySelectorAll('[data-category-action="add"]').forEach(btn => btn.addEventListener('click', async event => {
             event.preventDefault();
             document.getElementById('new-category-name').value = '';
             document.getElementById('new-category-feedback').textContent = '';
-            addCategoryModal.show();
+            if (addCategoryModal) {
+                addCategoryModal.show();
+            } else {
+                const input = window.prompt('Neue Kategorie anlegen');
+                const name = (input || '').trim();
+                if (!name) {
+                    return;
+                }
+                clearFeedback();
+                try {
+                    await createCategoryRequest(name);
+                    feedbackBox.className = 'mt-3 alert alert-success';
+                    feedbackBox.textContent = `Kategorie "${name}" wurde gespeichert.`;
+                } catch (error) {
+                    feedbackBox.className = 'mt-3 alert alert-danger';
+                    feedbackBox.textContent = error.message;
+                }
+            }
         }));
-        document.querySelectorAll('[data-category-action="remove"]').forEach(btn => btn.addEventListener('click', event => {
+        document.querySelectorAll('[data-category-action="remove"]').forEach(btn => btn.addEventListener('click', async event => {
             event.preventDefault();
             document.getElementById('remove-category-feedback').textContent = '';
-            removeCategoryModal.show();
+            if (removeCategoryModal) {
+                removeCategoryModal.show();
+            } else {
+                if (!categories.length) {
+                    feedbackBox.className = 'mt-3 alert alert-info';
+                    feedbackBox.textContent = 'Es sind keine Kategorien vorhanden.';
+                    return;
+                }
+                const suggestion = categorySelect.value || categories[0];
+                const input = window.prompt('Kategorie zum Löschen auswählen', suggestion);
+                const name = (input || '').trim();
+                if (!name) {
+                    return;
+                }
+                clearFeedback();
+                try {
+                    await deleteCategoryRequest(name);
+                    feedbackBox.className = 'mt-3 alert alert-success';
+                    feedbackBox.textContent = `Kategorie "${name}" wurde gelöscht.`;
+                } catch (error) {
+                    feedbackBox.className = 'mt-3 alert alert-danger';
+                    feedbackBox.textContent = error.message;
+                }
+            }
         }));
 
         document.getElementById('confirm-add-category')?.addEventListener('click', async () => {
@@ -462,18 +531,10 @@
                 return;
             }
             try {
-                const response = await fetch('{{ url_for('create_search_category_route') }}', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ name })
-                });
-                const data = await response.json();
-                if (!response.ok) {
-                    throw new Error(data.error || 'Kategorie konnte nicht angelegt werden.');
-                }
-                renderCategories(data.categories);
-                categorySelect.value = name;
-                addCategoryModal.hide();
+                await createCategoryRequest(name);
+                feedbackBox.className = 'mt-3 alert alert-success';
+                feedbackBox.textContent = `Kategorie "${name}" wurde gespeichert.`;
+                addCategoryModal?.hide();
             } catch (error) {
                 input.classList.add('is-invalid');
                 feedback.textContent = error.message;
@@ -492,15 +553,10 @@
                 return;
             }
             try {
-                const response = await fetch(`${'{{ url_for('delete_search_category_route', category_name='__NAME__') }}'.replace('__NAME__', encodeURIComponent(name))}`, {
-                    method: 'DELETE'
-                });
-                const data = await response.json();
-                if (!response.ok) {
-                    throw new Error(data.error || 'Kategorie konnte nicht gelöscht werden.');
-                }
-                renderCategories(data.categories);
-                removeCategoryModal.hide();
+                await deleteCategoryRequest(name);
+                feedbackBox.className = 'mt-3 alert alert-success';
+                feedbackBox.textContent = `Kategorie "${name}" wurde gelöscht.`;
+                removeCategoryModal?.hide();
             } catch (error) {
                 select.classList.add('is-invalid');
                 feedback.textContent = error.message;
@@ -522,7 +578,7 @@
         }
 
         function clearFeedback() {
-            feedbackBox.className = '';
+            feedbackBox.className = 'mt-3';
             feedbackBox.textContent = '';
             testOutput.innerHTML = '';
             probeOutput.innerHTML = '';
@@ -532,12 +588,12 @@
             clearFeedback();
             const payload = buildPayload();
             if (!payload.keywords.length) {
-                feedbackBox.className = 'alert alert-danger';
+                feedbackBox.className = 'mt-3 alert alert-danger';
                 feedbackBox.textContent = 'Bitte geben Sie mindestens ein Keyword ein.';
                 return;
             }
             if (!payload.school_ids.length) {
-                feedbackBox.className = 'alert alert-danger';
+                feedbackBox.className = 'mt-3 alert alert-danger';
                 feedbackBox.textContent = 'Bitte wählen Sie mindestens eine Schule aus.';
                 return;
             }
@@ -551,7 +607,7 @@
                 if (!response.ok) {
                     throw new Error(data.error || 'Test fehlgeschlagen.');
                 }
-                feedbackBox.className = 'alert alert-success';
+                feedbackBox.className = 'mt-3 alert alert-success';
                 feedbackBox.textContent = data.message || 'Test erfolgreich durchgeführt.';
                 if (data.queries) {
                     const list = document.createElement('ul');
@@ -565,7 +621,7 @@
                     testOutput.appendChild(list);
                 }
             } catch (error) {
-                feedbackBox.className = 'alert alert-danger';
+                feedbackBox.className = 'mt-3 alert alert-danger';
                 feedbackBox.textContent = error.message;
             }
         });
@@ -574,7 +630,7 @@
             clearFeedback();
             const payload = buildPayload();
             if (!payload.keywords.length || !payload.school_ids.length) {
-                feedbackBox.className = 'alert alert-danger';
+                feedbackBox.className = 'mt-3 alert alert-danger';
                 feedbackBox.textContent = 'Bitte wählen Sie mindestens eine Schule und ein Keyword.';
                 return;
             }
@@ -588,7 +644,7 @@
                 if (!response.ok) {
                     throw new Error(data.error || 'Probelauf fehlgeschlagen.');
                 }
-                feedbackBox.className = 'alert alert-success';
+                feedbackBox.className = 'mt-3 alert alert-success';
                 feedbackBox.textContent = data.message || 'Probelauf erfolgreich.';
                 probeOutput.innerHTML = '';
                 if (data.preview) {
@@ -612,7 +668,7 @@
                     probeOutput.appendChild(card);
                 }
             } catch (error) {
-                feedbackBox.className = 'alert alert-danger';
+                feedbackBox.className = 'mt-3 alert alert-danger';
                 feedbackBox.textContent = error.message;
             }
         });
@@ -621,17 +677,17 @@
             clearFeedback();
             const payload = buildPayload();
             if (!payload.name) {
-                feedbackBox.className = 'alert alert-danger';
+                feedbackBox.className = 'mt-3 alert alert-danger';
                 feedbackBox.textContent = 'Bitte vergeben Sie einen Namen für die Suche.';
                 return;
             }
             if (!payload.keywords.length) {
-                feedbackBox.className = 'alert alert-danger';
+                feedbackBox.className = 'mt-3 alert alert-danger';
                 feedbackBox.textContent = 'Bitte geben Sie mindestens ein Keyword ein.';
                 return;
             }
             if (!payload.school_ids.length) {
-                feedbackBox.className = 'alert alert-danger';
+                feedbackBox.className = 'mt-3 alert alert-danger';
                 feedbackBox.textContent = 'Bitte wählen Sie mindestens eine Schule aus.';
                 return;
             }
@@ -645,10 +701,10 @@
                 if (!response.ok) {
                     throw new Error(data.error || 'Suche konnte nicht gespeichert werden.');
                 }
-                feedbackBox.className = 'alert alert-success';
+                feedbackBox.className = 'mt-3 alert alert-success';
                 feedbackBox.textContent = `Suche "${data.definition.name}" wurde gespeichert.`;
             } catch (error) {
-                feedbackBox.className = 'alert alert-danger';
+                feedbackBox.className = 'mt-3 alert alert-danger';
                 feedbackBox.textContent = error.message;
             }
         });
