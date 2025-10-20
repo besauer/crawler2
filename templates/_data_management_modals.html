@@ -78,12 +78,39 @@
     document.addEventListener('DOMContentLoaded', () => {
         const exportModalEl = document.getElementById('exportModal');
         const importModalEl = document.getElementById('importModal');
+        const exportTriggers = document.querySelectorAll('[data-bundle-action="export"]');
+        const importTriggers = document.querySelectorAll('[data-bundle-action="import"]');
+
+        const bootstrapLib = (typeof window !== 'undefined'
+            && window.bootstrap
+            && typeof window.bootstrap.Modal === 'function') ? window.bootstrap : null;
+
+        if (!bootstrapLib) {
+            const notify = () => window.alert(
+                'Die Import- und Export-Dialoge benötigen das Bootstrap-JavaScript. '
+                + 'Bitte stellen Sie sicher, dass die CDN-Ressourcen geladen werden konnten.'
+            );
+            exportTriggers.forEach((element) => {
+                element.addEventListener('click', (event) => {
+                    event.preventDefault();
+                    notify();
+                });
+            });
+            importTriggers.forEach((element) => {
+                element.addEventListener('click', (event) => {
+                    event.preventDefault();
+                    notify();
+                });
+            });
+            return;
+        }
+
         if (!exportModalEl || !importModalEl) {
             return;
         }
 
-        const exportModal = new bootstrap.Modal(exportModalEl);
-        const importModal = new bootstrap.Modal(importModalEl);
+        const exportModal = new bootstrapLib.Modal(exportModalEl);
+        const importModal = new bootstrapLib.Modal(importModalEl);
 
         const exportForm = document.getElementById('exportForm');
         const exportStatus = document.getElementById('exportStatus');
@@ -161,11 +188,11 @@
             importModal.show();
         }
 
-        document.querySelectorAll('[data-bundle-action="export"]').forEach((element) => {
+        exportTriggers.forEach((element) => {
             element.addEventListener('click', handleExportTrigger);
         });
 
-        document.querySelectorAll('[data-bundle-action="import"]').forEach((element) => {
+        importTriggers.forEach((element) => {
             element.addEventListener('click', handleImportTrigger);
         });
 
