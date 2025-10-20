@@ -51,6 +51,7 @@ search_definition_lock = threading.Lock()
 search_run_lock = threading.Lock()
 search_result_lock = threading.Lock()
 search_jobs_lock = threading.Lock()
+search_categories_lock = threading.Lock()
 DEFAULT_CONCURRENCY = 5
 MAX_CONCURRENCY = 150
 MAX_MAX_PAGES = 1000
@@ -157,7 +158,8 @@ DEFAULT_SEARCH_EVALUATION_PROMPT = (
 )
 DEFAULT_SEARCH_MODEL = OPENAI_MODEL_NAME
 DEFAULT_SEARCH_TEMPERATURE = 0.2
-DEFAULT_SEARCH_MAX_RESULTS = 5
+DEFAULT_SEARCH_MAX_RESULTS = 200
+DEFAULT_SEARCH_CATEGORIES = ["KI"]
 SEARCH_STATUS_NEW = "neu"
 SEARCH_STATUS_RUNNING = "in_arbeit"
 SEARCH_STATUS_FINISHED = "abgeschlossen"
@@ -382,7 +384,7 @@ def get_search_defaults() -> Dict[str, object]:
             max_results = int(max_results_value)
         except (TypeError, ValueError):
             max_results = defaults["max_results"]
-        max_results = max(1, min(max_results, 150))
+        max_results = max(1, min(max_results, 200))
         result["max_results"] = max_results
         temperature_value = settings_search.get("temperature")
         try:
@@ -2548,7 +2550,7 @@ def perform_google_search(
     language: str = "de",
     region: str = "de",
 ) -> List[Dict[str, object]]:
-    max_results = max(1, min(int(max_results), 100))
+    max_results = max(1, min(int(max_results), 200))
     collected: List[Dict[str, object]] = []
     seen_links: Set[str] = set()
     start_index = 1
@@ -2603,7 +2605,7 @@ def perform_google_search(
         if added == 0:
             break
         start_index += max(1, len(items))
-        if start_index > 100:
+        if start_index > 100 and len(collected) >= 100:
             break
     return collected
 
@@ -3216,6 +3218,11 @@ def clear_search_results(run_id: str) -> None:
         storage.clear_search_results(run_id)
 
 
+def get_search_result_entry(result_id: int) -> Optional[Dict[str, Any]]:
+    with search_result_lock:
+        return storage.get_search_result(result_id)
+
+
 def collect_all_search_data() -> Dict[str, Any]:
     definitions = load_search_definitions()
     runs = list_search_runs()
@@ -3230,6 +3237,67 @@ def collect_all_search_data() -> Dict[str, Any]:
         "runs": runs,
         "results": results,
     }
+
+
+def _normalise_category_list(values: Iterable[object]) -> List[str]:
+    seen: Set[str] = set()
+    categories: List[str] = []
+    for value in values:
+        text = str(value or "").strip()
+        if not text:
+            continue
+        lowered = text.lower()
+        if lowered in seen:
+            continue
+        seen.add(lowered)
+        categories.append(text)
+    for default in DEFAULT_SEARCH_CATEGORIES:
+        text = str(default or "").strip()
+        if not text:
+            continue
+        lowered = text.lower()
+        if lowered not in seen:
+            categories.insert(0, text)
+            seen.add(lowered)
+    return categories
+
+
+def get_search_categories() -> List[str]:
+    with search_categories_lock:
+        existing = storage.list_search_categories()
+        categories = _normalise_category_list(existing)
+        if categories != existing:
+            storage.save_search_categories(categories)
+        return list(categories)
+
+
+def add_search_category(name: str) -> List[str]:
+    cleaned = str(name or "").strip()
+    if not cleaned:
+        raise ValueError("Der Kategoriename darf nicht leer sein.")
+    with search_categories_lock:
+        existing = storage.list_search_categories()
+        existing.append(cleaned)
+        categories = _normalise_category_list(existing)
+        storage.save_search_categories(categories)
+        return list(categories)
+
+
+def delete_search_category(name: str) -> List[str]:
+    cleaned = str(name or "").strip()
+    if not cleaned:
+        raise ValueError("Ungültiger Kategoriename.")
+    if cleaned.lower() in {default.lower() for default in DEFAULT_SEARCH_CATEGORIES}:
+        raise ValueError("Die Standardkategorie kann nicht gelöscht werden.")
+    with search_categories_lock:
+        existing = [
+            item
+            for item in storage.list_search_categories()
+            if str(item or "").strip().lower() != cleaned.lower()
+        ]
+        categories = _normalise_category_list(existing)
+        storage.save_search_categories(categories)
+        return list(categories)
 
 
 def normalise_keywords(values: Iterable[object]) -> List[str]:
@@ -3320,8 +3388,12 @@ def store_search_definition(payload: Dict[str, Any]) -> Dict[str, Any]:
         max_results_value = int(max_results_raw)
     except (TypeError, ValueError):
         max_results_value = defaults["max_results"]
-    max_results_value = max(1, min(max_results_value, 150))
+    max_results_value = max(1, min(max_results_value, 200))
 
+    category_value = str(payload.get("category") or definition.get("category") or "").strip()
+    categories = get_search_categories()
+    if not category_value and categories:
+        category_value = categories[0]
     status_candidate = str(payload.get("status") or definition.get("status") or SEARCH_STATUS_NEW)
     if status_candidate not in {SEARCH_STATUS_NEW, SEARCH_STATUS_RUNNING, SEARCH_STATUS_FINISHED}:
         status_candidate = SEARCH_STATUS_NEW
@@ -3337,6 +3409,7 @@ def store_search_definition(payload: Dict[str, Any]) -> Dict[str, Any]:
             "model": model_value,
             "temperature": temperature_value,
             "max_results": max_results_value,
+            "category": category_value or (categories[0] if categories else ""),
             "status": status_candidate,
             "created_at": created_at,
             "updated_at": utcnow_iso(),
@@ -4675,6 +4748,7 @@ def run_search_job(job: SearchJob) -> None:
                     {
                         "school_id": school_id,
                         "school_name": record.get("schulname"),
+                        "school_city": record.get("ort"),
                         "school_homepage": record.get("homepage"),
                         "keyword": keyword,
                         "query": query,
@@ -4732,447 +4806,212 @@ def run_search_job(job: SearchJob) -> None:
             search_jobs.pop(job.id, None)
 
 
-@app.route("/", methods=["GET", "POST"])
-def index():
-    all_stammdaten_records = load_stammdaten()
-    stammdaten_records = [record for record in all_stammdaten_records if record.get("aktiv", True)]
-    keywords_input = ""
-    selected_homepages: List[str] = []
-    crawl_defaults = get_crawl_defaults()
-    max_pages = crawl_defaults["max_pages"]
-    concurrency = crawl_defaults["concurrency"]
-    start_date_input = ""
-    end_date_input = ""
-    respect_robots = DEFAULT_RESPECT_ROBOTS
-    synonyms_enabled = True
-    keyword_groups: List[Dict[str, List[str]]] = []
-    expanded_keywords: List[str] = []
-    keyword_evaluations: List[Dict[str, object]] = []
-    synonym_messages: List[Dict[str, str]] = []
-    synonyms_expanded = False
-    synonym_groups_manual = False
-    synonym_status = "noch nicht gestartet"
-    error: Optional[str] = None
-    job_id: Optional[str] = None
-    submitted = False
-    has_key = has_api_key()
-    has_planner_key = has_keyword_planner_key()
-    synonym_defaults = get_synonym_defaults()
-    keyword_finder_defaults = get_keyword_finder_defaults()
-
-    if request.method == "POST":
-        submitted = True
-        raw_keywords = request.form.get("keywords", "")
-        keywords_input = raw_keywords
-        max_pages = request.form.get("max_pages", type=int, default=crawl_defaults["max_pages"])
-        concurrency = request.form.get("concurrency", type=int, default=crawl_defaults["concurrency"])
-        start_date_input = request.form.get("start_date", "").strip()
-        end_date_input = request.form.get("end_date", "").strip()
-        respect_robots = bool(request.form.get("respect_robots"))
-
-        selected_values = request.form.getlist("start_urls")
-        allowed_homepages = {record["homepage"] for record in stammdaten_records if record.get("homepage")}
-        selected_set = {value for value in selected_values if value in allowed_homepages}
-        ordered_selection: List[str] = []
-        for record in stammdaten_records:
-            homepage = record.get("homepage")
-            if homepage in selected_set:
-                ordered_selection.append(homepage)
-        selected_homepages = ordered_selection
-
-        keywords = [kw.strip() for kw in raw_keywords.splitlines() if kw.strip()]
-        expanded_keywords = list(keywords)
-        keyword_groups = [{"original": kw, "additional": []} for kw in keywords]
-        manual_payload_mode = request.form.get("keyword_groups_mode", "").strip().lower()
-        manual_groups_raw = request.form.get("keyword_groups_payload", "").strip()
-        manual_groups_data: Optional[List[Dict[str, object]]] = None
-        if manual_payload_mode == "manual":
-            if not manual_groups_raw:
-                manual_groups_data = []
-            else:
-                try:
-                    loaded_groups = json.loads(manual_groups_raw)
-                except json.JSONDecodeError:
-                    synonym_messages.append(
-                        {
-                            "category": "warning",
-                            "text": "Synonymerweiterung: Die übermittelten Anpassungen konnten nicht gelesen werden.",
-                        }
-                    )
-                else:
-                    if isinstance(loaded_groups, list):
-                        manual_groups_data = loaded_groups
-                    else:
-                        synonym_messages.append(
-                            {
-                                "category": "warning",
-                                "text": "Synonymerweiterung: Die übermittelten Anpassungen waren ungültig.",
-                            }
-                        )
-        start_date_value: Optional[date] = None
-        end_date_value: Optional[date] = None
-
-        if not stammdaten_records:
-            error = "Es sind keine aktiven Stammdaten vorhanden. Bitte importieren oder aktivieren Sie Schulen."
-        elif not selected_homepages:
-            error = "Bitte wählen Sie mindestens eine Schule aus den Stammdaten aus."
-        elif not keywords:
-            error = "Bitte geben Sie mindestens ein Suchstichwort ein."
-        else:
-            if start_date_input:
-                try:
-                    start_date_value = datetime.strptime(start_date_input, "%Y-%m-%d").date()
-                except ValueError:
-                    error = "Das Startdatum ist ungültig."
-            if not error and end_date_input:
-                try:
-                    end_date_value = datetime.strptime(end_date_input, "%Y-%m-%d").date()
-                except ValueError:
-                    error = "Das Enddatum ist ungültig."
-            if (
-                not error
-                and start_date_value
-                and end_date_value
-                and start_date_value > end_date_value
-            ):
-                error = "Das Startdatum darf nicht nach dem Enddatum liegen."
-
-        if not has_key and error:
-            synonym_messages.append(
-                {
-                    "category": "warning",
-                    "text": "OpenAI-Schlüssel erforderlich. Bitte unter Einstellungen → API-Schlüssel hinterlegen.",
-                }
-            )
-
-        if not error:
-            if concurrency < 1:
-                concurrency = 1
-            elif concurrency > MAX_CONCURRENCY:
-                concurrency = MAX_CONCURRENCY
-
-            if manual_groups_data is not None:
-                synonym_groups_manual = True
-                manual_map: Dict[str, Dict[str, object]] = {}
-                for entry in manual_groups_data:
-                    if not isinstance(entry, dict):
-                        continue
-                    original_value = str(entry.get("original", "")).strip()
-                    if not original_value or original_value not in keywords:
-                        continue
-                    store = manual_map.setdefault(
-                        original_value,
-                        {
-                            "synonyms": [],
-                            "related": [],
-                            "related_details": [],
-                            "_synonym_set": set(),
-                            "_related_set": set(),
-                            "_related_detail_map": {},
-                        },
-                    )
-
-                    synonyms_raw = entry.get("synonyms")
-                    if not isinstance(synonyms_raw, list):
-                        synonyms_raw = entry.get("additional", [])
-                    if isinstance(synonyms_raw, list):
-                        for candidate in synonyms_raw:
-                            text = str(candidate).strip()
-                            if not text:
-                                continue
-                            lowered_candidate = text.lower()
-                            synonym_set: Set[str] = store["_synonym_set"]  # type: ignore[assignment]
-                            related_set: Set[str] = store["_related_set"]  # type: ignore[assignment]
-                            if lowered_candidate in synonym_set or lowered_candidate in related_set:
-                                continue
-                            synonym_set.add(lowered_candidate)
-                            store["synonyms"].append(text)
-
-                    related_raw = entry.get("related")
-                    if isinstance(related_raw, list):
-                        for candidate in related_raw:
-                            text = str(candidate).strip()
-                            if not text:
-                                continue
-                            lowered_candidate = text.lower()
-                            synonym_set = store["_synonym_set"]  # type: ignore[assignment]
-                            related_set = store["_related_set"]  # type: ignore[assignment]
-                            if lowered_candidate in related_set or lowered_candidate in synonym_set:
-                                continue
-                            related_set.add(lowered_candidate)
-                            store["related"].append(text)
-
-                    details_raw = entry.get("related_details")
-                    if isinstance(details_raw, list):
-                        detail_map: Dict[str, Dict[str, object]] = store["_related_detail_map"]  # type: ignore[assignment]
-                        for item in details_raw:
-                            if not isinstance(item, dict):
-                                continue
-                            term_text = str(item.get("term", "")).strip()
-                            if not term_text:
-                                continue
-                            lowered_term = term_text.lower()
-                            detail_map[lowered_term] = {
-                                "term": term_text,
-                                "cluster": str(item.get("cluster", "")).strip() or None,
-                                "search_volume": item.get("search_volume"),
-                                "competition": (str(item.get("competition", "")).strip() or None),
-                                "relevance": item.get("relevance"),
-                            }
-
-                seen_lower: Set[str] = set()
-                expanded_keywords = []
-                keyword_groups = []
-                synonyms_expanded = False
-
-                for kw in keywords:
-                    expanded_keywords.append(kw)
-                    seen_lower.add(kw.lower())
-                    store = manual_map.get(kw, {})
-                    synonyms_list = [str(value).strip() for value in store.get("synonyms", []) if str(value).strip()]
-                    related_list = [str(value).strip() for value in store.get("related", []) if str(value).strip()]
-                    detail_map = store.get("_related_detail_map", {})
-                    if not isinstance(detail_map, dict):
-                        detail_map = {}
-
-                    additional_clean: List[str] = []
-                    synonyms_clean: List[str] = []
-                    related_clean: List[str] = []
-
-                    for candidate in synonyms_list:
-                        lowered = candidate.lower()
-                        if lowered in seen_lower:
-                            continue
-                        seen_lower.add(lowered)
-                        expanded_keywords.append(candidate)
-                        additional_clean.append(candidate)
-                        synonyms_clean.append(candidate)
-
-                    for candidate in related_list:
-                        lowered = candidate.lower()
-                        if lowered in seen_lower:
-                            continue
-                        seen_lower.add(lowered)
-                        expanded_keywords.append(candidate)
-                        additional_clean.append(candidate)
-                        related_clean.append(candidate)
-
-                    related_details: List[Dict[str, object]] = []
-                    for candidate in related_clean:
-                        lowered = candidate.lower()
-                        detail_entry = detail_map.get(lowered)
-                        if isinstance(detail_entry, dict):
-                            related_details.append(
-                                {
-                                    "term": candidate,
-                                    "cluster": detail_entry.get("cluster"),
-                                    "search_volume": detail_entry.get("search_volume"),
-                                    "competition": detail_entry.get("competition"),
-                                    "relevance": detail_entry.get("relevance"),
-                                }
-                            )
-                        else:
-                            related_details.append(
-                                {
-                                    "term": candidate,
-                                    "cluster": None,
-                                    "search_volume": None,
-                                    "competition": None,
-                                    "relevance": None,
-                                }
-                            )
-
-                    if additional_clean:
-                        synonyms_expanded = True
-
-                    keyword_groups.append(
-                        {
-                            "original": kw,
-                            "additional": additional_clean,
-                            "synonyms": synonyms_clean,
-                            "related": related_clean,
-                            "related_details": related_details,
-                        }
-                    )
-
-                if synonyms_expanded:
-                    synonym_status = "Zusätzliche Begriffe aktiv (manuelle Auswahl)"
-                    synonym_messages.append(
-                        {
-                            "category": "info",
-                            "text": "Synonyme und verwandte Keywords wurden manuell ausgewählt.",
-                        }
-                    )
-                else:
-                    synonym_status = "Synonymerweiterung aktiv (nur Originalbegriffe)"
-                    synonym_messages.append(
-                        {
-                            "category": "info",
-                            "text": "Synonymerweiterung aktiv, es wurden keine zusätzlichen Begriffe ausgewählt.",
-                        }
-                    )
-            else:
-                expanded_keywords = list(keywords)
-                keyword_groups = [
-                    {
-                        "original": kw,
-                        "additional": [],
-                        "synonyms": [],
-                        "related": [],
-                        "related_details": [],
-                    }
-                    for kw in keywords
-                ]
-                synonyms_expanded = False
-                synonym_status = "Synonymerweiterung bereit (keine Auswahl)"
-                synonym_messages.append(
-                    {
-                        "category": "info",
-                        "text": "Keine Synonyme ausgewählt. Verwenden Sie „Synonyme finden“, um Vorschläge hinzuzufügen.",
-                    }
-                )
-
-            evaluation_payload_raw = request.form.get("keyword_evaluations_payload", "").strip()
-            if evaluation_payload_raw:
-                try:
-                    evaluation_raw = json.loads(evaluation_payload_raw)
-                except json.JSONDecodeError:
-                    synonym_messages.append(
-                        {
-                            "category": "warning",
-                            "text": "Bewertung der Suchbegriffe: Die übermittelten Daten konnten nicht gelesen werden.",
-                        }
-                    )
-                else:
-                    if isinstance(evaluation_raw, list):
-                        allowed_map = {kw.lower(): kw for kw in keywords}
-                        evaluation_map: Dict[str, Dict[str, object]] = {}
-                        for entry in evaluation_raw:
-                            if not isinstance(entry, dict):
-                                continue
-                            keyword_value = str(entry.get("keyword", "")).strip()
-                            if not keyword_value:
-                                continue
-                            lowered_key = keyword_value.lower()
-                            if lowered_key not in allowed_map:
-                                continue
-                            quality_value = str(entry.get("quality", "")).strip()
-                            suggestions_raw = entry.get("better_keywords", [])
-                            suggestions: List[str] = []
-                            if isinstance(suggestions_raw, list):
-                                seen_local: Set[str] = set()
-                                for candidate in suggestions_raw:
-                                    text = str(candidate).strip()
-                                    if not text:
-                                        continue
-                                    lowered_candidate = text.lower()
-                                    if lowered_candidate in seen_local:
-                                        continue
-                                    seen_local.add(lowered_candidate)
-                                    suggestions.append(text)
-                            evaluation_map[lowered_key] = {
-                                "keyword": allowed_map[lowered_key],
-                                "quality": quality_value,
-                                "better_keywords": suggestions,
-                            }
-                        keyword_evaluations = [
-                            evaluation_map[key.lower()]
-                            for key in keywords
-                            if key.lower() in evaluation_map
-                        ]
-                    elif evaluation_raw not in (None, ""):
-                        synonym_messages.append(
-                            {
-                                "category": "warning",
-                                "text": "Bewertung der Suchbegriffe: Die übermittelten Daten waren ungültig.",
-                            }
-                        )
-
-            job_id = uuid.uuid4().hex
-            job = CrawlJob(
-                id=job_id,
-                start_urls=selected_homepages,
-                keywords=list(expanded_keywords),
-                original_keywords=list(keywords),
-                expanded_keywords=list(expanded_keywords),
-                keyword_groups=[
-                    {
-                        "original": group.get("original"),
-                        "additional": list(group.get("additional", [])),
-                        "synonyms": list(group.get("synonyms", [])),
-                        "related": list(group.get("related", [])),
-                        "related_details": [
-                            {
-                                "term": detail.get("term"),
-                                "cluster": detail.get("cluster"),
-                                "search_volume": detail.get("search_volume"),
-                                "competition": detail.get("competition"),
-                                "relevance": detail.get("relevance"),
-                            }
-                            for detail in group.get("related_details", [])
-                            if isinstance(detail, dict)
-                        ],
-                    }
-                    for group in keyword_groups
-                ],
-                keyword_evaluations=[
-                    {
-                        "keyword": entry.get("keyword"),
-                        "quality": entry.get("quality"),
-                        "better_keywords": list(entry.get("better_keywords", [])),
-                    }
-                    for entry in keyword_evaluations
-                ],
-                synonym_messages=list(synonym_messages),
-                synonyms_enabled=synonyms_enabled,
-                synonyms_expanded=synonyms_expanded,
-                synonym_status=synonym_status,
-                synonyms_manual=synonym_groups_manual,
-                max_pages=max_pages,
-                concurrency=concurrency,
-                total_start_urls=len(selected_homepages),
-                start_date=start_date_value,
-                end_date=end_date_value,
-                respect_robots=respect_robots,
-            )
-            jobs[job_id] = job
-            thread = threading.Thread(target=run_crawl_job, args=(job,), daemon=True)
-            thread.start()
-
+@app.route("/")
+def index() -> ResponseReturnValue:
+    records_all = load_stammdaten()
+    active_records = [record for record in records_all if record.get("aktiv", True)]
+    categories = get_search_categories()
+    defaults = get_search_defaults()
+    google_credentials = get_google_search_credentials()
+    google_configured = bool(google_credentials.get("api_key") and google_credentials.get("cx"))
     return render_template(
         "index.html",
-        stammdaten_records=stammdaten_records,
+        active_page="search_create",
+        categories=categories,
+        default_category=categories[0] if categories else "",
+        search_defaults=defaults,
+        available_models=AVAILABLE_OPENAI_MODELS,
+        stammdaten_records=active_records,
         stammdaten_fields=STAMMDATEN_FIELDS,
         stammdaten_primary_fields=STAMMDATEN_PRIMARY_FIELDS,
         stammdaten_boolean_fields=STAMMDATEN_BOOLEAN_FIELDS,
-        selected_homepages=selected_homepages,
-        keywords_input=keywords_input,
-        max_pages=max_pages,
-        concurrency=concurrency,
-        crawl_defaults=crawl_defaults,
-        start_date_input=start_date_input,
-        end_date_input=end_date_input,
-        respect_robots=respect_robots,
-        synonyms_enabled=synonyms_enabled,
-        keyword_groups=keyword_groups,
-        expanded_keywords=expanded_keywords,
-        synonym_messages=synonym_messages,
-        synonyms_expanded=synonyms_expanded,
-        synonym_status=synonym_status,
-        synonym_groups_manual=synonym_groups_manual,
-        keyword_evaluations=keyword_evaluations,
-        default_synonym_prompt=synonym_defaults.get("prompt", DEFAULT_SYNONYM_PROMPT),
-        synonym_defaults=synonym_defaults,
-        keyword_finder_defaults=keyword_finder_defaults,
-        available_models=AVAILABLE_OPENAI_MODELS,
-        has_api_key=has_key,
-        has_keyword_planner_key=has_planner_key,
-        error=error,
-        submitted=submitted,
-        job_id=job_id,
-        max_concurrency=MAX_CONCURRENCY,
-        active_page="search",
+        has_api_key=has_api_key(),
+        google_configured=google_configured,
+        search_dimensions=SEARCH_DIMENSIONS,
     )
+
+
+def _extract_keywords(payload: Dict[str, Any]) -> List[str]:
+    raw = payload.get("keywords")
+    if isinstance(raw, str):
+        values = [line.strip() for line in raw.splitlines() if line.strip()]
+    elif isinstance(raw, list):
+        values = [str(item or "").strip() for item in raw if str(item or "").strip()]
+    else:
+        values = []
+    return normalise_keywords(values)
+
+
+def _extract_school_ids(payload: Dict[str, Any]) -> List[str]:
+    raw = payload.get("school_ids")
+    if isinstance(raw, list):
+        return normalise_school_ids(raw)
+    return []
+
+
+@app.post("/searches/test")
+def search_test() -> ResponseReturnValue:
+    payload = request.get_json(silent=True) or {}
+    if not isinstance(payload, dict):
+        return jsonify({"error": "Ungültige Anfrage."}), 400
+    keywords = _extract_keywords(payload)
+    school_ids = _extract_school_ids(payload)
+    if not keywords:
+        return jsonify({"error": "Bitte geben Sie mindestens ein Keyword an."}), 400
+    if not school_ids:
+        return jsonify({"error": "Bitte wählen Sie mindestens eine Schule aus."}), 400
+    stammdaten = load_stammdaten()
+    records_by_id = {
+        str(record.get("schul_id") or "").strip(): record
+        for record in stammdaten
+        if isinstance(record, dict) and str(record.get("schul_id") or "").strip()
+    }
+    queries: List[str] = []
+    for school_id in school_ids[:10]:
+        record = records_by_id.get(school_id)
+        if not record:
+            continue
+        homepage = str(record.get("homepage") or "").strip()
+        domain = _extract_domain_from_url(homepage) or homepage
+        if not domain:
+            domain = str(record.get("url") or "").strip()
+        if not domain:
+            domain = school_id
+        query = f"site:{domain} ({' OR '.join(keywords)})"
+        queries.append(query)
+    if not queries:
+        return jsonify({"error": "Für die ausgewählten Schulen konnte keine Domain ermittelt werden."}), 404
+    return jsonify({
+        "message": "Suchanfragen erstellt. Verwenden Sie die Probelauf-Funktion für eine detaillierte Prüfung.",
+        "queries": queries,
+    })
+
+
+@app.post("/searches/probe")
+def search_probe() -> ResponseReturnValue:
+    payload = request.get_json(silent=True) or {}
+    if not isinstance(payload, dict):
+        return jsonify({"error": "Ungültige Anfrage."}), 400
+    keywords = _extract_keywords(payload)
+    school_ids = _extract_school_ids(payload)
+    if not keywords:
+        return jsonify({"error": "Bitte geben Sie mindestens ein Keyword an."}), 400
+    if not school_ids:
+        return jsonify({"error": "Bitte wählen Sie mindestens eine Schule aus."}), 400
+
+    openai_key = get_api_key()
+    if not openai_key:
+        return jsonify({"error": "OpenAI-Schlüssel erforderlich. Bitte in den Einstellungen hinterlegen."}), 400
+
+    defaults = get_search_defaults()
+    prompt = str(payload.get("prompt") or defaults.get("prompt") or DEFAULT_SEARCH_EVALUATION_PROMPT)
+    try:
+        max_results = int(payload.get("max_results", defaults.get("max_results", 5)))
+    except (TypeError, ValueError):
+        max_results = defaults.get("max_results", 5)
+    max_results = max(1, min(max_results, 20))
+    model_value = str(payload.get("model") or defaults.get("model") or DEFAULT_SEARCH_MODEL)
+    try:
+        temperature_value = float(payload.get("temperature", defaults.get("temperature", DEFAULT_SEARCH_TEMPERATURE)))
+    except (TypeError, ValueError):
+        temperature_value = defaults.get("temperature", DEFAULT_SEARCH_TEMPERATURE)
+
+    stammdaten = load_stammdaten()
+    records_by_id = {
+        str(record.get("schul_id") or "").strip(): record
+        for record in stammdaten
+        if isinstance(record, dict) and str(record.get("schul_id") or "").strip()
+    }
+    first_id = school_ids[0]
+    record = records_by_id.get(first_id)
+    if not record:
+        return jsonify({"error": "Für die erste ausgewählte Schule wurden keine Stammdaten gefunden."}), 404
+
+    homepage = str(record.get("homepage") or "").strip()
+    domain = _extract_domain_from_url(homepage) or homepage
+    if not domain:
+        domain = str(record.get("url") or "").strip()
+    if not domain:
+        domain = record.get("schul_id") or ""
+    keyword_query = ' OR '.join(keywords)
+    query = f"site:{domain} ({keyword_query})" if domain else keyword_query
+
+    google_credentials = get_google_search_credentials()
+    google_key = str(google_credentials.get("api_key") or "").strip()
+    google_cx = str(google_credentials.get("cx") or "").strip()
+    search_results: List[Dict[str, Any]] = []
+    if google_key and google_cx:
+        search_results = perform_google_search(
+            query,
+            google_key,
+            google_cx,
+            max_results=max_results,
+            language="de",
+            region="de",
+        )
+    if not search_results and homepage:
+        search_results = [{"link": homepage, "title": record.get("schulname"), "snippet": ""}]
+    if not search_results:
+        return jsonify({"error": "Es konnten keine Ergebnisse für den Probelauf ermittelt werden."}), 404
+
+    candidate = search_results[0]
+    link = str(candidate.get("link") or "").strip()
+    if not link:
+        return jsonify({"error": "Das erste Suchergebnis enthält keine URL."}), 404
+    content = fetch_page_text(link)
+    if not content:
+        return jsonify({"error": "Die gefundene Seite konnte nicht gelesen werden."}), 502
+    evaluation = evaluate_page_with_llm(
+        content,
+        prompt,
+        openai_key,
+        model=model_value,
+        temperature=temperature_value,
+    )
+    if not evaluation:
+        return jsonify({"error": "Die KI konnte keine Bewertung erstellen."}), 502
+
+    preview = {
+        "school_id": first_id,
+        "school_name": record.get("schulname"),
+        "school_city": record.get("ort"),
+        "target_url": link,
+        "query": query,
+        "dimensions": evaluation,
+        "google_title": candidate.get("title"),
+        "google_snippet": candidate.get("snippet"),
+    }
+    return jsonify({"message": "Probelauf abgeschlossen.", "preview": preview})
+
+
+@app.get("/searches/categories")
+def list_search_categories_route() -> ResponseReturnValue:
+    return jsonify({"categories": get_search_categories()})
+
+
+@app.post("/searches/categories")
+def create_search_category_route() -> ResponseReturnValue:
+    payload = request.get_json(silent=True) or {}
+    name = str(payload.get("name") or "").strip()
+    if not name:
+        return jsonify({"error": "Bitte geben Sie einen Kategorienamen an."}), 400
+    try:
+        categories = add_search_category(name)
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    return jsonify({"categories": categories})
+
+
+@app.delete("/searches/categories/<path:category_name>")
+def delete_search_category_route(category_name: str) -> ResponseReturnValue:
+    name = str(category_name or "").strip()
+    if not name:
+        return jsonify({"error": "Ungültiger Kategoriename."}), 400
+    try:
+        categories = delete_search_category(name)
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    return jsonify({"categories": categories})
 
 
 @app.route("/searches")
@@ -5314,6 +5153,18 @@ def search_job_status(job_id: str) -> ResponseReturnValue:
     return jsonify({"error": "Job nicht gefunden."}), 404
 
 
+@app.post("/searches/jobs/<job_id>/cancel")
+def cancel_search_job(job_id: str) -> ResponseReturnValue:
+    identifier = str(job_id or "").strip()
+    if not identifier:
+        return jsonify({"error": "Ungültige Job-ID."}), 400
+    job = get_search_job(identifier)
+    if not job:
+        return jsonify({"error": "Job nicht gefunden."}), 404
+    job.request_cancel()
+    return jsonify({"status": "cancelling"})
+
+
 @app.get("/searches/runs/<run_id>")
 def search_run_info(run_id: str) -> ResponseReturnValue:
     identifier = str(run_id or "").strip()
@@ -5388,6 +5239,7 @@ def search_run_results(run_id: str) -> ResponseReturnValue:
             {
                 "school_id": school_id,
                 "school_name": entry.get("school_name"),
+                "school_city": entry.get("school_city"),
                 "count": 0,
             },
         )["count"] += 1
@@ -5425,6 +5277,51 @@ def search_run_results(run_id: str) -> ResponseReturnValue:
         stats.pop("value_sum", None)
         stats.pop("confidence_sum", None)
 
+    dimension_matrix: List[Dict[str, Any]] = []
+    for dimension_label, stats in dimension_summary.items():
+        buckets: Dict[int, Dict[str, Any]] = {}
+        for entry in filtered:
+            for dim in entry.get("dimensions", []):
+                if not isinstance(dim, dict):
+                    continue
+                if str(dim.get("dimension")) != dimension_label:
+                    continue
+                try:
+                    value = int(dim.get("value", 0))
+                except (TypeError, ValueError):
+                    value = 0
+                bucket = buckets.setdefault(
+                    value,
+                    {
+                        "value": value,
+                        "count": 0,
+                        "entries": [],
+                    },
+                )
+                bucket["count"] += 1
+                bucket["entries"].append(
+                    {
+                        "result_id": entry.get("id"),
+                        "school_id": entry.get("school_id"),
+                        "school_name": entry.get("school_name"),
+                        "school_city": entry.get("school_city"),
+                        "target_url": entry.get("target_url"),
+                        "keyword": entry.get("keyword"),
+                        "confidence": dim.get("confidence"),
+                    }
+                )
+        total = sum(bucket["count"] for bucket in buckets.values()) or 1
+        values_sorted = sorted(buckets.values(), key=lambda item: item["value"], reverse=True)
+        for bucket in values_sorted:
+            bucket["percentage"] = bucket["count"] / total
+        dimension_matrix.append(
+            {
+                "dimension": dimension_label,
+                "total": total,
+                "values": values_sorted,
+            }
+        )
+
     return jsonify(
         {
             "run": run,
@@ -5432,10 +5329,68 @@ def search_run_results(run_id: str) -> ResponseReturnValue:
             "filtered_results": len(filtered),
             "results": filtered,
             "dimension_summary": list(dimension_summary.values()),
+            "dimension_matrix": dimension_matrix,
             "school_summary": list(school_summary.values()),
             "keyword_summary": list(keyword_summary.values()),
         }
     )
+
+
+@app.patch("/searches/results/<int:result_id>")
+def update_search_result_route(result_id: int) -> ResponseReturnValue:
+    existing = get_search_result_entry(result_id)
+    if not existing:
+        return jsonify({"error": "Suchergebnis nicht gefunden."}), 404
+    payload = request.get_json(silent=True) or {}
+    if not isinstance(payload, dict):
+        return jsonify({"error": "Ungültige Anfrage."}), 400
+    dimensions_payload = payload.get("dimensions")
+    if dimensions_payload is not None:
+        if not isinstance(dimensions_payload, list):
+            return jsonify({"error": "Die Dimensionen müssen als Liste übermittelt werden."}), 400
+        cleaned_dimensions: List[Dict[str, Any]] = []
+        for entry in dimensions_payload:
+            if not isinstance(entry, dict):
+                continue
+            label = str(entry.get("dimension") or "").strip()
+            if not label:
+                continue
+            try:
+                value = int(entry.get("value", 0))
+            except (TypeError, ValueError):
+                try:
+                    value = int(float(entry.get("value", 0)))
+                except (TypeError, ValueError):
+                    value = 0
+            try:
+                confidence = float(entry.get("confidence", 0.0))
+            except (TypeError, ValueError):
+                confidence = 0.0
+            cleaned_dimensions.append(
+                {
+                    "dimension": label,
+                    "value": max(0, min(value, 5)),
+                    "confidence": max(0.0, min(confidence, 1.0)),
+                }
+            )
+        existing["dimensions"] = cleaned_dimensions
+    if "keyword" in payload:
+        existing["keyword"] = str(payload.get("keyword") or existing.get("keyword") or "").strip()
+    if "target_url" in payload:
+        existing["target_url"] = str(payload.get("target_url") or existing.get("target_url") or "").strip()
+    if "manual_note" in payload:
+        existing["manual_note"] = str(payload.get("manual_note") or "").strip()
+    with search_result_lock:
+        storage.update_search_result(result_id, existing)
+    updated = get_search_result_entry(result_id)
+    return jsonify({"result": updated})
+
+
+@app.delete("/searches/results/<int:result_id>")
+def delete_search_result_route(result_id: int) -> ResponseReturnValue:
+    with search_result_lock:
+        storage.delete_search_results([result_id])
+    return jsonify({"status": "deleted"})
 
 
 @app.route("/stammdaten", methods=["GET", "POST"])

@@ -2,7 +2,7 @@ import json
 import sqlite3
 import threading
 from pathlib import Path
-from typing import Any, Dict, Iterable, Optional
+from typing import Any, Dict, Iterable, List, Optional
 
 
 class SQLiteStorage:
@@ -335,7 +335,13 @@ class SQLiteStorage:
         run_id = str(run_id or "").strip()
         if not run_id:
             raise ValueError("run_id required for search results")
-        payloads = [json.dumps(entry, ensure_ascii=False) for entry in entries]
+        payloads: List[str] = []
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            cleaned = dict(entry)
+            cleaned.pop("id", None)
+            payloads.append(json.dumps(cleaned, ensure_ascii=False))
         if not payloads:
             return
         conn = self._get_connection()
@@ -348,7 +354,7 @@ class SQLiteStorage:
     def load_search_results(self, run_id: str) -> Iterable[Dict[str, Any]]:
         conn = self._get_connection()
         cursor = conn.execute(
-            "SELECT payload FROM search_results WHERE run_id = ? ORDER BY id",
+            "SELECT id, payload FROM search_results WHERE run_id = ? ORDER BY id",
             (run_id,),
         )
         for row in cursor:
@@ -356,12 +362,66 @@ class SQLiteStorage:
                 data = json.loads(row["payload"])
             except json.JSONDecodeError:
                 continue
-            yield data
+            if isinstance(data, dict):
+                data.setdefault("id", row["id"])
+                data.setdefault("run_id", run_id)
+                yield data
 
     def clear_search_results(self, run_id: str) -> None:
         conn = self._get_connection()
         with conn:
             conn.execute("DELETE FROM search_results WHERE run_id = ?", (run_id,))
+
+    def update_search_result(self, result_id: int, payload: Dict[str, Any]) -> None:
+        conn = self._get_connection()
+        data = dict(payload)
+        data.pop("id", None)
+        serialized = json.dumps(data, ensure_ascii=False)
+        with conn:
+            conn.execute(
+                "UPDATE search_results SET payload = ? WHERE id = ?",
+                (serialized, int(result_id)),
+            )
+
+    def delete_search_results(self, result_ids: Iterable[int]) -> None:
+        ids = [int(rid) for rid in result_ids if rid is not None]
+        if not ids:
+            return
+        conn = self._get_connection()
+        with conn:
+            conn.executemany(
+                "DELETE FROM search_results WHERE id = ?",
+                [(rid,) for rid in ids],
+            )
+
+    def get_search_result(self, result_id: int) -> Optional[Dict[str, Any]]:
+        conn = self._get_connection()
+        cursor = conn.execute(
+            "SELECT id, run_id, payload FROM search_results WHERE id = ?",
+            (int(result_id),),
+        )
+        row = cursor.fetchone()
+        if not row:
+            return None
+        try:
+            data = json.loads(row["payload"])
+        except json.JSONDecodeError:
+            data = {}
+        if not isinstance(data, dict):
+            data = {}
+        data.setdefault("id", row["id"])
+        data.setdefault("run_id", row["run_id"])
+        return data
+
+    def list_search_categories(self) -> List[str]:
+        data = self.get_json("searches", "categories", [])
+        if isinstance(data, list):
+            return [str(item).strip() for item in data if str(item).strip()]
+        return []
+
+    def save_search_categories(self, categories: Iterable[str]) -> None:
+        cleaned = [str(item).strip() for item in categories if str(item).strip()]
+        self.set_json("searches", "categories", cleaned)
 
 
 storage = SQLiteStorage(Path("crawler_data.db"))
