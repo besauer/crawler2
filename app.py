@@ -4786,9 +4786,13 @@ def run_data_quality_job(job: DataQualityJob) -> None:
             if isinstance(item, str) and item.strip()
         }
         try:
-            parallel_checks = int(settings.get("parallel_checks", DEFAULT_DATA_QUALITY_SETTINGS["parallel_checks"]))
+            parallel_checks = int(
+                settings.get("parallel_checks", DEFAULT_DATA_QUALITY_SETTINGS["parallel_checks"])
+            )
         except (TypeError, ValueError):
             parallel_checks = DEFAULT_DATA_QUALITY_SETTINGS["parallel_checks"]
+        if site_scope_only:
+            parallel_checks = max(parallel_checks, 40)
         parallel_checks = max(1, min(parallel_checks, 50))
 
         with job._lock:
