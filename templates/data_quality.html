@@ -155,6 +155,7 @@
                     <button type="button" class="btn btn-outline-secondary btn-sm" id="select-visible">Alle angezeigten auswählen</button>
                     <button type="button" class="btn btn-outline-secondary btn-sm" id="select-none">Keine auswählen</button>
                     <button type="button" class="btn btn-outline-primary" id="start-quality-check">Prüfung starten</button>
+                    <button type="button" class="btn btn-outline-warning" id="start-site-scope">Auftrittstyp prüfen</button>
                     <button type="button" class="btn btn-outline-info" id="start-google-search">Google-Suche (100 Treffer)</button>
                     <button type="button" class="btn btn-outline-success" id="accept-invalid">„Falsch“-Vorschläge übernehmen</button>
                     <button type="button" class="btn btn-outline-danger" id="cancel-quality-check" disabled>Abbrechen</button>
@@ -421,6 +422,7 @@
         const progressResultsSection = document.getElementById('progress-results-section');
         const progressResultsBody = document.getElementById('progress-results-body');
         const selectVisibleBtn = document.getElementById('select-visible');
+        const siteScopeBtn = document.getElementById('start-site-scope');
         const googleBtn = document.getElementById('start-google-search');
         const acceptInvalidBtn = document.getElementById('accept-invalid');
         const bulkAcceptUrl = "{{ url_for('bulk_accept_data_quality') }}";
@@ -902,6 +904,18 @@
             });
         }
 
+        function startSiteScopeWorkflow() {
+            if (!siteScopeBtn) return;
+            const ids = getSelectedIds();
+            siteScopeBtn.disabled = true;
+            sendQualityCheckRequest(ids, {
+                mode: 'site_scope',
+                progressLabel: 'Auftrittstyp wird geprüft …',
+            }).finally(() => {
+                siteScopeBtn.disabled = false;
+            });
+        }
+
         function startGoogleWorkflow() {
             if (!googleBtn) return;
             const ids = getSelectedIds();
@@ -1040,6 +1054,7 @@
         selectNoneBtn?.addEventListener('click', () => setAllCheckboxes(false));
         selectMaster?.addEventListener('change', event => setCheckboxesForRows(getVisibleRows(), event.target.checked));
         startBtn?.addEventListener('click', startQualityWorkflow);
+        siteScopeBtn?.addEventListener('click', startSiteScopeWorkflow);
         googleBtn?.addEventListener('click', startGoogleWorkflow);
         cancelBtn?.addEventListener('click', cancelJob);
         refreshBtn?.addEventListener('click', refreshData);

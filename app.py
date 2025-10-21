@@ -4765,6 +4765,9 @@ def run_data_quality_job(job: DataQualityJob) -> None:
         settings = get_data_quality_settings()
         mode = getattr(job, "mode", "full") or "full"
         force_google = mode == "google_search"
+        site_scope_only = mode == "site_scope"
+        if site_scope_only:
+            force_google = False
         google_credentials = get_google_search_credentials()
         google_key = google_credentials.get("api_key", "").strip()
         google_cx = google_credentials.get("cx", "").strip()
@@ -4936,6 +4939,8 @@ def run_data_quality_job(job: DataQualityJob) -> None:
             stage_source = "site"
 
             should_run_google = force_google or status_after_primary != QUALITY_STATUS_OK
+            if site_scope_only:
+                should_run_google = False
             if should_run_google:
                 if not google_key or not google_cx:
                     job.update_progress(
@@ -5018,13 +5023,12 @@ def run_data_quality_job(job: DataQualityJob) -> None:
 
             timestamp = datetime.utcnow().isoformat() + "Z"
             record_update = {
-                "status": status_after_primary,
-                "last_checked": timestamp,
-                "confidence": primary_confidence,
-                "primary_decision": status_primary,
-                "primary_confidence": primary_confidence,
-                "primary_reason": primary_reason,
-                "primary_signals": primary_signals,
+                "school_name": schulname,
+                "school_location": ort,
+                "original_url": homepage,
+                "impressum_location_match": location_match,
+                "impressum_location_context": location_context,
+                "impressum_location_mismatch": mismatch_hint,
                 "snapshot": {
                     "title": snapshot.get("title"),
                     "description": snapshot.get("description"),
@@ -5034,24 +5038,37 @@ def run_data_quality_job(job: DataQualityJob) -> None:
                     "errors": snapshot.get("errors"),
                     "fetched_urls": snapshot.get("fetched_urls"),
                 },
-                "suggested_url": suggestion_url,
-                "suggested_confidence": suggestion_confidence,
-                "suggested_reason": suggestion_reason,
-                "suggested_signals": suggestion_signals,
-                "last_source": stage_source,
-                "school_name": schulname,
-                "school_location": ort,
-                "original_url": homepage,
-                "impressum_location_match": location_match,
-                "impressum_location_context": location_context,
-                "impressum_location_mismatch": mismatch_hint,
                 "site_scope": site_scope,
                 "site_scope_reason": site_scope_reason,
                 "site_scope_updated_at": timestamp,
                 "site_scope_source": "llm",
             }
+            if site_scope_only:
+                record_update["last_checked"] = timestamp
+            else:
+                record_update.update(
+                    {
+                        "status": status_after_primary,
+                        "last_checked": timestamp,
+                        "confidence": primary_confidence,
+                        "primary_decision": status_primary,
+                        "primary_confidence": primary_confidence,
+                        "primary_reason": primary_reason,
+                        "primary_signals": primary_signals,
+                        "suggested_url": suggestion_url,
+                        "suggested_confidence": suggestion_confidence,
+                        "suggested_reason": suggestion_reason,
+                        "suggested_signals": suggestion_signals,
+                        "last_source": stage_source,
+                    }
+                )
             update_data_quality_record(school_id, record_update)
 
+            progress_message: Optional[str] = None
+            if site_scope_only:
+                progress_message = (
+                    f"Auftrittstyp {site_scope_label(site_scope)} für {schulname or school_id}"
+                )
             job.update_progress(
                 processed_increment=1,
                 result={
@@ -5068,6 +5085,7 @@ def run_data_quality_job(job: DataQualityJob) -> None:
                     "site_scope": site_scope,
                     "site_scope_label": site_scope_label(site_scope),
                 },
+                message=progress_message,
             )
 
         try:
@@ -6323,6 +6341,8 @@ def start_data_quality_job() -> ResponseReturnValue:
         candidate = mode_raw.strip().lower()
         if candidate in {"google", "google_search", "google-only"}:
             mode = "google_search"
+        elif candidate in {"site_scope", "site-scope", "scope", "auftritt", "auftrittstyp"}:
+            mode = "site_scope"
         else:
             mode = "full"
     else:
@@ -6332,7 +6352,7 @@ def start_data_quality_job() -> ResponseReturnValue:
         batch_size = int(settings.get("batch_size", len(school_ids)))
     except (TypeError, ValueError):
         batch_size = len(school_ids)
-    if batch_size > 0:
+    if batch_size > 0 and mode != "site_scope":
         school_ids = school_ids[:batch_size]
 
     job_id = str(uuid.uuid4())
