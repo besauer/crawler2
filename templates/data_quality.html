@@ -40,8 +40,12 @@
         .status-cell .quality-note { display: inline-block; margin-left: 0.5rem; }
         .school-cell { white-space: normal; }
         .school-name { white-space: normal; word-break: break-word; }
-        .school-url { font-size: 0.9rem; }
+        .school-url { font-size: 0.9rem; display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem; }
         .school-url span { display: block; }
+        .school-url a { display: inline-block; }
+        .site-scope-badge { cursor: pointer; border: none; }
+        .site-scope-badge:focus { outline: none; box-shadow: 0 0 0 0.25rem rgba(13, 110, 253, 0.25); }
+        .site-scope-badge.text-bg-warning { color: #212529; }
         .school-status { margin-top: 0.25rem; }
         .school-meta { color: #6c757d; }
         .school-meta strong { color: inherit; font-weight: 600; }
@@ -165,6 +169,15 @@
                     <button type="button" class="btn btn-outline-secondary" data-filter-status="corrected">Richtiger Wert</button>
                 </div>
             </div>
+            <div class="mt-2 d-flex flex-wrap align-items-center gap-2">
+                <span class="text-muted small text-uppercase fw-semibold">Auftrittstyp</span>
+                <div class="btn-group btn-group-sm" role="group" id="scope-filter-group">
+                    <button type="button" class="btn btn-outline-secondary active" data-filter-scope="all">Alle</button>
+                    <button type="button" class="btn btn-outline-secondary" data-filter-scope="exclusive">Exklusive Webseiten</button>
+                    <button type="button" class="btn btn-outline-secondary" data-filter-scope="shared">Geteilte Auftritte</button>
+                    <button type="button" class="btn btn-outline-secondary" data-filter-scope="unknown">Unklar</button>
+                </div>
+            </div>
             <div class="mt-3" id="progress-container" hidden>
                 <div class="d-flex justify-content-between mb-1">
                     <span id="progress-label" class="fw-semibold">Prüfung läuft …</span>
@@ -225,7 +238,11 @@
                     </thead>
                     <tbody id="schools-body">
                     {% for record in records %}
-                        <tr data-school-id="{{ record.schul_id }}" data-status="{{ record.status }}" data-school-label="{{ record.schulname|default('')|e }}" data-has-suggestion="{{ '1' if record.quality.suggested_url else '' }}" data-suggested-url="{{ record.quality.suggested_url|default('')|e }}" data-correction-applied="{{ '1' if record.correction_applied else '' }}">
+                        {% set scope_value = (record.site_scope or site_scope_unknown) %}
+                        {% set scope_label = record.site_scope_label or site_scope_labels.get(scope_value, site_scope_labels[site_scope_unknown]) %}
+                        {% set scope_class = site_scope_classes.get(scope_value, site_scope_classes[site_scope_unknown]) %}
+                        {% set scope_reason = record.site_scope_reason or record.quality.site_scope_reason or '' %}
+                        <tr data-school-id="{{ record.schul_id }}" data-status="{{ record.status }}" data-school-label="{{ record.schulname|default('')|e }}" data-has-suggestion="{{ '1' if record.quality.suggested_url else '' }}" data-suggested-url="{{ record.quality.suggested_url|default('')|e }}" data-correction-applied="{{ '1' if record.correction_applied else '' }}" data-site-scope="{{ scope_value }}" data-site-scope-reason="{{ scope_reason|e }}">
                             <td class="text-nowrap">
                                 <div class="dropdown">
                                     <button class="btn btn-sm btn-outline-primary dropdown-toggle" type="button" data-bs-toggle="dropdown" aria-expanded="false">
@@ -250,6 +267,7 @@
                                     {% else %}
                                         <span class="text-muted">—</span>
                                     {% endif %}
+                                    <button type="button" class="badge rounded-pill site-scope-badge {{ scope_class }}" data-site-scope="{{ scope_value }}" data-school-id="{{ record.schul_id }}" data-scope-reason="{{ scope_reason|e }}" title="{{ scope_reason|e }}">{{ scope_label }}</button>
                                 </div>
                                 <div class="school-status">
                                     <span class="badge bg-secondary status-badge" data-status="{{ record.status }}">{{ record.status_label }}</span>
@@ -315,6 +333,45 @@
     </div>
 </div>
 
+<div class="modal fade" id="siteScopeModal" tabindex="-1" aria-labelledby="siteScopeLabel" aria-hidden="true">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <form id="site-scope-form">
+                <div class="modal-header">
+                    <h5 class="modal-title" id="siteScopeLabel">Auftrittstyp anpassen</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Schließen"></button>
+                </div>
+                <div class="modal-body">
+                    <input type="hidden" id="site-scope-school-id">
+                    <div class="mb-3">
+                        <label class="form-label">Auftrittstyp auswählen</label>
+                        <div class="form-check">
+                            <input class="form-check-input" type="radio" name="site_scope_choice" id="scopeExclusive" value="exclusive">
+                            <label class="form-check-label" for="scopeExclusive">Exklusive Webseite</label>
+                        </div>
+                        <div class="form-check">
+                            <input class="form-check-input" type="radio" name="site_scope_choice" id="scopeShared" value="shared">
+                            <label class="form-check-label" for="scopeShared">Geteilter Auftritt</label>
+                        </div>
+                        <div class="form-check">
+                            <input class="form-check-input" type="radio" name="site_scope_choice" id="scopeUnknown" value="unknown">
+                            <label class="form-check-label" for="scopeUnknown">Unklar</label>
+                        </div>
+                    </div>
+                    <div class="mb-3">
+                        <label for="site-scope-reason" class="form-label">Begründung (optional)</label>
+                        <textarea class="form-control" id="site-scope-reason" rows="3" placeholder="Begründung für die manuelle Entscheidung"></textarea>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Abbrechen</button>
+                    <button type="submit" class="btn btn-primary">Speichern</button>
+                </div>
+            </form>
+        </div>
+    </div>
+</div>
+
 <div class="offcanvas offcanvas-end offcanvas-lg" tabindex="-1" id="detailsPanel" aria-labelledby="detailsLabel">
     <div class="offcanvas-header">
         <div>
@@ -347,12 +404,18 @@
         const progressMessages = document.getElementById('progress-messages');
         const tableBody = document.getElementById('schools-body');
         const editModalEl = document.getElementById('editUrlModal');
-        const editModal = editModalEl ? new bootstrap.Modal(editModalEl) : null;
+        const editModal = editModalEl && window.bootstrap && window.bootstrap.Modal ? new window.bootstrap.Modal(editModalEl) : null;
         const editForm = document.getElementById('edit-url-form');
         const editInput = document.getElementById('edit-url-input');
         const editSchoolId = document.getElementById('edit-url-school-id');
+        const siteScopeModalEl = document.getElementById('siteScopeModal');
+        const siteScopeModal = siteScopeModalEl && window.bootstrap && window.bootstrap.Modal ? new window.bootstrap.Modal(siteScopeModalEl) : null;
+        const siteScopeForm = document.getElementById('site-scope-form');
+        const siteScopeSchoolId = document.getElementById('site-scope-school-id');
+        const siteScopeReasonInput = document.getElementById('site-scope-reason');
+        const siteScopeChoices = Array.from(document.querySelectorAll('input[name="site_scope_choice"]'));
         const detailsPanelEl = document.getElementById('detailsPanel');
-        const detailsPanel = detailsPanelEl ? new bootstrap.Offcanvas(detailsPanelEl) : null;
+        const detailsPanel = detailsPanelEl && window.bootstrap && window.bootstrap.Offcanvas ? new window.bootstrap.Offcanvas(detailsPanelEl) : null;
         const detailsContent = document.getElementById('detailsContent');
         const detailsSub = document.getElementById('detailsSub');
         const progressResultsSection = document.getElementById('progress-results-section');
@@ -362,12 +425,20 @@
         const acceptInvalidBtn = document.getElementById('accept-invalid');
         const bulkAcceptUrl = "{{ url_for('bulk_accept_data_quality') }}";
         const statusLabels = {{ status_labels|tojson }};
+        const siteScopeLabels = {{ site_scope_labels|tojson }};
+        const siteScopeClasses = {{ site_scope_classes|tojson }};
+        const siteScopeUnknown = {{ site_scope_unknown|tojson }};
+        const SITE_SCOPE_EXCLUSIVE = 'exclusive';
+        const SITE_SCOPE_SHARED = 'shared';
+        const SITE_SCOPE_UNKNOWN = siteScopeUnknown || 'unknown';
         const filterButtons = document.querySelectorAll('[data-filter-status]');
+        const scopeButtons = document.querySelectorAll('[data-filter-scope]');
 
         let currentJobId = null;
         let pollTimer = null;
         const recordIndex = new Map();
-        let currentFilter = 'all';
+        let currentStatusFilter = 'all';
+        let currentScopeFilter = 'all';
 
         function escapeHtml(value) {
             return (value == null ? '' : String(value)).replace(/[&<>"']/g, (char) => {
@@ -403,6 +474,32 @@
             return chunkText(value, 40);
         }
 
+        function normalizeScope(value) {
+            const text = (value == null ? '' : String(value)).toLowerCase();
+            if (!text) {
+                return SITE_SCOPE_UNKNOWN;
+            }
+            if (text === SITE_SCOPE_EXCLUSIVE || text.includes('exklus')) {
+                return SITE_SCOPE_EXCLUSIVE;
+            }
+            if (text === SITE_SCOPE_SHARED || text.includes('teil') || text.includes('shared') || text.includes('gemeinsam')) {
+                return SITE_SCOPE_SHARED;
+            }
+            if (text === SITE_SCOPE_UNKNOWN || text.includes('unklar')) {
+                return SITE_SCOPE_UNKNOWN;
+            }
+            return SITE_SCOPE_UNKNOWN;
+        }
+
+        function buildScopeBadge(record, scopeValue, scopeReason) {
+            const label = siteScopeLabels[scopeValue] || siteScopeLabels[SITE_SCOPE_UNKNOWN];
+            const cssClass = siteScopeClasses[scopeValue] || siteScopeClasses[SITE_SCOPE_UNKNOWN];
+            const schoolId = record?.schul_id ? escapeHtml(record.schul_id) : '';
+            const reasonText = scopeReason ? escapeHtml(scopeReason) : '';
+            const titleAttr = reasonText ? ` title="${reasonText}"` : '';
+            return `<button type="button" class="badge rounded-pill site-scope-badge ${escapeHtml(cssClass)}" data-site-scope="${escapeHtml(scopeValue)}" data-school-id="${schoolId}" data-scope-reason="${reasonText}"${titleAttr}>${escapeHtml(label)}</button>`;
+        }
+
         function getSelectedIds() {
             return Array.from(document.querySelectorAll('.record-checkbox:checked')).map(cb => cb.value).filter(Boolean);
         }
@@ -422,7 +519,7 @@
                     checkbox.checked = state;
                 }
             });
-            applyVisibilityFilter(currentFilter);
+            applyVisibilityFilters();
         }
 
         function setAllCheckboxes(state) {
@@ -479,6 +576,7 @@
                     homepage,
                     status: row.dataset.status || '',
                     suggested_url: row.dataset.suggestedUrl || '',
+                    site_scope: row.dataset.siteScope || SITE_SCOPE_UNKNOWN,
                 });
             });
         }
@@ -501,9 +599,12 @@
                     ? `<a href="${escapeHtml(suggestionUrl)}" target="_blank" rel="noopener">${formatUrl(suggestionUrl)}</a>${suggestionConfidenceText}`
                     : '<span class="text-muted">—</span>';
                 const homepage = record.homepage ? String(record.homepage) : '';
-                const homepageHtml = homepage
+                const scopeValue = normalizeScope(record?.site_scope ?? record?.quality?.site_scope);
+                const scopeReason = record?.site_scope_reason || record?.quality?.site_scope_reason || '';
+                const scopeBadge = buildScopeBadge(record, scopeValue, scopeReason);
+                const homepageHtml = (homepage
                     ? `<a href="${escapeHtml(homepage)}" target="_blank" rel="noopener">${formatUrl(homepage)}</a>`
-                    : '<span class="text-muted">—</span>';
+                    : '<span class="text-muted">—</span>') + scopeBadge;
                 const manualNoteText = record?.quality?.manual_note ? escapeHtml(record.quality.manual_note) : '';
                 const manualNote = manualNoteText ? `<span class="text-muted quality-note d-block">${manualNoteText}</span>` : '';
                 const lastChecked = record?.quality?.last_checked ? `<time datetime="${escapeHtml(record.quality.last_checked)}">${escapeHtml(record.quality.last_checked)}</time>` : '<span class="text-muted">Noch nicht geprüft</span>';
@@ -516,6 +617,8 @@
                 row.dataset.hasSuggestion = suggestionUrl ? '1' : '';
                 row.dataset.suggestedUrl = suggestionUrl;
                 row.dataset.correctionApplied = record?.quality?.correction_applied || record?.correction_applied ? '1' : '';
+                row.dataset.siteScope = scopeValue;
+                row.dataset.siteScopeReason = scopeReason;
 
                 row.innerHTML = `
                     <td class="text-nowrap">
@@ -541,30 +644,53 @@
                 `;
                 tableBody.appendChild(row);
             });
-            applyVisibilityFilter(currentFilter);
+            applyVisibilityFilters();
         }
 
-        function applyVisibilityFilter(mode) {
-            const target = (mode || 'all').toLowerCase();
-            currentFilter = target;
+        function applyVisibilityFilters() {
             getAllRows().forEach(row => {
                 const status = (row.dataset.status || '').toLowerCase();
                 const corrected = row.dataset.correctionApplied === '1';
+                const scopeRaw = (row.dataset.siteScope || '').toLowerCase();
+                const scope = scopeRaw || siteScopeUnknown;
                 let visible = true;
-                if (target === 'ok') {
+                if (currentStatusFilter === 'ok') {
                     visible = status === 'ok';
-                } else if (target === 'invalid') {
+                } else if (currentStatusFilter === 'invalid') {
                     visible = status === 'invalid';
-                } else if (target === 'corrected') {
+                } else if (currentStatusFilter === 'corrected') {
                     visible = corrected;
+                }
+                if (visible && currentScopeFilter !== 'all') {
+                    if (currentScopeFilter === SITE_SCOPE_EXCLUSIVE || currentScopeFilter === 'exclusive') {
+                        visible = scope === SITE_SCOPE_EXCLUSIVE;
+                    } else if (currentScopeFilter === SITE_SCOPE_SHARED || currentScopeFilter === 'shared') {
+                        visible = scope === SITE_SCOPE_SHARED;
+                    } else if (currentScopeFilter === SITE_SCOPE_UNKNOWN || currentScopeFilter === 'unknown') {
+                        visible = scope === SITE_SCOPE_UNKNOWN;
+                    }
                 }
                 row.classList.toggle('d-none', !visible);
             });
             filterButtons.forEach(button => {
                 const value = (button.dataset.filterStatus || 'all').toLowerCase();
-                button.classList.toggle('active', value === target);
+                button.classList.toggle('active', value === currentStatusFilter);
+            });
+            scopeButtons.forEach(button => {
+                const value = (button.dataset.filterScope || 'all').toLowerCase();
+                button.classList.toggle('active', value === currentScopeFilter);
             });
             syncMasterCheckbox();
+        }
+
+        function setStatusFilter(value) {
+            currentStatusFilter = (value || 'all').toLowerCase();
+            applyVisibilityFilters();
+        }
+
+        function setScopeFilter(value) {
+            currentScopeFilter = (value || 'all').toLowerCase();
+            applyVisibilityFilters();
         }
 
         function performBulkAccept(ids) {
@@ -625,7 +751,9 @@
                 const confidence = result.confidence != null && !Number.isNaN(Number(result.confidence))
                     ? `<div class="small text-muted">Bewertung: ${Number(result.confidence).toFixed(2)}</div>`
                     : '';
-                statusCell.innerHTML = `<span class="badge bg-secondary">${escapeHtml(statusLabel)}</span>${confidence}`;
+                const scopeValue = normalizeScope(result.site_scope || result.siteScope);
+                const scopeLabel = result.site_scope_label || siteScopeLabels[scopeValue] || siteScopeLabels[SITE_SCOPE_UNKNOWN];
+                statusCell.innerHTML = `<span class="badge bg-secondary">${escapeHtml(statusLabel)}</span>${confidence}<div class="small text-muted">${escapeHtml(scopeLabel)}</div>`;
                 tr.appendChild(statusCell);
 
                 const suggestionCell = document.createElement('td');
@@ -803,6 +931,37 @@
             setTimeout(() => editInput.focus(), 150);
         }
 
+        function openSiteScopeEditor(schoolId, scopeValue, reason) {
+            if (!schoolId) return;
+            const normalized = normalizeScope(scopeValue);
+            if (siteScopeModal && siteScopeForm) {
+                siteScopeSchoolId.value = schoolId;
+                siteScopeReasonInput.value = reason || '';
+                let matched = false;
+                siteScopeChoices.forEach(radio => {
+                    const isMatch = normalizeScope(radio.value) === normalized;
+                    radio.checked = isMatch;
+                    if (isMatch) {
+                        matched = true;
+                    }
+                });
+                if (!matched) {
+                    const fallback = siteScopeChoices.find(radio => normalizeScope(radio.value) === SITE_SCOPE_UNKNOWN);
+                    if (fallback) {
+                        fallback.checked = true;
+                    }
+                }
+                siteScopeModal.show();
+            } else {
+                const nextScope = normalized === SITE_SCOPE_EXCLUSIVE
+                    ? SITE_SCOPE_SHARED
+                    : normalized === SITE_SCOPE_SHARED
+                        ? SITE_SCOPE_UNKNOWN
+                        : SITE_SCOPE_EXCLUSIVE;
+                updateSiteScopeValue(schoolId, nextScope, reason || '');
+            }
+        }
+
         function openDetails(schoolId, schoolName) {
             fetch(`{{ url_for('data_quality_details', school_id='__ID__') }}`.replace('__ID__', schoolId))
                 .then(resp => resp.json())
@@ -840,7 +999,7 @@
 
         function triggerAction(schoolId, action, payload = {}) {
             const body = Object.assign({ action }, payload);
-            fetch(`{{ url_for('manage_data_quality_record', school_id='__ID__') }}`.replace('__ID__', schoolId), {
+            return fetch(`{{ url_for('manage_data_quality_record', school_id='__ID__') }}`.replace('__ID__', schoolId), {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(body)
@@ -862,7 +1021,18 @@
                 if (data.error) {
                     appendMessage(data.error);
                 }
-            }).catch(() => appendMessage('Aktion fehlgeschlagen.'));
+                return data;
+            }).catch(() => {
+                appendMessage('Aktion fehlgeschlagen.');
+                return null;
+            });
+        }
+
+        function updateSiteScopeValue(schoolId, scopeValue, reason) {
+            return triggerAction(schoolId, 'update_site_scope', {
+                site_scope: scopeValue,
+                reason: reason || ''
+            });
         }
 
         selectAllBtn?.addEventListener('click', () => setAllCheckboxes(true));
@@ -874,7 +1044,28 @@
         cancelBtn?.addEventListener('click', cancelJob);
         refreshBtn?.addEventListener('click', refreshData);
         filterButtons.forEach(button => {
-            button.addEventListener('click', () => applyVisibilityFilter(button.dataset.filterStatus || 'all'));
+            button.addEventListener('click', () => setStatusFilter(button.dataset.filterStatus || 'all'));
+        });
+        scopeButtons.forEach(button => {
+            button.addEventListener('click', () => setScopeFilter(button.dataset.filterScope || 'all'));
+        });
+        siteScopeForm?.addEventListener('submit', event => {
+            event.preventDefault();
+            const schoolId = siteScopeSchoolId?.value || '';
+            if (!schoolId) {
+                if (siteScopeModal) {
+                    siteScopeModal.hide();
+                }
+                return;
+            }
+            const selected = siteScopeChoices.find(radio => radio.checked);
+            const scopeValue = normalizeScope(selected ? selected.value : SITE_SCOPE_UNKNOWN);
+            const reason = siteScopeReasonInput?.value || '';
+            updateSiteScopeValue(schoolId, scopeValue, reason).finally(() => {
+                if (siteScopeModal) {
+                    siteScopeModal.hide();
+                }
+            });
         });
 
         acceptInvalidBtn?.addEventListener('click', () => {
@@ -888,6 +1079,22 @@
             if (event.target.classList.contains('record-checkbox')) {
                 syncMasterCheckbox();
             }
+        });
+
+        tableBody?.addEventListener('click', event => {
+            const badge = event.target.closest('.site-scope-badge');
+            if (!badge) {
+                return;
+            }
+            event.preventDefault();
+            if (typeof event.stopImmediatePropagation === 'function') {
+                event.stopImmediatePropagation();
+            }
+            const schoolId = badge.dataset.schoolId || '';
+            const scopeValue = badge.dataset.siteScope || SITE_SCOPE_UNKNOWN;
+            const reason = badge.dataset.scopeReason || '';
+            openSiteScopeEditor(schoolId, scopeValue, reason);
+            return;
         });
 
         tableBody?.addEventListener('click', event => {
@@ -935,7 +1142,7 @@
             }
         });
 
-        applyVisibilityFilter(currentFilter);
+        applyVisibilityFilters();
         rebuildRecordIndexFromDom();
     })();
 </script>

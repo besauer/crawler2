@@ -110,8 +110,10 @@ DATA_QUALITY_SITE_PROMPT = (
     "Du prüfst, ob eine Webseite zur angegebenen Schule gehört. Du erhältst Schulname und Ort sowie komprimierte "
     "Textauszüge aus Startseite und Impressum. Bewerte ausschließlich, ob die Seite mit hoher Wahrscheinlichkeit "
     "die offizielle Webseite der Schule ist. Antworte als JSON-Objekt mit den Schlüsseln \"bewertung\" (Werte: OK, "
-    "NEIN, UNSICHER), \"confidence\" (0.0–1.0), \"begruendung\" (kurze Begründung) und \"gefundene_signale\" "
-    "(Liste kurzer Stichworte)."
+    "NEIN, UNSICHER), \"confidence\" (0.0–1.0), \"begruendung\" (kurze Begründung), \"gefundene_signale\" "
+    "(Liste kurzer Stichworte), \"auftritt_typ\" (Werte: EXKLUSIV für eine eigenständige Schulwebseite oder GETEILT "
+    "für einen geteilten Auftritt auf einer fremden Domain) und \"auftritt_begruendung\" (kurze Begründung für den "
+    "Auftrittstyp)."
 )
 DATA_QUALITY_SEARCH_PROMPT = (
     "Du erhältst Schulname, Ort und eine Liste möglicher Webseiten aus einer Google-Suche. Wähle die URL aus, die am "
@@ -143,6 +145,20 @@ DATA_QUALITY_IMPRESSUM_KEYWORDS = {
     "anbieter",
 }
 MAX_DATA_QUALITY_HISTORY = 20
+
+SITE_SCOPE_EXCLUSIVE = "exclusive"
+SITE_SCOPE_SHARED = "shared"
+SITE_SCOPE_UNKNOWN = "unknown"
+SITE_SCOPE_LABELS = {
+    SITE_SCOPE_EXCLUSIVE: "Exklusive Webseite",
+    SITE_SCOPE_SHARED: "Geteilter Auftritt",
+    SITE_SCOPE_UNKNOWN: "Auftritt unbekannt",
+}
+SITE_SCOPE_CLASSES = {
+    SITE_SCOPE_EXCLUSIVE: "text-bg-success",
+    SITE_SCOPE_SHARED: "text-bg-warning",
+    SITE_SCOPE_UNKNOWN: "text-bg-secondary",
+}
 
 DEFAULT_SEARCH_EVALUATION_PROMPT = (
     "Bewertung schulischer KI-Integration Anweisung: Analysiere den folgenden Text einer Schulwebseite. "
@@ -2784,6 +2800,10 @@ def assess_school_website_with_llm(
             return None
     if not isinstance(parsed, dict):
         return None
+    scope_value = normalise_site_scope(parsed.get("site_scope") or parsed.get("auftritt_typ"))
+    parsed["site_scope"] = scope_value
+    reason_value = parsed.get("site_scope_reason") or parsed.get("auftritt_begruendung")
+    parsed["site_scope_reason"] = str(reason_value or "").strip()
     return parsed
 
 
@@ -3835,7 +3855,24 @@ def update_data_quality_record(school_id: str, updates: Dict[str, object]) -> Di
         record = data.get(school_id, {}) if isinstance(data, dict) else {}
         if not isinstance(record, dict):
             record = {}
-        record.update(updates)
+        updates_copy = dict(updates)
+        force_scope = bool(updates_copy.pop("_force_site_scope", False))
+        manual_existing = bool(record.get("site_scope_manual"))
+        manual_update = updates_copy.pop("site_scope_manual", None)
+        if manual_update is True:
+            record["site_scope_manual"] = True
+        elif manual_update is False:
+            record["site_scope_manual"] = False
+        elif "site_scope_manual" not in record:
+            record["site_scope_manual"] = False
+        if "site_scope" in updates_copy:
+            updates_copy["site_scope"] = normalise_site_scope(updates_copy.get("site_scope"))
+        if manual_existing and manual_update is None and not force_scope:
+            updates_copy.pop("site_scope", None)
+            updates_copy.pop("site_scope_reason", None)
+            updates_copy.pop("site_scope_source", None)
+            updates_copy.pop("site_scope_updated_at", None)
+        record.update(updates_copy)
         data[school_id] = record
         storage.set_json("data_quality", "results", data)
         return dict(record)
@@ -3932,6 +3969,21 @@ def _normalize_header(value: str) -> str:
     return " ".join(normalized.split())
 
 
+def normalise_site_scope(value: object) -> str:
+    text = str(value or "").strip().lower()
+    if not text:
+        return SITE_SCOPE_UNKNOWN
+    if text in {"exclusive", "exklusiv", "eigenständig", "nur schule", "schule"}:
+        return SITE_SCOPE_EXCLUSIVE
+    if text in {"shared", "geteilt", "unterseite", "gemeinsam", "portal", "fremd"}:
+        return SITE_SCOPE_SHARED
+    if "exklus" in text:
+        return SITE_SCOPE_EXCLUSIVE
+    if "teil" in text or "unterseite" in text or "gemeinde" in text:
+        return SITE_SCOPE_SHARED
+    return SITE_SCOPE_UNKNOWN
+
+
 def quality_status_label(status: str) -> str:
     mapping = {
         QUALITY_STATUS_PENDING: "Noch nicht geprüft",
@@ -3940,6 +3992,14 @@ def quality_status_label(status: str) -> str:
         QUALITY_STATUS_INVALID: "Falsch",
     }
     return mapping.get(status, "Unbekannt")
+
+
+def site_scope_label(value: str) -> str:
+    return SITE_SCOPE_LABELS.get(value or "", SITE_SCOPE_LABELS[SITE_SCOPE_UNKNOWN])
+
+
+def site_scope_class(value: str) -> str:
+    return SITE_SCOPE_CLASSES.get(value or "", SITE_SCOPE_CLASSES[SITE_SCOPE_UNKNOWN])
 
 
 def build_data_quality_dataset() -> List[Dict[str, object]]:
@@ -3968,6 +4028,12 @@ def build_data_quality_dataset() -> List[Dict[str, object]]:
         formatted.setdefault("manual_note", "")
         formatted.setdefault("correction_applied", False)
         formatted.setdefault("correction_applied_at", None)
+        scope_value = normalise_site_scope(formatted.get("site_scope"))
+        formatted["site_scope"] = scope_value
+        formatted["site_scope_label"] = site_scope_label(scope_value)
+        formatted["site_scope_class"] = site_scope_class(scope_value)
+        formatted.setdefault("site_scope_reason", str(formatted.get("site_scope_reason") or ""))
+        formatted.setdefault("site_scope_updated_at", formatted.get("site_scope_updated_at"))
         dataset.append(
             {
                 "schul_id": schul_id,
@@ -3977,6 +4043,10 @@ def build_data_quality_dataset() -> List[Dict[str, object]]:
                 "status": formatted["status"],
                 "status_label": formatted["status_label"],
                 "correction_applied": bool(formatted.get("correction_applied")),
+                "site_scope": formatted["site_scope"],
+                "site_scope_label": formatted["site_scope_label"],
+                "site_scope_class": formatted["site_scope_class"],
+                "site_scope_reason": formatted.get("site_scope_reason"),
                 "quality": formatted,
             }
         )
@@ -4800,6 +4870,8 @@ def run_data_quality_job(job: DataQualityJob) -> None:
             primary_confidence: Optional[float] = None
             primary_reason = "Keine Bewertung verfügbar."
             primary_signals: List[str] = []
+            site_scope = SITE_SCOPE_UNKNOWN
+            site_scope_reason = ""
 
             if llm_result:
                 status_primary = normalise_quality_decision(llm_result.get("bewertung", ""))
@@ -4811,6 +4883,8 @@ def run_data_quality_job(job: DataQualityJob) -> None:
                 signals_raw = llm_result.get("gefundene_signale")
                 if isinstance(signals_raw, list):
                     primary_signals = [str(item) for item in signals_raw if str(item).strip()]
+                site_scope = normalise_site_scope(llm_result.get("site_scope"))
+                site_scope_reason = str(llm_result.get("site_scope_reason") or "").strip()
 
             meets_threshold = primary_confidence is not None and primary_confidence >= threshold
             if status_primary == QUALITY_STATUS_OK and not meets_threshold:
@@ -4850,6 +4924,8 @@ def run_data_quality_job(job: DataQualityJob) -> None:
                     "errors": snapshot.get("errors"),
                     "fetched_urls": snapshot.get("fetched_urls"),
                 },
+                "site_scope": site_scope,
+                "site_scope_reason": site_scope_reason,
             }
             append_data_quality_history(school_id, history_entry_site)
 
@@ -4969,6 +5045,10 @@ def run_data_quality_job(job: DataQualityJob) -> None:
                 "impressum_location_match": location_match,
                 "impressum_location_context": location_context,
                 "impressum_location_mismatch": mismatch_hint,
+                "site_scope": site_scope,
+                "site_scope_reason": site_scope_reason,
+                "site_scope_updated_at": timestamp,
+                "site_scope_source": "llm",
             }
             update_data_quality_record(school_id, record_update)
 
@@ -4985,6 +5065,8 @@ def run_data_quality_job(job: DataQualityJob) -> None:
                     "suggested_reason": suggestion_reason,
                     "original_url": homepage,
                     "location_match": location_match,
+                    "site_scope": site_scope,
+                    "site_scope_label": site_scope_label(site_scope),
                 },
             )
 
@@ -6170,6 +6252,9 @@ def data_quality() -> ResponseReturnValue:
             QUALITY_STATUS_UNSURE: quality_status_label(QUALITY_STATUS_UNSURE),
             QUALITY_STATUS_INVALID: quality_status_label(QUALITY_STATUS_INVALID),
         },
+        site_scope_labels=SITE_SCOPE_LABELS,
+        site_scope_classes=SITE_SCOPE_CLASSES,
+        site_scope_unknown=SITE_SCOPE_UNKNOWN,
         active_page="data_quality",
     )
 
@@ -6333,6 +6418,31 @@ def manage_data_quality_record(school_id: str) -> ResponseReturnValue:
         ):
             return jsonify({"status": "ok", "records": build_data_quality_dataset()})
         return jsonify({"error": "URL konnte nicht aktualisiert werden."}), 500
+
+    if action == "update_site_scope":
+        scope_value = normalise_site_scope(payload.get("site_scope"))
+        reason_value = str(payload.get("reason") or "").strip()
+        update_data_quality_record(
+            school_id,
+            {
+                "site_scope": scope_value,
+                "site_scope_reason": reason_value,
+                "site_scope_manual": True,
+                "site_scope_updated_at": now_iso,
+                "site_scope_source": "manual",
+                "_force_site_scope": True,
+            },
+        )
+        append_data_quality_history(
+            school_id,
+            {
+                "stage": "manual",
+                "status": "site_scope",
+                "detail": f"Auftrittstyp gesetzt auf {site_scope_label(scope_value)}.",
+                "reason": reason_value,
+            },
+        )
+        return jsonify({"status": "ok", "records": build_data_quality_dataset()})
 
     if action == "mark_ok":
         update_data_quality_record(
