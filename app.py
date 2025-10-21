@@ -53,6 +53,7 @@ saved_search_lock = threading.Lock()
 search_definition_lock = threading.Lock()
 search_run_lock = threading.Lock()
 search_result_lock = threading.Lock()
+search_log_lock = threading.Lock()
 search_jobs_lock = threading.Lock()
 search_categories_lock = threading.Lock()
 DEFAULT_CONCURRENCY = 5
@@ -1523,11 +1524,27 @@ def apply_searches_import(data: Any, mode: str, dry_run: bool) -> Dict[str, Any]
 
     definitions = data.get("definitions") if isinstance(data.get("definitions"), list) else []
     runs = data.get("runs") if isinstance(data.get("runs"), list) else []
-    results = data.get("results") if isinstance(data.get("results"), dict) else {}
+    raw_results = data.get("results") if isinstance(data.get("results"), dict) else {}
+    raw_logs = data.get("logs") if isinstance(data.get("logs"), dict) else {}
+
+    normalised_results: Dict[str, List[Any]] = {}
+    for run_id, entries in raw_results.items():
+        run_id_str = str(run_id or "").strip()
+        if not run_id_str or not isinstance(entries, list):
+            continue
+        normalised_results[run_id_str] = entries
+
+    normalised_logs: Dict[str, List[Any]] = {}
+    for run_id, entries in raw_logs.items():
+        run_id_str = str(run_id or "").strip()
+        if not run_id_str or not isinstance(entries, list):
+            continue
+        normalised_logs[run_id_str] = entries
 
     def_count = len(definitions)
     run_count = len(runs)
-    result_entries = sum(len(value) for value in results.values() if isinstance(value, list))
+    result_entries = sum(len(value) for value in normalised_results.values())
+    log_entries = sum(len(value) for value in normalised_logs.values())
 
     if mode == "replace":
         if not dry_run:
@@ -1540,17 +1557,21 @@ def apply_searches_import(data: Any, mode: str, dry_run: bool) -> Dict[str, Any]
             for run in runs:
                 if isinstance(run, dict) and run.get("id") and run.get("definition_id"):
                     save_search_run(run)
-            for run_id, entries in results.items():
-                run_id_str = str(run_id or "").strip()
-                if not run_id_str or not isinstance(entries, list):
-                    continue
+            run_ids = set(normalised_results.keys()) | set(normalised_logs.keys())
+            for run_id_str in run_ids:
                 clear_search_results(run_id_str)
-                append_search_results(run_id_str, [entry for entry in entries if isinstance(entry, dict)])
+                cleaned_results = [entry for entry in normalised_results.get(run_id_str, []) if isinstance(entry, dict)]
+                if cleaned_results:
+                    append_search_results(run_id_str, cleaned_results)
+                cleaned_logs = [entry for entry in normalised_logs.get(run_id_str, []) if isinstance(entry, dict)]
+                if cleaned_logs:
+                    append_search_logs(run_id_str, cleaned_logs)
         return {
             "status": "replaced",
             "definitions": def_count,
             "runs": run_count,
             "results": result_entries,
+            "logs": log_entries,
         }
 
     existing_definitions = {str(item.get("id")): item for item in load_search_definitions() if str(item.get("id"))}
@@ -1614,16 +1635,33 @@ def apply_searches_import(data: Any, mode: str, dry_run: bool) -> Dict[str, Any]
             existing_runs[run_id] = run
 
     imported_results = 0
-    for run_id, entries in results.items():
-        run_id_str = str(run_id or "").strip()
-        if not run_id_str or not isinstance(entries, list):
-            continue
+    imported_logs = 0
+    processed_for_logs: Set[str] = set()
+    for run_id_str, entries in normalised_results.items():
         cleaned_entries = [entry for entry in entries if isinstance(entry, dict)]
         imported_results += len(cleaned_entries)
         if not dry_run:
             clear_search_results(run_id_str)
             if cleaned_entries:
                 append_search_results(run_id_str, cleaned_entries)
+            cleaned_logs = [entry for entry in normalised_logs.get(run_id_str, []) if isinstance(entry, dict)]
+            if cleaned_logs:
+                append_search_logs(run_id_str, cleaned_logs)
+                imported_logs += len(cleaned_logs)
+        else:
+            imported_logs += len([entry for entry in normalised_logs.get(run_id_str, []) if isinstance(entry, dict)])
+        processed_for_logs.add(run_id_str)
+
+    for run_id_str, entries in normalised_logs.items():
+        if run_id_str in processed_for_logs:
+            continue
+        cleaned_logs = [entry for entry in entries if isinstance(entry, dict)]
+        if not cleaned_logs:
+            continue
+        if not dry_run:
+            clear_search_logs(run_id_str)
+            append_search_logs(run_id_str, cleaned_logs)
+        imported_logs += len(cleaned_logs)
 
     return {
         "status": "merged",
@@ -1632,6 +1670,7 @@ def apply_searches_import(data: Any, mode: str, dry_run: bool) -> Dict[str, Any]
         "runs_added": added_runs,
         "runs_updated": updated_runs,
         "results_updated": imported_results,
+        "logs_updated": imported_logs,
     }
 
 
@@ -3514,6 +3553,23 @@ def load_search_results(run_id: str) -> List[Dict[str, Any]]:
 def clear_search_results(run_id: str) -> None:
     with search_result_lock:
         storage.clear_search_results(run_id)
+    with search_log_lock:
+        storage.clear_search_logs(run_id)
+
+
+def append_search_logs(run_id: str, entries: Iterable[Dict[str, Any]]) -> None:
+    with search_log_lock:
+        storage.append_search_logs(run_id, list(entries))
+
+
+def load_search_logs(run_id: str) -> List[Dict[str, Any]]:
+    with search_log_lock:
+        return list(storage.load_search_logs(run_id))
+
+
+def clear_search_logs(run_id: str) -> None:
+    with search_log_lock:
+        storage.clear_search_logs(run_id)
 
 
 def get_search_result_entry(result_id: int) -> Optional[Dict[str, Any]]:
@@ -3525,15 +3581,18 @@ def collect_all_search_data() -> Dict[str, Any]:
     definitions = load_search_definitions()
     runs = list_search_runs()
     results: Dict[str, List[Dict[str, Any]]] = {}
+    logs: Dict[str, List[Dict[str, Any]]] = {}
     for run in runs:
         run_id = str(run.get("id") or "").strip()
         if not run_id or run_id in results:
             continue
         results[run_id] = load_search_results(run_id)
+        logs[run_id] = load_search_logs(run_id)
     return {
         "definitions": definitions,
         "runs": runs,
         "results": results,
+        "logs": logs,
     }
 
 
@@ -5128,18 +5187,21 @@ def run_search_job(job: SearchJob) -> None:
                     "entries": [],
                     "message": f"Suche für {school_display} abgebrochen.",
                 }
-            if not search_results:
-                return {
-                    "school_id": school_id,
-                    "school_display": school_display,
-                    "entries": [],
-                    "message": f"Keine Google-Ergebnisse für {school_display} gefunden.",
-                }
+            google_items = list(search_results or [])
             page_entries: List[Dict[str, Any]] = []
-            for item in search_results:
+            google_log_entries: List[Dict[str, Any]] = []
+            for index, item in enumerate(google_items, start=1):
+                link = str(item.get("link") or "").strip()
+                google_log_entries.append(
+                    {
+                        "position": index,
+                        "title": item.get("title"),
+                        "link": link,
+                        "snippet": item.get("snippet"),
+                    }
+                )
                 if job.cancel_event.is_set():
                     break
-                link = str(item.get("link") or "").strip()
                 if not link:
                     continue
                 text = fetch_page_text(link)
@@ -5177,6 +5239,13 @@ def run_search_job(job: SearchJob) -> None:
                     }
                 )
             last_url = page_entries[-1]["target_url"] if page_entries else None
+            message_text: Optional[str] = None
+            if not google_items:
+                message_text = f"Keine Google-Ergebnisse für {school_display} gefunden."
+            elif not page_entries:
+                message_text = f"Keine verwertbaren Treffer für {school_display}."
+            elif job.cancel_event.is_set():
+                message_text = f"Suche für {school_display} abgebrochen."
             log_developer_event(
                 "search-run",
                 "Auswertung abgeschlossen",
@@ -5184,16 +5253,39 @@ def run_search_job(job: SearchJob) -> None:
                     "job_id": job.id,
                     "school_id": school_id,
                     "results": len(page_entries),
-                    "google_results": len(search_results),
+                    "google_results": len(google_items),
                     "last_url": last_url,
                 },
             )
+            log_entry = {
+                "school_id": school_id,
+                "school_name": record.get("schulname"),
+                "school_city": record.get("ort"),
+                "school_homepage": record.get("homepage"),
+                "keyword": keyword_display or query,
+                "query": query,
+                "google_results": google_log_entries,
+                "llm_outputs": [
+                    {
+                        "target_url": entry.get("target_url"),
+                        "google_title": entry.get("google_title"),
+                        "google_snippet": entry.get("google_snippet"),
+                        "dimensions": entry.get("dimensions"),
+                        "average_value": entry.get("average_value"),
+                        "average_confidence": entry.get("average_confidence"),
+                    }
+                    for entry in page_entries
+                ],
+                "message": message_text,
+                "created_at": utcnow_iso(),
+            }
             return {
                 "school_id": school_id,
                 "school_display": school_display,
                 "entries": page_entries,
                 "last_url": last_url,
-                "message": None if page_entries else f"Keine verwertbaren Treffer für {school_display}.",
+                "message": message_text,
+                "log_entry": log_entry,
             }
 
         futures: Dict[Any, Tuple[str, Dict[str, Any], Optional[str]]] = {}
@@ -5220,6 +5312,9 @@ def run_search_job(job: SearchJob) -> None:
                         stack="".join(traceback.format_exception(type(exc), exc, exc.__traceback__)),
                     )
                     continue
+                log_entry = result_data.get("log_entry")
+                if log_entry:
+                    append_search_logs(job.id, [log_entry])
                 entries = result_data.get("entries", [])
                 message_text = result_data.get("message")
                 if entries:
@@ -5704,6 +5799,7 @@ def search_run_info(run_id: str) -> ResponseReturnValue:
     if not run:
         return jsonify({"error": "Run nicht gefunden."}), 404
     results = load_search_results(identifier)
+    logs = load_search_logs(identifier)
     return jsonify({"run": run, "result_count": len(results)})
 
 
@@ -5958,6 +6054,7 @@ def search_run_results(run_id: str) -> ResponseReturnValue:
             "schools_without_hits": schools_without_hits,
             "total_selected_schools": len(selected_school_ids),
             "message": message,
+            "logs": logs,
         }
     )
 

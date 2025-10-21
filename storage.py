@@ -94,6 +94,14 @@ class SQLiteStorage:
 
                     CREATE INDEX IF NOT EXISTS idx_search_runs_definition ON search_runs(definition_id);
                     CREATE INDEX IF NOT EXISTS idx_search_results_run ON search_results(run_id);
+                    CREATE TABLE IF NOT EXISTS search_logs (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        run_id TEXT NOT NULL,
+                        payload TEXT NOT NULL,
+                        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                        FOREIGN KEY(run_id) REFERENCES search_runs(id) ON DELETE CASCADE
+                    );
+                    CREATE INDEX IF NOT EXISTS idx_search_logs_run ON search_logs(run_id);
                     CREATE TABLE IF NOT EXISTS error_log (
                         id INTEGER PRIMARY KEY AUTOINCREMENT,
                         payload TEXT NOT NULL,
@@ -420,6 +428,47 @@ class SQLiteStorage:
         conn = self._get_connection()
         with conn:
             conn.execute("DELETE FROM search_results WHERE run_id = ?", (run_id,))
+
+    def append_search_logs(self, run_id: str, entries: Iterable[Dict[str, Any]]) -> None:
+        run_id = str(run_id or "").strip()
+        if not run_id:
+            raise ValueError("run_id required for search logs")
+        payloads: List[str] = []
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            cleaned = dict(entry)
+            cleaned.pop("id", None)
+            payloads.append(json.dumps(cleaned, ensure_ascii=False))
+        if not payloads:
+            return
+        conn = self._get_connection()
+        with conn:
+            conn.executemany(
+                "INSERT INTO search_logs(run_id, payload) VALUES(?, ?)",
+                [(run_id, payload) for payload in payloads],
+            )
+
+    def load_search_logs(self, run_id: str) -> Iterable[Dict[str, Any]]:
+        conn = self._get_connection()
+        cursor = conn.execute(
+            "SELECT id, payload FROM search_logs WHERE run_id = ? ORDER BY id",
+            (run_id,),
+        )
+        for row in cursor:
+            try:
+                data = json.loads(row["payload"])
+            except json.JSONDecodeError:
+                continue
+            if isinstance(data, dict):
+                data.setdefault("id", row["id"])
+                data.setdefault("run_id", run_id)
+                yield data
+
+    def clear_search_logs(self, run_id: str) -> None:
+        conn = self._get_connection()
+        with conn:
+            conn.execute("DELETE FROM search_logs WHERE run_id = ?", (run_id,))
 
     def update_search_result(self, result_id: int, payload: Dict[str, Any]) -> None:
         conn = self._get_connection()

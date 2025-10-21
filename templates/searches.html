@@ -190,6 +190,7 @@
                         <button type="button" class="btn btn-outline-primary active" data-view="schools">Suchergebnisse für Schulen anzeigen</button>
                         <button type="button" class="btn btn-outline-primary" data-view="dimensions">Suchergebnisse für Dimensionen anzeigen</button>
                         <button type="button" class="btn btn-outline-primary" data-view="keywords">Suchergebnisse für Stichwörter anzeigen</button>
+                        <button type="button" class="btn btn-outline-primary" data-view="logs">Suchlog anzeigen</button>
                     </div>
                 </div>
                 <div class="card-body">
@@ -198,6 +199,7 @@
                         <div id="view-schools" class="results-container"></div>
                         <div id="view-dimensions" class="results-container d-none"></div>
                         <div id="view-keywords" class="results-container d-none"></div>
+                        <div id="view-logs" class="results-container d-none"></div>
                     </div>
                 </div>
             </div>
@@ -288,6 +290,7 @@
         const viewSchools = document.getElementById('view-schools');
         const viewDimensions = document.getElementById('view-dimensions');
         const viewKeywords = document.getElementById('view-keywords');
+        const viewLogs = document.getElementById('view-logs');
         const bootstrapLib = (typeof window !== 'undefined' && window.bootstrap && typeof window.bootstrap.Modal === 'function') ? window.bootstrap : null;
         const editModalElement = document.getElementById('modal-edit-result');
         const editModal = bootstrapLib && editModalElement ? new bootstrapLib.Modal(editModalElement) : null;
@@ -323,6 +326,29 @@
             return value.replace(/[^a-zA-Z0-9_\-]/g, '\\$&');
         }
 
+        function escapeHtml(value) {
+            if (value === null || value === undefined) {
+                return '';
+            }
+            return String(value)
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;')
+                .replace(/'/g, '&#39;');
+        }
+
+        function formatNumber(value, decimals = 2) {
+            if (value === null || value === undefined || value === '') {
+                return '–';
+            }
+            const num = Number(value);
+            if (!Number.isFinite(num)) {
+                return '–';
+            }
+            return num.toFixed(decimals);
+        }
+
         if (progressDetails && progressDetailsToggle && !bootstrapLib) {
             progressDetailsToggle.addEventListener('click', event => {
                 event.preventDefault();
@@ -340,6 +366,9 @@
             viewSchools.classList.toggle('d-none', view !== 'schools');
             viewDimensions.classList.toggle('d-none', view !== 'dimensions');
             viewKeywords.classList.toggle('d-none', view !== 'keywords');
+            if (viewLogs) {
+                viewLogs.classList.toggle('d-none', view !== 'logs');
+            }
         }
 
         viewButtons.forEach(btn => btn.addEventListener('click', () => setActiveView(btn.dataset.view)));
@@ -603,6 +632,7 @@
             renderAggregatedSchoolResults(aggregated, rawResults, schoolsWithoutHits, totalSelected);
             renderDimensionResults(data.dimension_matrix || []);
             renderKeywordResults(data.keyword_summary || []);
+            renderLogResults(data.logs || []);
             setActiveView('schools');
         }
 
@@ -915,6 +945,139 @@
             });
             viewKeywords.innerHTML = '';
             viewKeywords.appendChild(table);
+        }
+
+        function renderLogResults(logEntries) {
+            if (!viewLogs) {
+                return;
+            }
+            viewLogs.innerHTML = '';
+            if (!Array.isArray(logEntries) || !logEntries.length) {
+                viewLogs.innerHTML = '<p class="text-muted mb-0">Keine Logeinträge vorhanden.</p>';
+                return;
+            }
+            const table = document.createElement('table');
+            table.className = 'table table-sm table-hover align-middle results-table';
+            table.innerHTML = `
+                <thead class="table-light">
+                    <tr>
+                        <th scope="col">Suchstring an Google</th>
+                        <th scope="col">Ergebnisliste von Google</th>
+                        <th scope="col">Ausgaben LLM</th>
+                    </tr>
+                </thead>
+                <tbody></tbody>
+            `;
+            const tbody = table.querySelector('tbody');
+            logEntries.forEach(entry => {
+                const tr = document.createElement('tr');
+
+                const queryCell = document.createElement('td');
+                const queryParts = [];
+                if (entry.query) {
+                    queryParts.push(`<code>${escapeHtml(entry.query)}</code>`);
+                }
+                const metaParts = [];
+                if (entry.school_name) {
+                    metaParts.push(escapeHtml(entry.school_name));
+                }
+                if (entry.school_city) {
+                    metaParts.push(escapeHtml(entry.school_city));
+                }
+                if (entry.keyword) {
+                    metaParts.push(`Keyword: ${escapeHtml(entry.keyword)}`);
+                }
+                if (metaParts.length) {
+                    queryParts.push(`<div class="text-muted small">${metaParts.join(' • ')}</div>`);
+                }
+                if (entry.created_at) {
+                    queryParts.push(`<div class="text-muted small">${escapeHtml(entry.created_at)}</div>`);
+                }
+                if (entry.message) {
+                    queryParts.push(`<div class="small text-warning">${escapeHtml(entry.message)}</div>`);
+                }
+                queryCell.innerHTML = queryParts.join('') || '–';
+
+                const googleCell = document.createElement('td');
+                const resultsList = Array.isArray(entry.google_results) ? entry.google_results : [];
+                if (resultsList.length) {
+                    const list = document.createElement('ol');
+                    list.className = 'mb-0 ps-3 small';
+                    resultsList.forEach(result => {
+                        const li = document.createElement('li');
+                        const segments = [];
+                        if (result.title) {
+                            segments.push(`<div class="fw-semibold">${escapeHtml(result.title)}</div>`);
+                        }
+                        if (result.link) {
+                            const safeUrl = escapeHtml(result.link);
+                            segments.push(`<div><a href="${safeUrl}" target="_blank" rel="noreferrer">${safeUrl}</a></div>`);
+                        }
+                        if (result.snippet) {
+                            segments.push(`<div class="text-muted">${escapeHtml(result.snippet)}</div>`);
+                        }
+                        if (!segments.length) {
+                            segments.push('<div class="text-muted">–</div>');
+                        }
+                        li.innerHTML = segments.join('');
+                        list.appendChild(li);
+                    });
+                    googleCell.appendChild(list);
+                } else {
+                    googleCell.innerHTML = '<span class="text-muted">Keine Ergebnisse</span>';
+                }
+
+                const llmCell = document.createElement('td');
+                const outputs = Array.isArray(entry.llm_outputs) ? entry.llm_outputs : [];
+                if (outputs.length) {
+                    const container = document.createElement('div');
+                    container.className = 'd-flex flex-column gap-2';
+                    outputs.forEach(output => {
+                        const block = document.createElement('div');
+                        block.className = 'border rounded p-2';
+                        const headerParts = [];
+                        if (output.target_url) {
+                            const safeTarget = escapeHtml(output.target_url);
+                            headerParts.push(`<a href="${safeTarget}" target="_blank" rel="noreferrer">${safeTarget}</a>`);
+                        }
+                        const avgValue = formatNumber(output.average_value, 2);
+                        if (avgValue !== '–') {
+                            headerParts.push(`<span class="badge bg-primary-subtle text-primary-emphasis ms-1">Ø ${avgValue}</span>`);
+                        }
+                        const avgConfidence = formatNumber(output.average_confidence, 2);
+                        if (avgConfidence !== '–') {
+                            headerParts.push(`<span class="badge bg-secondary-subtle text-secondary-emphasis ms-1">Sicherheit ${avgConfidence}</span>`);
+                        }
+                        const headerHtml = headerParts.filter(Boolean).join(' ') || '–';
+                        const dims = Array.isArray(output.dimensions) ? output.dimensions : [];
+                        let bodyHtml = '';
+                        if (dims.length) {
+                            const dimItems = dims
+                                .map(dim => {
+                                    const label = escapeHtml(dim.dimension || '–');
+                                    const valueText = formatNumber(dim.value, 0);
+                                    const confidenceText = formatNumber(dim.confidence, 2);
+                                    return `<li>${label}: ${valueText} (Sicherheit ${confidenceText})</li>`;
+                                })
+                                .join('');
+                            bodyHtml = `<ul class="small mb-0 ps-3">${dimItems}</ul>`;
+                        } else {
+                            bodyHtml = '<div class="small text-muted mb-0">Keine Bewertungen.</div>';
+                        }
+                        block.innerHTML = `<div class="small fw-semibold">${headerHtml}</div>${bodyHtml}`;
+                        container.appendChild(block);
+                    });
+                    llmCell.appendChild(container);
+                } else {
+                    llmCell.innerHTML = '<span class="text-muted">Keine Auswertung</span>';
+                }
+
+                tr.appendChild(queryCell);
+                tr.appendChild(googleCell);
+                tr.appendChild(llmCell);
+                tbody.appendChild(tr);
+            });
+            viewLogs.appendChild(table);
         }
 
         function openEditModal(resultId) {
