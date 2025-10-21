@@ -426,6 +426,7 @@
         const googleBtn = document.getElementById('start-google-search');
         const acceptInvalidBtn = document.getElementById('accept-invalid');
         const bulkAcceptUrl = "{{ url_for('bulk_accept_data_quality') }}";
+        const jobsEndpoint = "{{ url_for('data_quality_job_list') }}";
         const statusLabels = {{ status_labels|tojson }};
         const siteScopeLabels = {{ site_scope_labels|tojson }};
         const siteScopeClasses = {{ site_scope_classes|tojson }};
@@ -438,6 +439,7 @@
 
         let currentJobId = null;
         let pollTimer = null;
+        const messageBuffer = [];
         const recordIndex = new Map();
         let currentStatusFilter = 'all';
         let currentScopeFilter = 'all';
@@ -796,15 +798,50 @@
             });
         }
 
+        function renderMessageBuffer() {
+            if (!progressMessages) return;
+            progressMessages.innerHTML = '';
+            messageBuffer.slice(-10).forEach(msg => {
+                const li = document.createElement('li');
+                li.textContent = msg;
+                progressMessages.appendChild(li);
+            });
+        }
+
+        function clearMessageBuffer() {
+            messageBuffer.length = 0;
+            renderMessageBuffer();
+        }
+
+        function setMessagesFromStatus(messages) {
+            if (!Array.isArray(messages)) {
+                clearMessageBuffer();
+                return;
+            }
+            messageBuffer.length = 0;
+            messages.forEach(msg => {
+                if (msg != null && msg !== '') {
+                    messageBuffer.push(String(msg));
+                }
+            });
+            if (messageBuffer.length > 50) {
+                messageBuffer.splice(0, messageBuffer.length - 50);
+            }
+            renderMessageBuffer();
+        }
+
         function resetProgress() {
             currentJobId = null;
-            cancelBtn.disabled = true;
+            if (cancelBtn) {
+                cancelBtn.disabled = true;
+            }
             progressContainer.hidden = true;
             progressBar.style.width = '0%';
             progressPercent.textContent = '0%';
             progressSummary.textContent = '';
-            progressMessages.innerHTML = '';
             progressLabel.textContent = 'Prüfung läuft …';
+            clearMessageBuffer();
+            renderProgressResults([]);
             if (pollTimer) {
                 clearInterval(pollTimer);
                 pollTimer = null;
@@ -812,12 +849,38 @@
         }
 
         function appendMessage(text) {
-            if (!text) return;
-            const li = document.createElement('li');
-            li.textContent = text;
-            progressMessages.appendChild(li);
-            if (progressMessages.children.length > 10) {
-                progressMessages.removeChild(progressMessages.firstChild);
+            if (text == null || text === '') return;
+            messageBuffer.push(String(text));
+            if (messageBuffer.length > 50) {
+                messageBuffer.splice(0, messageBuffer.length - 50);
+            }
+            renderMessageBuffer();
+        }
+
+        function applyStatus(status) {
+            if (!status) {
+                return;
+            }
+            progressContainer.hidden = false;
+            const percent = Number(status.progress_percent) || 0;
+            const processed = Number(status.processed) || 0;
+            const total = Number(status.total) || 0;
+            progressBar.style.width = `${percent}%`;
+            progressPercent.textContent = `${percent}%`;
+            progressSummary.textContent = `${processed} von ${total} Datensätzen geprüft.`;
+            if (status.current_school) {
+                progressLabel.textContent = `Aktuell: ${status.current_school}`;
+            } else if (status.completed) {
+                progressLabel.textContent = 'Prüfung abgeschlossen';
+            } else {
+                progressLabel.textContent = 'Prüfung läuft …';
+            }
+            if (cancelBtn) {
+                cancelBtn.disabled = Boolean(status.completed);
+            }
+            setMessagesFromStatus(status.messages || []);
+            if (Array.isArray(status.results)) {
+                renderProgressResults(status.results);
             }
         }
 
@@ -832,19 +895,7 @@
                         refreshData();
                         return;
                     }
-                    progressContainer.hidden = false;
-                    progressBar.style.width = `${status.progress_percent || 0}%`;
-                    progressPercent.textContent = `${status.progress_percent || 0}%`;
-                    progressSummary.textContent = `${status.processed || 0} von ${status.total || 0} Datensätzen geprüft.`;
-                    if (status.current_school) {
-                        progressLabel.textContent = `Aktuell: ${status.current_school}`;
-                    }
-                    if (Array.isArray(status.messages)) {
-                        status.messages.forEach(msg => appendMessage(msg));
-                    }
-                    if (Array.isArray(status.results)) {
-                        renderProgressResults(status.results);
-                    }
+                    applyStatus(status);
                     if (status.completed) {
                         resetProgress();
                         refreshData();
@@ -852,6 +903,37 @@
                 })
                 .catch(() => {
                     appendMessage('Status konnte nicht abgefragt werden.');
+                });
+        }
+
+        function resumeActiveJob() {
+            if (!jobsEndpoint) {
+                return;
+            }
+            fetch(jobsEndpoint)
+                .then(resp => resp.json())
+                .then(data => {
+                    const jobs = Array.isArray(data.jobs) ? data.jobs : [];
+                    const activeJobs = jobs.filter(job => job && job.completed === false);
+                    if (!activeJobs.length) {
+                        return;
+                    }
+                    activeJobs.sort((a, b) => {
+                        const aTs = Date.parse(a.started_at || '') || 0;
+                        const bTs = Date.parse(b.started_at || '') || 0;
+                        return bTs - aTs;
+                    });
+                    const job = activeJobs[0];
+                    currentJobId = job.job_id;
+                    applyStatus(job);
+                    if (pollTimer) {
+                        clearInterval(pollTimer);
+                    }
+                    pollTimer = setInterval(pollStatus, 4000);
+                    pollStatus();
+                })
+                .catch(() => {
+                    // ignore errors silently
                 });
         }
 
@@ -880,7 +962,7 @@
                 currentJobId = data.job_id;
                 cancelBtn.disabled = false;
                 progressContainer.hidden = false;
-                progressMessages.innerHTML = '';
+                clearMessageBuffer();
                 progressLabel.textContent = options.progressLabel || 'Prüfung läuft …';
                 pollStatus();
                 if (pollTimer) {
@@ -1025,7 +1107,7 @@
                     currentJobId = data.job_id;
                     cancelBtn.disabled = false;
                     progressContainer.hidden = false;
-                    progressMessages.innerHTML = '';
+                    clearMessageBuffer();
                     pollStatus();
                     if (pollTimer) {
                         clearInterval(pollTimer);
@@ -1157,8 +1239,9 @@
             }
         });
 
-        applyVisibilityFilters();
         rebuildRecordIndexFromDom();
+        applyVisibilityFilters();
+        resumeActiveJob();
     })();
 </script>
 {% include '_data_management_modals.html' %}

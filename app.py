@@ -4542,6 +4542,7 @@ class DataQualityJob:
         with self._lock:
             return {
                 "job_id": self.id,
+                "mode": self.mode,
                 "status": self.status,
                 "current_school": self.current_school,
                 "processed": self.processed,
@@ -4551,6 +4552,7 @@ class DataQualityJob:
                 "completed": self.completed,
                 "results": list(self.results),
                 "messages": list(self.messages),
+                "started_at": datetime.utcfromtimestamp(self.started_at).isoformat() + "Z",
             }
 
     def update_progress(
@@ -6373,6 +6375,13 @@ def data_quality_status(job_id: str) -> ResponseReturnValue:
     if not job:
         return jsonify({"error": "Unbekannte Job-ID"}), 404
     return jsonify(job.as_dict())
+
+
+@app.route("/data-quality/jobs")
+def data_quality_job_list() -> ResponseReturnValue:
+    jobs_payload = [job.as_dict() for job in data_quality_jobs.values()]
+    jobs_payload.sort(key=lambda item: item.get("started_at") or "", reverse=True)
+    return jsonify({"jobs": jobs_payload})
 
 
 @app.route("/data-quality/cancel/<job_id>", methods=["POST"])
