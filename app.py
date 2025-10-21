@@ -162,6 +162,7 @@ DEFAULT_SEARCH_EVALUATION_PROMPT = (
 DEFAULT_SEARCH_MODEL = OPENAI_MODEL_NAME
 DEFAULT_SEARCH_TEMPERATURE = 0.2
 DEFAULT_SEARCH_MAX_RESULTS = 200
+DEFAULT_SEARCH_CONCURRENCY = 20
 DEFAULT_SEARCH_CATEGORIES = ["KI"]
 SEARCH_STATUS_NEW = "neu"
 SEARCH_STATUS_RUNNING = "in_arbeit"
@@ -333,6 +334,7 @@ def _default_search_settings() -> Dict[str, object]:
         "max_results": DEFAULT_SEARCH_MAX_RESULTS,
         "temperature": DEFAULT_SEARCH_TEMPERATURE,
         "model": DEFAULT_SEARCH_MODEL,
+        "concurrency": DEFAULT_SEARCH_CONCURRENCY,
     }
 
 
@@ -351,6 +353,18 @@ def load_settings_data() -> Dict[str, object]:
 def save_settings_data(data: Dict[str, object]) -> None:
     with settings_lock:
         storage.set_json("settings", "data", data)
+
+
+def is_developer_mode_enabled() -> bool:
+    data = load_settings_data()
+    return bool(data.get("developer_mode"))
+
+
+def set_developer_mode_enabled(enabled: bool) -> bool:
+    data = load_settings_data()
+    data["developer_mode"] = bool(enabled)
+    save_settings_data(data)
+    return bool(data["developer_mode"])
 
 
 def get_synonym_defaults() -> Dict[str, object]:
@@ -405,6 +419,14 @@ def get_search_defaults() -> Dict[str, object]:
         model_value = str(settings_search.get("model", "")).strip()
         if model_value:
             result["model"] = model_value
+        concurrency_value = settings_search.get("concurrency")
+        try:
+            concurrency = int(concurrency_value)
+        except (TypeError, ValueError):
+            concurrency = defaults["concurrency"]
+        if concurrency < 1:
+            concurrency = 1
+        result["concurrency"] = concurrency
     return result
 
 
@@ -451,13 +473,19 @@ def update_search_defaults(values: Dict[str, object]) -> Dict[str, object]:
         max_results = int(values.get("max_results", defaults["max_results"]))
     except (TypeError, ValueError):
         max_results = defaults["max_results"]
-    max_results = max(1, min(max_results, 150))
+    max_results = max(1, min(max_results, 200))
     try:
         temperature = float(values.get("temperature", defaults["temperature"]))
     except (TypeError, ValueError):
         temperature = defaults["temperature"]
     temperature = max(0.0, min(temperature, 2.0))
     model = str(values.get("model", "")).strip() or defaults["model"]
+    try:
+        concurrency = int(values.get("concurrency", defaults["concurrency"]))
+    except (TypeError, ValueError):
+        concurrency = defaults["concurrency"]
+    if concurrency < 1:
+        concurrency = 1
 
     current.setdefault("search_defaults", {})
     current["search_defaults"] = {
@@ -465,6 +493,7 @@ def update_search_defaults(values: Dict[str, object]) -> Dict[str, object]:
         "max_results": max_results,
         "temperature": temperature,
         "model": model,
+        "concurrency": concurrency,
     }
     save_settings_data(current)
     return current["search_defaults"]
@@ -903,6 +932,20 @@ def log_error_event(category: str, message: str, *, details: Optional[Dict[str, 
         storage.append_error_log(entry)
 
 
+def log_developer_event(category: str, message: str, *, details: Optional[Dict[str, Any]] = None) -> None:
+    if not is_developer_mode_enabled():
+        return
+    entry: Dict[str, Any] = {
+        "timestamp": datetime.utcnow().isoformat() + "Z",
+        "category": f"developer:{category}",
+        "message": str(message or ""),
+    }
+    if details is not None:
+        entry["details"] = _sanitize_log_value(details)
+    with error_log_lock:
+        storage.append_error_log(entry)
+
+
 def list_error_log_entries(limit: Optional[int] = 200) -> List[Dict[str, Any]]:
     with error_log_lock:
         return list(storage.list_error_log(limit))
@@ -936,6 +979,58 @@ def capture_request_exception(sender, exception, **extra) -> None:  # pragma: no
 
 
 got_request_exception.connect(capture_request_exception, app)
+
+
+@app.before_request
+def log_incoming_request() -> None:
+    if not is_developer_mode_enabled():
+        return
+    path = request.path or ""
+    if path.startswith("/static/"):
+        return
+    payload: Optional[Dict[str, Any]] = None
+    if request.method in {"POST", "PUT", "PATCH"}:
+        data = request.get_json(silent=True)
+        if isinstance(data, dict):
+            payload = data
+        elif request.form:
+            payload = {key: request.form.getlist(key) for key in request.form.keys()}
+    log_developer_event(
+        "request",
+        f"{request.method} {path}",
+        details={
+            "path": path,
+            "method": request.method,
+            "query": request.args.to_dict(flat=False),
+            "payload": payload,
+            "remote_addr": request.remote_addr,
+        },
+    )
+    try:
+        request.environ["developer_mode_started_at"] = time.time()
+    except Exception:
+        request.environ["developer_mode_started_at"] = None
+
+
+@app.after_request
+def log_outgoing_response(response: Response) -> Response:
+    if is_developer_mode_enabled():
+        path = request.path or ""
+        if not path.startswith("/static/"):
+            started_at = request.environ.get("developer_mode_started_at")
+            duration = None
+            if isinstance(started_at, (int, float)):
+                duration = max(0.0, time.time() - float(started_at))
+            log_developer_event(
+                "response",
+                f"{request.method} {path}",
+                details={
+                    "status": response.status_code,
+                    "duration": duration,
+                    "content_length": response.calculate_content_length(),
+                },
+            )
+    return response
 
 
 def _cleanup_import_sessions_locked() -> None:
@@ -2666,6 +2761,16 @@ def perform_google_search(
     collected: List[Dict[str, object]] = []
     seen_links: Set[str] = set()
     start_index = 1
+    log_developer_event(
+        "google-search",
+        "Google-Suche gestartet",
+        details={
+            "query": query,
+            "max_results": max_results,
+            "language": language,
+            "region": region,
+        },
+    )
     while len(collected) < max_results:
         remaining = max_results - len(collected)
         batch_size = max(1, min(remaining, 10))
@@ -2682,15 +2787,39 @@ def perform_google_search(
         try:
             response = requests.get(GOOGLE_SEARCH_API_URL, params=params, timeout=GOOGLE_SEARCH_TIMEOUT)
         except requests.RequestException:
+            log_developer_event(
+                "google-search",
+                "Google-Suche fehlgeschlagen",
+                details={"query": query, "reason": "Netzwerkfehler", "start": start_index},
+            )
             break
         if response.status_code >= 400:
+            log_developer_event(
+                "google-search",
+                "Google-Suche mit Fehlerstatus",
+                details={
+                    "query": query,
+                    "status": response.status_code,
+                    "start": start_index,
+                },
+            )
             break
         try:
             payload = response.json()
         except ValueError:
+            log_developer_event(
+                "google-search",
+                "Antwort konnte nicht gelesen werden",
+                details={"query": query, "start": start_index},
+            )
             break
         items = payload.get("items") if isinstance(payload, dict) else None
         if not isinstance(items, list) or not items:
+            log_developer_event(
+                "google-search",
+                "Keine weiteren Treffer",
+                details={"query": query, "start": start_index},
+            )
             break
         added = 0
         for item in items:
@@ -2719,6 +2848,18 @@ def perform_google_search(
         start_index += max(1, len(items))
         if start_index > 100 and len(collected) >= 100:
             break
+    log_developer_event(
+        "google-search",
+        "Google-Suche abgeschlossen",
+        details={
+            "query": query,
+            "retrieved": len(collected),
+            "domains": [
+                _extract_domain_from_url(item.get("link", ""))
+                for item in collected[: min(len(collected), 5)]
+            ],
+        },
+    )
     return collected
 
 
@@ -2787,6 +2928,16 @@ def evaluate_page_with_llm(
         "temperature": max(0.0, min(float(temperature), 2.0)),
         "max_tokens": 900,
     }
+    log_developer_event(
+        "openai-search",
+        "Bewertung angefordert",
+        details={
+            "model": payload["model"],
+            "temperature": payload["temperature"],
+            "prompt_chars": len(user_prompt),
+            "content_chars": len(cleaned),
+        },
+    )
     try:
         response = requests.post(
             OPENAI_CHAT_COMPLETIONS_URL,
@@ -2795,12 +2946,27 @@ def evaluate_page_with_llm(
             timeout=OPENAI_TIMEOUT,
         )
     except requests.RequestException:
+        log_developer_event(
+            "openai-search",
+            "Bewertung fehlgeschlagen",
+            details={"reason": "Netzwerkfehler", "model": payload["model"]},
+        )
         return None
     if response.status_code >= 400:
+        log_developer_event(
+            "openai-search",
+            "Bewertung mit Fehlerstatus",
+            details={"status": response.status_code, "model": payload["model"]},
+        )
         return None
     try:
         data = response.json()
     except ValueError:
+        log_developer_event(
+            "openai-search",
+            "Bewertung lieferte keine JSON-Antwort",
+            details={"model": payload["model"], "status": response.status_code},
+        )
         return None
     choices = data.get("choices") if isinstance(data, dict) else None
     content_text = ""
@@ -2812,6 +2978,11 @@ def evaluate_page_with_llm(
                 content_text = str(message.get("content", ""))
     content_text = content_text.strip()
     if not content_text:
+        log_developer_event(
+            "openai-search",
+            "Bewertung ohne Inhalt",
+            details={"model": payload["model"], "status": response.status_code},
+        )
         return None
     try:
         parsed = json.loads(content_text)
@@ -2823,6 +2994,11 @@ def evaluate_page_with_llm(
         try:
             parsed = json.loads(content_text[start : end + 1])
         except json.JSONDecodeError:
+            log_developer_event(
+                "openai-search",
+                "Bewertung konnte nicht geparst werden",
+                details={"model": payload["model"], "status": response.status_code},
+            )
             return None
     if not isinstance(parsed, dict):
         return None
@@ -2852,6 +3028,16 @@ def evaluate_page_with_llm(
                 "confidence": max(0.0, min(confidence, 1.0)),
             }
         )
+    log_developer_event(
+        "openai-search",
+        "Bewertung abgeschlossen",
+        details={
+            "model": payload["model"],
+            "status": response.status_code,
+            "dimensions": len(cleaned_eval),
+            "usage": _sanitize_log_value(data.get("usage")) if isinstance(data, dict) else None,
+        },
+    )
     return cleaned_eval or None
 
 
@@ -3502,6 +3688,14 @@ def store_search_definition(payload: Dict[str, Any]) -> Dict[str, Any]:
         max_results_value = defaults["max_results"]
     max_results_value = max(1, min(max_results_value, 200))
 
+    concurrency_raw = payload.get("concurrency", definition.get("concurrency", defaults["concurrency"]))
+    try:
+        concurrency_value = int(concurrency_raw)
+    except (TypeError, ValueError):
+        concurrency_value = defaults["concurrency"]
+    if concurrency_value < 1:
+        concurrency_value = 1
+
     category_value = str(payload.get("category") or definition.get("category") or "").strip()
     categories = get_search_categories()
     if not category_value and categories:
@@ -3521,6 +3715,7 @@ def store_search_definition(payload: Dict[str, Any]) -> Dict[str, Any]:
             "model": model_value,
             "temperature": temperature_value,
             "max_results": max_results_value,
+            "concurrency": concurrency_value,
             "category": category_value or (categories[0] if categories else ""),
             "status": status_candidate,
             "created_at": created_at,
@@ -3529,6 +3724,19 @@ def store_search_definition(payload: Dict[str, Any]) -> Dict[str, Any]:
     )
 
     save_search_definition(definition)
+    log_developer_event(
+        "search-definition",
+        "Suche gespeichert",
+        details={
+            "id": identifier,
+        "name": name,
+        "keywords": len(keywords),
+        "schools": len(school_ids) if school_ids else None,
+        "max_results": max_results_value,
+        "model": model_value,
+        "concurrency": concurrency_value,
+    },
+    )
     return definition
 
 
@@ -4276,6 +4484,7 @@ class SearchJob:
     model: str
     temperature: float
     max_results: int
+    concurrency: int
     status: str = "pending"
     total_tasks: int = 0
     processed_tasks: int = 0
@@ -4290,6 +4499,8 @@ class SearchJob:
     completed: bool = False
     cancel_event: threading.Event = field(default_factory=threading.Event, repr=False, compare=False)
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False, compare=False)
+    school_snapshot: Dict[str, Dict[str, Any]] = field(default_factory=dict, repr=False, compare=False)
+    schools_with_hits: Set[str] = field(default_factory=set, repr=False, compare=False)
 
     def as_dict(self) -> Dict[str, Any]:
         with self._lock:
@@ -4313,6 +4524,7 @@ class SearchJob:
                 "started_at": self.started_at,
                 "completed_at": self.completed_at,
                 "completed": self.completed,
+                "concurrency": self.concurrency,
             }
 
 
@@ -4346,8 +4558,11 @@ def persist_search_job_state(job: SearchJob) -> None:
             "model": job.model,
             "temperature": job.temperature,
             "max_results": job.max_results,
+            "concurrency": job.concurrency,
             "started_at": datetime.utcfromtimestamp(job.started_at).isoformat() + "Z",
             "error": job.error,
+            "school_snapshot": job.school_snapshot,
+            "schools_with_hits": sorted(job.schools_with_hits),
         }
         if job.completed_at:
             payload["completed_at"] = datetime.utcfromtimestamp(job.completed_at).isoformat() + "Z"
@@ -4800,14 +5015,16 @@ def run_search_job(job: SearchJob) -> None:
         school_ids = job.school_ids or list(records_by_id.keys())
         keywords = job.keywords or []
 
-        tasks: List[Tuple[str, Dict[str, Any], str, str]] = []
+        combined_keywords = " OR ".join(keywords)
+        keyword_display = combined_keywords or (keywords[0] if keywords else "")
+        tasks: List[Tuple[str, Dict[str, Any], Optional[str]]] = []
         for school_id in school_ids:
             record = records_by_id.get(school_id)
             if not record:
                 with job._lock:
                     job.messages.append(f"Keine Stammdaten für Schul-ID {school_id} gefunden.")
                 continue
-            homepage = str(record.get("homepage") or "").strip()
+            homepage = str(record.get("homepage") or record.get("url") or "").strip()
             if not homepage:
                 with job._lock:
                     job.messages.append(
@@ -4815,13 +5032,18 @@ def run_search_job(job: SearchJob) -> None:
                     )
                 continue
             domain = _extract_domain_from_url(homepage)
-            for keyword in keywords:
-                tasks.append((school_id, record, keyword, domain))
+            job.school_snapshot[school_id] = {
+                "name": record.get("schulname"),
+                "city": record.get("ort"),
+                "homepage": homepage,
+            }
+            tasks.append((school_id, record, domain))
 
         with job._lock:
             job.total_tasks = len(tasks)
             job.status = "running"
-            job.messages.append(f"Starte Suchlauf mit {len(tasks)} Kombinationen.")
+            job.messages.append(f"Starte Suchlauf mit {len(tasks)} Schulen.")
+            job.current_keyword = keyword_display or None
         persist_search_job_state(job)
         update_search_definition_meta(job.definition_id, status=SEARCH_STATUS_RUNNING, last_error=None)
 
@@ -4836,23 +5058,61 @@ def run_search_job(job: SearchJob) -> None:
                 status=SEARCH_STATUS_FINISHED,
                 last_run_id=job.id,
                 last_run_at=utcnow_iso(),
+                results=0,
+            )
+            log_developer_event(
+                "search-run",
+                "Keine Schulen für Suchlauf gefunden",
+                details={"job_id": job.id, "definition_id": job.definition_id},
             )
             return
 
-        for school_id, record, keyword, domain in tasks:
+        log_developer_event(
+            "search-run",
+            "Suchlauf gestartet",
+            details={
+                "job_id": job.id,
+                "definition_id": job.definition_id,
+                "schools": len(tasks),
+                "keywords": len(keywords),
+                "concurrency": job.concurrency,
+            },
+        )
+
+        def build_query(domain_value: Optional[str], school_record: Dict[str, Any]) -> str:
+            if domain_value:
+                if combined_keywords:
+                    return f"site:{domain_value} ({combined_keywords})"
+                return f"site:{domain_value}"
+            base_terms = [
+                str(school_record.get("schulname") or "").strip(),
+                str(school_record.get("ort") or "").strip(),
+            ]
+            query_parts = [part for part in base_terms if part]
+            if combined_keywords:
+                query_parts.append(f"({combined_keywords})")
+            return " ".join(query_parts) or combined_keywords or school_record.get("schul_id", "")
+
+        def process_school(task: Tuple[str, Dict[str, Any], Optional[str]]) -> Dict[str, Any]:
+            school_id, record, domain_value = task
+            school_display = str(record.get("schulname") or school_id)
             if job.cancel_event.is_set():
-                with job._lock:
-                    job.status = "cancelled"
-                    job.completed = True
-                    job.completed_at = time.time()
-                persist_search_job_state(job)
-                update_search_definition_meta(job.definition_id, status=SEARCH_STATUS_NEW)
-                return
-
-            query = keyword
-            if domain:
-                query = f"{keyword} site:{domain}"
-
+                return {
+                    "school_id": school_id,
+                    "school_display": school_display,
+                    "entries": [],
+                    "message": f"Suche für {school_display} abgebrochen.",
+                }
+            query = build_query(domain_value, record)
+            with job._lock:
+                job.current_school = school_display
+                job.current_keyword = keyword_display or query
+                job.current_url = None
+            log_developer_event(
+                "search-run",
+                "Google-Suche für Schule",
+                details={"job_id": job.id, "school_id": school_id, "query": query},
+            )
             search_results = perform_google_search(
                 query,
                 google_key,
@@ -4861,20 +5121,24 @@ def run_search_job(job: SearchJob) -> None:
                 language="de",
                 region="de",
             )
-
+            if job.cancel_event.is_set():
+                return {
+                    "school_id": school_id,
+                    "school_display": school_display,
+                    "entries": [],
+                    "message": f"Suche für {school_display} abgebrochen.",
+                }
             if not search_results:
-                school_display = str(record.get("schulname") or school_id)
-                with job._lock:
-                    job.processed_tasks += 1
-                    job.current_school = school_display
-                    job.current_keyword = keyword
-                    job.current_url = None
-                    job.messages.append(f"Keine Google-Ergebnisse für {school_display} – {keyword} gefunden.")
-                persist_search_job_state(job)
-                continue
-
+                return {
+                    "school_id": school_id,
+                    "school_display": school_display,
+                    "entries": [],
+                    "message": f"Keine Google-Ergebnisse für {school_display} gefunden.",
+                }
             page_entries: List[Dict[str, Any]] = []
             for item in search_results:
+                if job.cancel_event.is_set():
+                    break
                 link = str(item.get("link") or "").strip()
                 if not link:
                     continue
@@ -4898,7 +5162,7 @@ def run_search_job(job: SearchJob) -> None:
                         "school_name": record.get("schulname"),
                         "school_city": record.get("ort"),
                         "school_homepage": record.get("homepage"),
-                        "keyword": keyword,
+                        "keyword": keyword_display or query,
                         "query": query,
                         "target_url": link,
                         "google_title": item.get("title"),
@@ -4912,17 +5176,87 @@ def run_search_job(job: SearchJob) -> None:
                         "content_excerpt": text[:600],
                     }
                 )
+            last_url = page_entries[-1]["target_url"] if page_entries else None
+            log_developer_event(
+                "search-run",
+                "Auswertung abgeschlossen",
+                details={
+                    "job_id": job.id,
+                    "school_id": school_id,
+                    "results": len(page_entries),
+                    "google_results": len(search_results),
+                    "last_url": last_url,
+                },
+            )
+            return {
+                "school_id": school_id,
+                "school_display": school_display,
+                "entries": page_entries,
+                "last_url": last_url,
+                "message": None if page_entries else f"Keine verwertbaren Treffer für {school_display}.",
+            }
 
+        futures: Dict[Any, Tuple[str, Dict[str, Any], Optional[str]]] = {}
+        executor = ThreadPoolExecutor(max_workers=job.concurrency)
+        try:
+            for task in tasks:
+                futures[executor.submit(process_school, task)] = task
+            for future in as_completed(futures):
+                school_id, record, _ = futures[future]
+                if job.cancel_event.is_set():
+                    break
+                try:
+                    result_data = future.result()
+                except Exception as exc:  # pragma: no cover - defensive
+                    message = f"Fehler bei {record.get('schulname', school_id)}: {exc}"[:200]
+                    with job._lock:
+                        job.processed_tasks += 1
+                        job.messages.append(message)
+                    persist_search_job_state(job)
+                    log_error_event(
+                        "search-run",
+                        "Fehler bei der Auswertung",
+                        details={"job_id": job.id, "school_id": school_id},
+                        stack="".join(traceback.format_exception(type(exc), exc, exc.__traceback__)),
+                    )
+                    continue
+                entries = result_data.get("entries", [])
+                message_text = result_data.get("message")
+                if entries:
+                    append_search_results(job.id, entries)
+                    job.schools_with_hits.add(school_id)
+                with job._lock:
+                    job.processed_tasks += 1
+                    job.current_school = result_data.get("school_display") or job.current_school
+                    job.current_keyword = keyword_display or job.current_keyword
+                    job.current_url = result_data.get("last_url")
+                    if entries:
+                        job.results_count += len(entries)
+                    if message_text:
+                        job.messages.append(message_text)
+                    elif entries:
+                        job.messages.append(
+                            f"{len(entries)} Treffer für {result_data.get('school_display') or school_id}."
+                        )
+                persist_search_job_state(job)
+                if job.cancel_event.is_set():
+                    break
+        finally:
+            executor.shutdown(wait=False, cancel_futures=True)
+
+        if job.cancel_event.is_set():
             with job._lock:
-                job.processed_tasks += 1
-                job.current_school = str(record.get("schulname") or school_id)
-                job.current_keyword = keyword
-                job.current_url = page_entries[-1]["target_url"] if page_entries else None
-                if page_entries:
-                    job.results_count += len(page_entries)
-            if page_entries:
-                append_search_results(job.id, page_entries)
+                job.status = "cancelled"
+                job.completed = True
+                job.completed_at = time.time()
             persist_search_job_state(job)
+            update_search_definition_meta(job.definition_id, status=SEARCH_STATUS_NEW, last_error="Abgebrochen")
+            log_developer_event(
+                "search-run",
+                "Suchlauf abgebrochen",
+                details={"job_id": job.id, "processed": job.processed_tasks},
+            )
+            return
 
         with job._lock:
             job.status = "finished"
@@ -4935,6 +5269,17 @@ def run_search_job(job: SearchJob) -> None:
             last_run_id=job.id,
             last_run_at=utcnow_iso(),
             last_error=None,
+            results=job.results_count,
+        )
+        log_developer_event(
+            "search-run",
+            "Suchlauf abgeschlossen",
+            details={
+                "job_id": job.id,
+                "definition_id": job.definition_id,
+                "results": job.results_count,
+                "processed": job.processed_tasks,
+            },
         )
     except Exception as exc:  # pragma: no cover - defensive safety net
         message = str(exc)
@@ -4989,6 +5334,7 @@ def index() -> ResponseReturnValue:
                 "model": existing.get("model", defaults.get("model")),
                 "temperature": existing.get("temperature", defaults.get("temperature")),
                 "category": existing.get("category"),
+                "concurrency": existing.get("concurrency", defaults.get("concurrency")),
             }
     return render_template(
         "index.html",
@@ -5295,6 +5641,12 @@ def start_search_run(definition_id: str) -> ResponseReturnValue:
     model_value = str(definition_override.get("model") or DEFAULT_SEARCH_MODEL).strip()
     temperature_value = float(definition_override.get("temperature", DEFAULT_SEARCH_TEMPERATURE))
     max_results_value = int(definition_override.get("max_results", DEFAULT_SEARCH_MAX_RESULTS))
+    try:
+        concurrency_value = int(definition_override.get("concurrency", DEFAULT_SEARCH_CONCURRENCY))
+    except (TypeError, ValueError):
+        concurrency_value = DEFAULT_SEARCH_CONCURRENCY
+    if concurrency_value < 1:
+        concurrency_value = 1
 
     job = SearchJob(
         id=job_id,
@@ -5306,6 +5658,7 @@ def start_search_run(definition_id: str) -> ResponseReturnValue:
         model=model_value,
         temperature=temperature_value,
         max_results=max_results_value,
+        concurrency=concurrency_value,
     )
     register_search_job(job)
     persist_search_job_state(job)
@@ -5408,6 +5761,11 @@ def search_run_results(run_id: str) -> ResponseReturnValue:
     dimension_summary: Dict[str, Dict[str, float]] = {}
     school_summary: Dict[str, Dict[str, Any]] = {}
     keyword_summary: Dict[str, Dict[str, Any]] = {}
+    snapshot_raw = run.get("school_snapshot") if isinstance(run, dict) else {}
+    school_snapshot: Dict[str, Dict[str, Any]] = (
+        snapshot_raw if isinstance(snapshot_raw, dict) else {}
+    )
+    aggregated_schools: Dict[str, Dict[str, Any]] = {}
 
     for entry in filtered:
         school_id = str(entry.get("school_id") or "")
@@ -5428,6 +5786,24 @@ def search_run_results(run_id: str) -> ResponseReturnValue:
                 "count": 0,
             },
         )["count"] += 1
+        aggregated = aggregated_schools.setdefault(
+            school_id,
+            {
+                "school_id": school_id,
+                "school_name": entry.get("school_name")
+                or school_snapshot.get(school_id, {}).get("name"),
+                "school_city": entry.get("school_city")
+                or school_snapshot.get(school_id, {}).get("city"),
+                "school_homepage": entry.get("school_homepage")
+                or school_snapshot.get(school_id, {}).get("homepage"),
+                "total_hits": 0,
+                "dimensions": {},
+                "result_ids": [],
+            },
+        )
+        aggregated["total_hits"] += 1
+        if entry.get("id") is not None:
+            aggregated["result_ids"].append(entry.get("id"))
         for dim in entry.get("dimensions", []):
             if not isinstance(dim, dict):
                 continue
@@ -5446,6 +5822,18 @@ def search_run_results(run_id: str) -> ResponseReturnValue:
             stats["count"] += 1
             stats["value_sum"] += value
             stats["confidence_sum"] += confidence
+            agg_dim = aggregated["dimensions"].setdefault(
+                label,
+                {
+                    "dimension": label,
+                    "value_sum": 0.0,
+                    "confidence_sum": 0.0,
+                    "count": 0,
+                },
+            )
+            agg_dim["value_sum"] += value
+            agg_dim["confidence_sum"] += confidence
+            agg_dim["count"] += 1
 
     for stats in dimension_summary.values():
         count = max(stats.get("count", 0), 1)
@@ -5453,6 +5841,34 @@ def search_run_results(run_id: str) -> ResponseReturnValue:
         stats["average_confidence"] = stats["confidence_sum"] / count
         stats.pop("value_sum", None)
         stats.pop("confidence_sum", None)
+
+    aggregated_list: List[Dict[str, Any]] = []
+    for school_id, summary in aggregated_schools.items():
+        dimensions_compiled: List[Dict[str, Any]] = []
+        for label, dim_stats in summary["dimensions"].items():
+            count = max(dim_stats.get("count", 0), 1)
+            dimensions_compiled.append(
+                {
+                    "dimension": label,
+                    "average_value": dim_stats.get("value_sum", 0.0) / count,
+                    "average_confidence": dim_stats.get("confidence_sum", 0.0) / count,
+                    "count": dim_stats.get("count", 0),
+                }
+            )
+        dimensions_compiled.sort(key=lambda item: item["dimension"])
+        aggregated_list.append(
+            {
+                "school_id": school_id,
+                "school_name": summary.get("school_name") or school_snapshot.get(school_id, {}).get("name"),
+                "school_city": summary.get("school_city") or school_snapshot.get(school_id, {}).get("city"),
+                "school_homepage": summary.get("school_homepage")
+                or school_snapshot.get(school_id, {}).get("homepage"),
+                "total_hits": summary.get("total_hits", 0),
+                "result_ids": summary.get("result_ids", []),
+                "dimensions": dimensions_compiled,
+            }
+        )
+    aggregated_list.sort(key=lambda item: (item["school_name"] or "", item["school_id"]))
 
     dimension_matrix: List[Dict[str, Any]] = []
     for dimension_label, stats in dimension_summary.items():
@@ -5507,6 +5923,27 @@ def search_run_results(run_id: str) -> ResponseReturnValue:
     elif filtered_results == 0:
         message = "Keine Ergebnisse entsprechen den aktuellen Filtern."
 
+    selected_school_ids = {
+        str(item)
+        for item in (run.get("school_ids") if isinstance(run, dict) else [])
+        if str(item)
+    }
+    if not selected_school_ids and school_snapshot:
+        selected_school_ids = set(school_snapshot.keys())
+    hit_school_ids = {item["school_id"] for item in aggregated_list if item.get("school_id")}
+    missing_school_ids = sorted(selected_school_ids - hit_school_ids)
+    schools_without_hits: List[Dict[str, Any]] = []
+    for school_id in missing_school_ids:
+        info = school_snapshot.get(school_id, {})
+        schools_without_hits.append(
+            {
+                "school_id": school_id,
+                "school_name": info.get("name"),
+                "school_city": info.get("city"),
+                "school_homepage": info.get("homepage"),
+            }
+        )
+
     return jsonify(
         {
             "run": run,
@@ -5517,6 +5954,9 @@ def search_run_results(run_id: str) -> ResponseReturnValue:
             "dimension_matrix": dimension_matrix,
             "school_summary": list(school_summary.values()),
             "keyword_summary": list(keyword_summary.values()),
+            "aggregated_schools": aggregated_list,
+            "schools_without_hits": schools_without_hits,
+            "total_selected_schools": len(selected_school_ids),
             "message": message,
         }
     )
@@ -5942,6 +6382,7 @@ def settings():
     crawl_defaults = get_crawl_defaults()
     google_credentials = get_google_search_credentials()
     data_quality_settings = get_data_quality_settings()
+    developer_mode_enabled = is_developer_mode_enabled()
 
     if request.method == "POST":
         form_id = request.form.get("form_id", "api")
@@ -5973,6 +6414,17 @@ def settings():
             }
             keyword_finder_defaults = update_keyword_finder_defaults(values)
             message = "Die Standardwerte für den Keyword-Finder wurden gespeichert."
+            message_category = "success"
+        elif form_id == "search-defaults":
+            values = {
+                "prompt": request.form.get("search_prompt", ""),
+                "max_results": request.form.get("search_max_results"),
+                "temperature": request.form.get("search_temperature"),
+                "model": request.form.get("search_model", ""),
+                "concurrency": request.form.get("search_concurrency"),
+            }
+            search_defaults = update_search_defaults(values)
+            message = "Die Bewertungs-Standardwerte wurden gespeichert."
             message_category = "success"
         elif form_id == "google-search":
             action = request.form.get("action", "save")
@@ -6047,6 +6499,15 @@ def settings():
                     planner_key_present = True
                     message = "Der Keyword-Planner-Schlüssel wurde gespeichert."
                     message_category = "success"
+        elif form_id == "developer-mode":
+            enabled = request.form.get("developer_mode") in {"on", "1", "true", "True"}
+            developer_mode_enabled = set_developer_mode_enabled(enabled)
+            if developer_mode_enabled:
+                message = "Der Entwicklungsmodus ist nun aktiviert."
+                message_category = "success"
+            else:
+                message = "Der Entwicklungsmodus wurde deaktiviert."
+                message_category = "info"
         else:
             action = request.form.get("action", "save")
             if action == "remove":
@@ -6096,6 +6557,7 @@ def settings():
     search_defaults = get_search_defaults()
     google_credentials = get_google_search_credentials()
     data_quality_settings = get_data_quality_settings()
+    developer_mode_enabled = is_developer_mode_enabled()
 
     return render_template(
         "settings.html",
@@ -6115,6 +6577,7 @@ def settings():
         data_quality_settings=data_quality_settings,
         export_sections=EXPORT_SECTION_ORDER,
         export_definitions=EXPORT_SECTION_DEFINITIONS,
+        developer_mode_enabled=developer_mode_enabled,
         active_page="settings",
     )
 

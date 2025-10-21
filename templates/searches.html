@@ -151,6 +151,8 @@
                         <dd class="col-sm-9" id="detail-description">–</dd>
                         <dt class="col-sm-3">Keywords</dt>
                         <dd class="col-sm-9" id="detail-keywords">–</dd>
+                        <dt class="col-sm-3">Parallelität</dt>
+                        <dd class="col-sm-9" id="detail-concurrency">–</dd>
                         <dt class="col-sm-3">Schulen</dt>
                         <dd class="col-sm-9" id="detail-schools">–</dd>
                         <dt class="col-sm-3">Letzter Lauf</dt>
@@ -263,6 +265,7 @@
         const detailCategory = document.getElementById('detail-category');
         const detailDescription = document.getElementById('detail-description');
         const detailKeywords = document.getElementById('detail-keywords');
+        const detailConcurrency = document.getElementById('detail-concurrency');
         const detailSchools = document.getElementById('detail-schools');
         const detailLastRun = document.getElementById('detail-last-run');
         const detailStatus = document.getElementById('detail-status');
@@ -277,6 +280,8 @@
         const progressSummary = document.getElementById('progress-summary');
         const progressMessages = document.getElementById('progress-messages');
         const progressUpdated = document.getElementById('progress-updated');
+        const progressDetails = document.getElementById('progress-details');
+        const progressDetailsToggle = document.querySelector('[data-bs-target="#progress-details"]');
         const resultsCard = document.getElementById('results-card');
         const resultsSummary = document.getElementById('results-summary');
         const viewButtons = document.querySelectorAll('#results-view-buttons button');
@@ -307,6 +312,25 @@
             pollTimer: null,
             resultsCache: {}
         };
+
+        function escapeSelector(value) {
+            if (typeof value !== 'string') {
+                value = value == null ? '' : String(value);
+            }
+            if (window.CSS && typeof window.CSS.escape === 'function') {
+                return window.CSS.escape(value);
+            }
+            return value.replace(/[^a-zA-Z0-9_\-]/g, '\\$&');
+        }
+
+        if (progressDetails && progressDetailsToggle && !bootstrapLib) {
+            progressDetailsToggle.addEventListener('click', event => {
+                event.preventDefault();
+                const isOpen = progressDetails.classList.contains('show');
+                progressDetails.classList.toggle('show', !isOpen);
+                progressDetails.classList.toggle('d-none', isOpen);
+            });
+        }
 
         function setActiveView(view) {
             viewButtons.forEach(btn => {
@@ -380,6 +404,7 @@
             detailCategory.textContent = definition.category || '–';
             detailDescription.textContent = definition.description || '–';
             detailKeywords.textContent = formatList(definition.keywords || []);
+            detailConcurrency.textContent = definition.concurrency ? `${definition.concurrency} Threads` : '–';
             detailSchools.textContent = definition.school_ids && definition.school_ids.length
                 ? `${definition.school_ids.length} Schulen`
                 : 'Alle aktiven Schulen';
@@ -430,6 +455,7 @@
             detailCategory.textContent = '–';
             detailDescription.textContent = '–';
             detailKeywords.textContent = '–';
+            detailConcurrency.textContent = '–';
             detailSchools.textContent = '–';
             detailLastRun.textContent = '–';
             detailStatus.textContent = '–';
@@ -473,7 +499,8 @@
             progressBar.textContent = `${percent}%`;
             const total = job.total_tasks || 0;
             const processed = job.processed_tasks || 0;
-            progressSummary.textContent = `${processed} von ${total} Kombinationen verarbeitet. Treffer: ${job.results || 0}.`;
+            const concurrencyLabel = job.concurrency ? ` Parallelität: ${job.concurrency}.` : '';
+            progressSummary.textContent = `${processed} von ${total} Schulen verarbeitet. Treffer: ${job.results || 0}.${concurrencyLabel}`;
             progressUpdated.textContent = new Date().toLocaleTimeString('de-DE');
             progressMessages.innerHTML = '';
             (job.messages || []).slice(-50).forEach(message => {
@@ -533,76 +560,248 @@
         }
 
         function renderResults(data) {
-            if (!data || !Array.isArray(data.results)) {
+            if (!data) {
                 resultsCard.classList.add('d-none');
                 return;
             }
-            resultsCard.classList.remove('d-none');
-            const totalResults = data.total_results || 0;
-            const filteredResults = data.filtered_results || 0;
+            const rawResults = Array.isArray(data.results) ? data.results : [];
+            const aggregated = Array.isArray(data.aggregated_schools) ? data.aggregated_schools : [];
+            const schoolsWithoutHits = Array.isArray(data.schools_without_hits) ? data.schools_without_hits : [];
+            const totalSelected = Number(data.total_selected_schools || 0);
+            const totalResults = Number(data.total_results || rawResults.length || 0);
+            const filteredResults = Number(data.filtered_results || rawResults.length || 0);
+            const hitSchools = aggregated.length;
+
+            const summaryParts = [];
             if (data.message) {
-                resultsSummary.textContent = data.message;
-            } else if (!totalResults) {
-                resultsSummary.textContent = 'Keine Ergebnisse für diese Suche gefunden.';
-            } else if (filteredResults !== totalResults) {
-                resultsSummary.textContent = `${filteredResults} von ${totalResults} Ergebnissen angezeigt.`;
-            } else {
-                resultsSummary.textContent = `${totalResults} Ergebnisse gefunden.`;
+                summaryParts.push(data.message);
             }
-            renderSchoolResults(data.results);
+            if (totalSelected) {
+                summaryParts.push(`${hitSchools} von ${totalSelected} Schulen mit Treffern.`);
+            } else if (hitSchools) {
+                summaryParts.push(`${hitSchools} Schulen mit Treffern.`);
+            }
+            if (schoolsWithoutHits.length) {
+                summaryParts.push(`${schoolsWithoutHits.length} Schulen ohne Treffer.`);
+            }
+            if (totalResults) {
+                if (filteredResults !== totalResults) {
+                    summaryParts.push(`${filteredResults} von ${totalResults} Einzelergebnissen angezeigt.`);
+                } else {
+                    summaryParts.push(`${totalResults} Einzelergebnisse insgesamt.`);
+                }
+            } else if (!hitSchools) {
+                summaryParts.push('Keine Ergebnisse für diese Suche gefunden.');
+            }
+            if (!summaryParts.length) {
+                summaryParts.push('Ergebnisse geladen.');
+            }
+
+            resultsCard.classList.remove('d-none');
+            resultsSummary.textContent = summaryParts.join(' ');
+
+            renderAggregatedSchoolResults(aggregated, rawResults, schoolsWithoutHits, totalSelected);
             renderDimensionResults(data.dimension_matrix || []);
             renderKeywordResults(data.keyword_summary || []);
             setActiveView('schools');
         }
 
-        function renderSchoolResults(results) {
-            if (!Array.isArray(results) || !results.length) {
-                viewSchools.innerHTML = '<div class="alert alert-info">Keine Ergebnisse für diese Suche gefunden.</div>';
-                return;
+        function renderAggregatedSchoolResults(aggregated, rawResults, schoolsWithoutHits, totalSelected) {
+            const resultsBySchool = new Map();
+            (Array.isArray(rawResults) ? rawResults : []).forEach(entry => {
+                const key = String(entry.school_id || '');
+                if (!resultsBySchool.has(key)) {
+                    resultsBySchool.set(key, []);
+                }
+                resultsBySchool.get(key).push(entry);
+            });
+
+            if (!Array.isArray(aggregated) || !aggregated.length) {
+                if (rawResults.length) {
+                    aggregated = rawResults.map(entry => ({
+                        school_id: entry.school_id,
+                        school_name: entry.school_name,
+                        school_city: entry.school_city,
+                        school_homepage: entry.school_homepage,
+                        total_hits: 1,
+                        dimensions: Array.isArray(entry.dimensions) ? entry.dimensions.map(dim => ({
+                            dimension: dim.dimension,
+                            average_value: dim.value,
+                            average_confidence: dim.confidence,
+                            count: 1
+                        })) : [],
+                        result_ids: entry.id ? [entry.id] : []
+                    }));
+                } else {
+                    viewSchools.innerHTML = '<div class="alert alert-info">Keine Ergebnisse für diese Suche gefunden.</div>';
+                    if (schoolsWithoutHits.length) {
+                        appendNoHitList(schoolsWithoutHits, totalSelected);
+                    }
+                    return;
+                }
             }
+
             const table = document.createElement('table');
             table.className = 'table table-sm table-hover align-middle results-table';
             table.innerHTML = `
                 <thead class="table-light">
                     <tr>
                         <th scope="col" style="width: 40%;">Schule</th>
-                        <th scope="col" style="width: 35%;">Gefundene URL</th>
-                        <th scope="col" style="width: 25%;">Dimensionen</th>
-                        <th scope="col" class="text-end" style="width: 80px;">Aktionen</th>
+                        <th scope="col" style="width: 15%;">Treffer</th>
+                        <th scope="col" style="width: 35%;">Dimensionen (Ø)</th>
+                        <th scope="col" class="text-end" style="width: 10%;">Aktionen</th>
                     </tr>
                 </thead>
                 <tbody></tbody>
             `;
             const tbody = table.querySelector('tbody');
-            results.forEach(entry => {
+
+            aggregated.forEach(item => {
+                const schoolId = String(item.school_id || '');
+                const entries = resultsBySchool.get(schoolId) || [];
+                const totalHits = Number(item.total_hits || entries.length || 0);
                 const tr = document.createElement('tr');
-                const schoolInfo = `
-                    <div><strong>${entry.school_name || 'Unbekannte Schule'}</strong></div>
-                    <div class="text-muted small">${entry.school_city || 'Ort unbekannt'}</div>
-                    <div class="small"><a href="${entry.school_homepage || '#'}" target="_blank" rel="noopener">${entry.school_homepage || 'Keine Homepage'}</a></div>
-                    <div class="small text-muted">ID: ${entry.school_id || '–'}</div>
+                tr.dataset.schoolId = schoolId;
+                const homepage = item.school_homepage
+                    ? `<a href="${item.school_homepage}" target="_blank" rel="noopener">${item.school_homepage}</a>`
+                    : '<span class="text-muted">Keine Homepage</span>';
+                const dimensions = Array.isArray(item.dimensions) && item.dimensions.length
+                    ? item.dimensions.map(dim => `<span class="badge bg-primary-subtle text-primary-emphasis badge-dimension">${dim.dimension || '–'}: ⌀${Number(dim.average_value || 0).toFixed(2)} (n=${dim.count || 0})</span>`).join(' ')
+                    : '<span class="text-muted">Keine Bewertungen</span>';
+                const actions = entries.length
+                    ? `<button type="button" class="btn btn-sm btn-outline-primary" data-action="toggle-details" data-school="${schoolId}" data-count="${entries.length}">Details (${entries.length})</button>`
+                    : '<span class="text-muted small">Keine Details</span>';
+                tr.innerHTML = `
+                    <td>
+                        <div><strong>${item.school_name || 'Unbekannte Schule'}</strong></div>
+                        <div class="text-muted small">${item.school_city || 'Ort unbekannt'}</div>
+                        <div class="small">${homepage}</div>
+                        <div class="small text-muted">ID: ${schoolId || '–'}</div>
+                    </td>
+                    <td>${totalHits}</td>
+                    <td>${dimensions}</td>
+                    <td class="text-end">${actions}</td>
                 `;
-                const urlInfo = entry.target_url
+                tbody.appendChild(tr);
+
+                const detailRow = document.createElement('tr');
+                detailRow.className = 'detail-row d-none';
+                detailRow.dataset.schoolId = schoolId;
+                const detailCell = document.createElement('td');
+                detailCell.colSpan = 4;
+                detailCell.appendChild(buildDetailTable(entries));
+                detailRow.appendChild(detailCell);
+                tbody.appendChild(detailRow);
+            });
+
+            viewSchools.innerHTML = '';
+            viewSchools.appendChild(table);
+
+            const summaryBlock = document.createElement('div');
+            summaryBlock.className = 'mt-3 small text-muted';
+            if (totalSelected) {
+                summaryBlock.textContent = `Treffer bei ${aggregated.length} von ${totalSelected} ausgewählten Schulen.`;
+            } else {
+                summaryBlock.textContent = `Treffer bei ${aggregated.length} Schulen.`;
+            }
+            viewSchools.appendChild(summaryBlock);
+
+            if (schoolsWithoutHits.length) {
+                appendNoHitList(schoolsWithoutHits, totalSelected);
+            }
+
+            viewSchools.querySelectorAll('button[data-action="toggle-details"]').forEach(button => {
+                button.addEventListener('click', () => {
+                    const schoolId = button.dataset.school;
+                    const targetRow = viewSchools.querySelector(`tr.detail-row[data-school-id="${escapeSelector(schoolId)}"]`);
+                    if (!targetRow) return;
+                    const count = Number(button.dataset.count || targetRow.querySelectorAll('tbody tr').length || 0);
+                    const isHidden = targetRow.classList.contains('d-none');
+                    if (isHidden) {
+                        targetRow.classList.remove('d-none');
+                        button.textContent = `Details verbergen (${count})`;
+                    } else {
+                        targetRow.classList.add('d-none');
+                        button.textContent = `Details (${count})`;
+                    }
+                });
+            });
+
+            viewSchools.querySelectorAll('button[data-action="edit"]').forEach(btn => btn.addEventListener('click', () => openEditModal(btn.dataset.id)));
+            viewSchools.querySelectorAll('button[data-action="delete"]').forEach(btn => btn.addEventListener('click', () => deleteResult(btn.dataset.id)));
+        }
+
+        function buildDetailTable(entries) {
+            const wrapper = document.createElement('div');
+            wrapper.className = 'bg-light border rounded p-2';
+            if (!Array.isArray(entries) || !entries.length) {
+                wrapper.innerHTML = '<div class="text-muted small mb-0">Keine Einzelergebnisse vorhanden.</div>';
+                return wrapper;
+            }
+            const table = document.createElement('table');
+            table.className = 'table table-sm mb-0 align-middle';
+            table.innerHTML = `
+                <thead class="table-light">
+                    <tr>
+                        <th scope="col" style="width: 45%;">Gefundene URL</th>
+                        <th scope="col" style="width: 35%;">Dimensionen</th>
+                        <th scope="col" style="width: 10%;">Stichwort</th>
+                        <th scope="col" class="text-end" style="width: 10%;">Aktionen</th>
+                    </tr>
+                </thead>
+                <tbody></tbody>
+            `;
+            const tbody = table.querySelector('tbody');
+            entries.forEach(entry => {
+                const row = document.createElement('tr');
+                const url = entry.target_url
                     ? `<a href="${entry.target_url}" target="_blank" rel="noopener">${entry.target_url}</a>`
                     : '<span class="text-muted">–</span>';
-                const dimensionsHtml = Array.isArray(entry.dimensions)
-                    ? entry.dimensions.map(dim => `<span class="badge bg-primary-subtle text-primary-emphasis badge-dimension">${dim.dimension || 'Unbekannt'}: ${dim.value ?? '–'} (${(dim.confidence ?? 0).toFixed(2)})</span>`).join('')
-                    : '<span class="text-muted">–</span>';
-                tr.innerHTML = `
-                    <td>${schoolInfo}</td>
-                    <td>${urlInfo}</td>
-                    <td>${dimensionsHtml}</td>
+                const dimensions = Array.isArray(entry.dimensions) && entry.dimensions.length
+                    ? entry.dimensions.map(dim => `<span class="badge bg-primary-subtle text-primary-emphasis badge-dimension">${dim.dimension || '–'}: ${dim.value ?? '–'} (${(dim.confidence ?? 0).toFixed(2)})</span>`).join(' ')
+                    : '<span class="text-muted">Keine Dimensionen</span>';
+                row.innerHTML = `
+                    <td>${url}</td>
+                    <td>${dimensions}</td>
+                    <td>${entry.keyword || '–'}</td>
                     <td class="text-end">
-                        <button type="button" class="btn btn-sm btn-outline-secondary mb-1" data-action="edit" data-id="${entry.id}">Bearbeiten</button>
+                        <button type="button" class="btn btn-sm btn-outline-secondary" data-action="edit" data-id="${entry.id}">Bearbeiten</button>
                         <button type="button" class="btn btn-sm btn-outline-danger" data-action="delete" data-id="${entry.id}">Löschen</button>
                     </td>
                 `;
-                tbody.appendChild(tr);
+                tbody.appendChild(row);
             });
-            viewSchools.innerHTML = '';
-            viewSchools.appendChild(table);
-            viewSchools.querySelectorAll('button[data-action="edit"]').forEach(btn => btn.addEventListener('click', () => openEditModal(btn.dataset.id)));
-            viewSchools.querySelectorAll('button[data-action="delete"]').forEach(btn => btn.addEventListener('click', () => deleteResult(btn.dataset.id)));
+            wrapper.appendChild(table);
+            return wrapper;
+        }
+
+        function appendNoHitList(schoolsWithoutHits, totalSelected) {
+            const container = document.createElement('div');
+            container.className = 'alert alert-warning mt-3';
+            const title = document.createElement('p');
+            title.className = 'mb-2';
+            const count = schoolsWithoutHits.length;
+            if (totalSelected) {
+                title.textContent = `${count} von ${totalSelected} Schulen ohne Treffer.`;
+            } else {
+                title.textContent = `${count} Schulen ohne Treffer.`;
+            }
+            container.appendChild(title);
+            const details = document.createElement('details');
+            details.className = 'small';
+            const summary = document.createElement('summary');
+            summary.textContent = 'Liste anzeigen';
+            details.appendChild(summary);
+            const list = document.createElement('ul');
+            list.className = 'mt-2 mb-0';
+            schoolsWithoutHits.forEach(item => {
+                const li = document.createElement('li');
+                li.innerHTML = `<strong>${item.school_name || 'Unbekannte Schule'}</strong> (${item.school_city || 'Ort unbekannt'})${item.school_homepage ? ` – <a href="${item.school_homepage}" target="_blank" rel="noopener">${item.school_homepage}</a>` : ''}`;
+                list.appendChild(li);
+            });
+            details.appendChild(list);
+            container.appendChild(details);
+            viewSchools.appendChild(container);
         }
 
         function renderDimensionResults(matrix) {

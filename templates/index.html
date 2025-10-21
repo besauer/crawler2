@@ -19,6 +19,12 @@
         @media (min-width: 992px) {
             .navbar-nav { flex-wrap: nowrap; gap: 0.75rem; }
         }
+        .modal-open-fallback { display: block; opacity: 1; position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); z-index: 1055; width: min(520px, 92%); }
+        .modal-open-fallback .modal-dialog { margin: 0; max-width: 100%; }
+        .modal-open-fallback .modal-content { box-shadow: 0 0.5rem 1rem rgba(0,0,0,0.15); border: 1px solid rgba(0,0,0,0.175); }
+        .modal-backdrop-simple { position: fixed; inset: 0; background: rgba(0,0,0,0.5); z-index: 1050; }
+        body.modal-open { overflow: hidden; }
+        .category-list { max-height: 220px; overflow-y: auto; }
     </style>
 </head>
 <body>
@@ -108,12 +114,7 @@
                     <label class="form-label" for="search-category">Kategorie der Suche</label>
                     <div class="input-group">
                         <select class="form-select" id="search-category"></select>
-                        <button class="btn btn-outline-secondary dropdown-toggle" type="button" data-bs-toggle="dropdown"
-                                aria-expanded="false" id="category-menu">Aktionen</button>
-                        <ul class="dropdown-menu dropdown-menu-end" aria-labelledby="category-menu">
-                            <li><a class="dropdown-item" href="#" data-category-action="add">Kategorie hinzufügen…</a></li>
-                            <li><a class="dropdown-item" href="#" data-category-action="remove">Kategorie löschen…</a></li>
-                        </ul>
+                        <button class="btn btn-outline-secondary" type="button" id="manage-categories">Kategorien verwalten</button>
                     </div>
                 </div>
                 <div class="col-lg-4">
@@ -289,6 +290,12 @@
                         <div class="form-text">Standard: 200 Ergebnisse</div>
                     </div>
                     <div class="col-md-3">
+                        <label class="form-label" for="search-concurrency">Parallele Seitenabrufe</label>
+                        <input type="number" class="form-control" id="search-concurrency" min="1"
+                               value="{{ search_defaults.concurrency|default(20) }}">
+                        <div class="form-text">Standard: 20 Threads, kein festes Maximum.</div>
+                    </div>
+                    <div class="col-md-3">
                         <label class="form-label" for="search-model">Sprachmodell</label>
                         <select class="form-select" id="search-model">
                             {% for model in available_models %}
@@ -318,44 +325,45 @@
 
 {% include '_data_management_modals.html' %}
 
-<!-- Kategorie hinzufügen -->
-<div class="modal fade" id="modal-add-category" tabindex="-1" aria-labelledby="modalAddCategoryLabel" aria-hidden="true">
-    <div class="modal-dialog">
+<div class="modal fade" id="modal-manage-categories" tabindex="-1" aria-labelledby="modalManageCategories" aria-hidden="true">
+    <div class="modal-dialog modal-dialog-centered">
         <div class="modal-content">
             <div class="modal-header">
-                <h5 class="modal-title" id="modalAddCategoryLabel">Neue Kategorie anlegen</h5>
-                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Schließen"></button>
+                <h5 class="modal-title" id="modalManageCategories">Kategorien verwalten</h5>
+                <button type="button" class="btn-close" data-modal-close aria-label="Schließen"></button>
             </div>
             <div class="modal-body">
-                <label class="form-label" for="new-category-name">Bezeichnung</label>
-                <input type="text" class="form-control" id="new-category-name" placeholder="z. B. Digitalisierung">
-                <div class="invalid-feedback" id="new-category-feedback"></div>
+                <div class="mb-3">
+                    <div class="nav nav-tabs" id="category-tabs" role="tablist">
+                        <button class="nav-link active" type="button" data-category-pane="add">Hinzufügen</button>
+                        <button class="nav-link" type="button" data-category-pane="remove">Entfernen</button>
+                    </div>
+                </div>
+                <div data-category-content>
+                    <div class="category-pane active" data-pane="add">
+                        <div class="mb-3">
+                            <label class="form-label" for="new-category-name">Neue Kategorie</label>
+                            <input type="text" class="form-control" id="new-category-name" placeholder="z. B. Digitalisierung">
+                            <div class="invalid-feedback" id="new-category-feedback"></div>
+                        </div>
+                        <button type="button" class="btn btn-primary" id="confirm-add-category">Kategorie hinzufügen</button>
+                        <hr>
+                        <h6 class="mb-2">Bestehende Kategorien</h6>
+                        <ul class="list-group category-list" id="category-list"></ul>
+                    </div>
+                    <div class="category-pane" data-pane="remove">
+                        <div class="mb-3">
+                            <label class="form-label" for="remove-category-select">Kategorie auswählen</label>
+                            <select class="form-select" id="remove-category-select"></select>
+                            <div class="form-text">Standardkategorien können nicht gelöscht werden.</div>
+                            <div class="invalid-feedback" id="remove-category-feedback"></div>
+                        </div>
+                        <button type="button" class="btn btn-danger" id="confirm-remove-category">Kategorie löschen</button>
+                    </div>
+                </div>
             </div>
             <div class="modal-footer">
-                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Abbrechen</button>
-                <button type="button" class="btn btn-primary" id="confirm-add-category">Speichern</button>
-            </div>
-        </div>
-    </div>
-</div>
-
-<!-- Kategorie löschen -->
-<div class="modal fade" id="modal-remove-category" tabindex="-1" aria-labelledby="modalRemoveCategoryLabel" aria-hidden="true">
-    <div class="modal-dialog">
-        <div class="modal-content">
-            <div class="modal-header">
-                <h5 class="modal-title" id="modalRemoveCategoryLabel">Kategorie löschen</h5>
-                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Schließen"></button>
-            </div>
-            <div class="modal-body">
-                <label class="form-label" for="remove-category-select">Kategorie auswählen</label>
-                <select class="form-select" id="remove-category-select"></select>
-                <div class="form-text">Standardkategorien können nicht gelöscht werden.</div>
-                <div class="invalid-feedback" id="remove-category-feedback"></div>
-            </div>
-            <div class="modal-footer">
-                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Abbrechen</button>
-                <button type="button" class="btn btn-danger" id="confirm-remove-category">Löschen</button>
+                <button type="button" class="btn btn-secondary" data-modal-close>Schließen</button>
             </div>
         </div>
     </div>
@@ -380,16 +388,15 @@
         const maxResultsInput = document.getElementById('search-max-results');
         const modelSelect = document.getElementById('search-model');
         const temperatureInput = document.getElementById('search-temperature');
+        const concurrencyInput = document.getElementById('search-concurrency');
         const queryPreview = document.getElementById('query-preview');
         const feedbackBox = document.getElementById('search-feedback');
         const testOutput = document.getElementById('search-test-output');
         const probeOutput = document.getElementById('search-probe-output');
         const bootstrapLib = (typeof window !== 'undefined' && window.bootstrap && typeof window.bootstrap.Modal === 'function') ? window.bootstrap : null;
-        const categoryMenuButton = document.getElementById('category-menu');
-        const addCategoryModalElement = document.getElementById('modal-add-category');
-        const removeCategoryModalElement = document.getElementById('modal-remove-category');
-        const addCategoryModal = bootstrapLib && addCategoryModalElement ? new bootstrapLib.Modal(addCategoryModalElement) : null;
-        const removeCategoryModal = bootstrapLib && removeCategoryModalElement ? new bootstrapLib.Modal(removeCategoryModalElement) : null;
+        const manageCategoriesBtn = document.getElementById('manage-categories');
+        const categoryModalElement = document.getElementById('modal-manage-categories');
+        const categoryModal = createModalController(categoryModalElement);
         const schoolCheckboxes = Array.from(document.querySelectorAll('.school-checkbox'));
         const selectionCount = document.getElementById('selection-count');
 
@@ -409,6 +416,40 @@
             }
         }
 
+        function createModalController(element) {
+            if (!element) {
+                return { show() {}, hide() {} };
+            }
+            if (bootstrapLib && typeof bootstrapLib.Modal === 'function') {
+                const instance = new bootstrapLib.Modal(element);
+                return {
+                    show() { instance.show(); },
+                    hide() { instance.hide(); }
+                };
+            }
+            let backdrop = null;
+            return {
+                show() {
+                    if (backdrop) return;
+                    backdrop = document.createElement('div');
+                    backdrop.className = 'modal-backdrop-simple';
+                    document.body.appendChild(backdrop);
+                    element.classList.add('modal-open-fallback');
+                    element.removeAttribute('aria-hidden');
+                    document.body.classList.add('modal-open');
+                },
+                hide() {
+                    if (backdrop) {
+                        backdrop.remove();
+                        backdrop = null;
+                    }
+                    element.classList.remove('modal-open-fallback');
+                    element.setAttribute('aria-hidden', 'true');
+                    document.body.classList.remove('modal-open');
+                }
+            };
+        }
+
         function renderCategories(values) {
             categories = Array.isArray(values) ? [...values] : [];
             categorySelect.innerHTML = '';
@@ -421,10 +462,33 @@
             if (values.includes(defaultCategory)) {
                 categorySelect.value = defaultCategory;
             }
-            updateRemoveCategoryList(values);
+            updateRemoveCategorySelect(values);
+            updateCategoryList(values);
         }
 
-        function updateRemoveCategoryList(values) {
+        function updateCategoryList(values) {
+            const list = document.getElementById('category-list');
+            if (!list) return;
+            list.innerHTML = '';
+            if (!values.length) {
+                list.innerHTML = '<li class="list-group-item text-muted">Keine Kategorien vorhanden.</li>';
+                return;
+            }
+            values.forEach(value => {
+                const item = document.createElement('li');
+                item.className = 'list-group-item d-flex justify-content-between align-items-center';
+                item.textContent = value;
+                if (value === defaultCategory) {
+                    const badge = document.createElement('span');
+                    badge.className = 'badge bg-secondary ms-2';
+                    badge.textContent = 'Standard';
+                    item.appendChild(badge);
+                }
+                list.appendChild(item);
+            });
+        }
+
+        function updateRemoveCategorySelect(values) {
             const removeSelect = document.getElementById('remove-category-select');
             if (!removeSelect) return;
             removeSelect.innerHTML = '';
@@ -437,6 +501,26 @@
         }
 
         renderCategories(categories);
+
+        const categoryTabButtons = categoryModalElement ? Array.from(categoryModalElement.querySelectorAll('[data-category-pane]')) : [];
+        const categoryPanes = categoryModalElement ? Array.from(categoryModalElement.querySelectorAll('.category-pane')) : [];
+        const modalCloseButtons = categoryModalElement ? Array.from(categoryModalElement.querySelectorAll('[data-modal-close]')) : [];
+
+        function setActiveCategoryPane(name) {
+            categoryPanes.forEach(pane => pane.classList.toggle('active', pane.dataset.pane === name));
+            categoryTabButtons.forEach(btn => btn.classList.toggle('active', btn.dataset.categoryPane === name));
+        }
+
+        categoryTabButtons.forEach(btn => {
+            btn.addEventListener('click', () => setActiveCategoryPane(btn.dataset.categoryPane));
+        });
+        modalCloseButtons.forEach(btn => btn.addEventListener('click', () => categoryModal.hide()));
+        setActiveCategoryPane('add');
+
+        manageCategoriesBtn?.addEventListener('click', () => {
+            setActiveCategoryPane('add');
+            categoryModal.show();
+        });
 
         function applyPrefill() {
             if (prefillApplied || !prefillDefinition) {
@@ -465,6 +549,9 @@
             }
             if (typeof prefillDefinition.max_results === 'number') {
                 maxResultsInput.value = prefillDefinition.max_results;
+            }
+            if (typeof prefillDefinition.concurrency === 'number') {
+                concurrencyInput.value = prefillDefinition.concurrency;
             }
             if (typeof prefillDefinition.model === 'string') {
                 const hasModel = Array.from(modelSelect.options).some(option => option.value === prefillDefinition.model);
@@ -555,149 +642,53 @@
             updateSelectionCount();
         });
 
-        if (categoryMenuButton && !bootstrapLib) {
-            categoryMenuButton.addEventListener('click', event => {
-                event.preventDefault();
-                const choice = window.prompt('Kategorie hinzufügen (h) oder löschen (l)?', 'h');
-                if (!choice) {
-                    return;
-                }
-                const normalized = choice.trim().toLowerCase();
-                if (normalized.startsWith('h')) {
-                    document.getElementById('new-category-name').value = '';
-                    document.getElementById('new-category-feedback').textContent = '';
-                    const name = window.prompt('Neue Kategorie anlegen');
-                    if (!name || !name.trim()) {
-                        return;
-                    }
-                    clearFeedback();
-                    createCategoryRequest(name.trim())
-                        .then(() => {
-                            feedbackBox.className = 'mt-3 alert alert-success';
-                            feedbackBox.textContent = `Kategorie "${name.trim()}" wurde gespeichert.`;
-                        })
-                        .catch(error => {
-                            feedbackBox.className = 'mt-3 alert alert-danger';
-                            feedbackBox.textContent = error.message;
-                        });
-                } else if (normalized.startsWith('l')) {
-                    if (!categories.length) {
-                        feedbackBox.className = 'mt-3 alert alert-info';
-                        feedbackBox.textContent = 'Es sind keine Kategorien vorhanden.';
-                        return;
-                    }
-                    const suggestion = categorySelect.value || categories[0];
-                    const name = window.prompt('Kategorie zum Löschen auswählen', suggestion);
-                    if (!name || !name.trim()) {
-                        return;
-                    }
-                    clearFeedback();
-                    deleteCategoryRequest(name.trim())
-                        .then(() => {
-                            feedbackBox.className = 'mt-3 alert alert-success';
-                            feedbackBox.textContent = `Kategorie "${name.trim()}" wurde gelöscht.`;
-                        })
-                        .catch(error => {
-                            feedbackBox.className = 'mt-3 alert alert-danger';
-                            feedbackBox.textContent = error.message;
-                        });
-                }
-            });
-        }
-
-        document.querySelectorAll('[data-category-action="add"]').forEach(btn => btn.addEventListener('click', async event => {
-            event.preventDefault();
-            document.getElementById('new-category-name').value = '';
-            document.getElementById('new-category-feedback').textContent = '';
-            if (addCategoryModal) {
-                addCategoryModal.show();
-            } else {
-                const input = window.prompt('Neue Kategorie anlegen');
-                const name = (input || '').trim();
-                if (!name) {
-                    return;
-                }
-                clearFeedback();
-                try {
-                    await createCategoryRequest(name);
-                    feedbackBox.className = 'mt-3 alert alert-success';
-                    feedbackBox.textContent = `Kategorie "${name}" wurde gespeichert.`;
-                } catch (error) {
-                    feedbackBox.className = 'mt-3 alert alert-danger';
-                    feedbackBox.textContent = error.message;
-                }
-            }
-        }));
-        document.querySelectorAll('[data-category-action="remove"]').forEach(btn => btn.addEventListener('click', async event => {
-            event.preventDefault();
-            document.getElementById('remove-category-feedback').textContent = '';
-            if (removeCategoryModal) {
-                removeCategoryModal.show();
-            } else {
-                if (!categories.length) {
-                    feedbackBox.className = 'mt-3 alert alert-info';
-                    feedbackBox.textContent = 'Es sind keine Kategorien vorhanden.';
-                    return;
-                }
-                const suggestion = categorySelect.value || categories[0];
-                const input = window.prompt('Kategorie zum Löschen auswählen', suggestion);
-                const name = (input || '').trim();
-                if (!name) {
-                    return;
-                }
-                clearFeedback();
-                try {
-                    await deleteCategoryRequest(name);
-                    feedbackBox.className = 'mt-3 alert alert-success';
-                    feedbackBox.textContent = `Kategorie "${name}" wurde gelöscht.`;
-                } catch (error) {
-                    feedbackBox.className = 'mt-3 alert alert-danger';
-                    feedbackBox.textContent = error.message;
-                }
-            }
-        }));
+        const addCategoryInput = document.getElementById('new-category-name');
+        const addCategoryFeedback = document.getElementById('new-category-feedback');
+        const removeCategorySelect = document.getElementById('remove-category-select');
+        const removeCategoryFeedback = document.getElementById('remove-category-feedback');
 
         document.getElementById('confirm-add-category')?.addEventListener('click', async () => {
-            const input = document.getElementById('new-category-name');
-            const name = input.value.trim();
-            const feedback = document.getElementById('new-category-feedback');
-            feedback.textContent = '';
-            input.classList.remove('is-invalid');
+            if (!addCategoryInput) return;
+            const name = addCategoryInput.value.trim();
+            addCategoryFeedback.textContent = '';
+            addCategoryInput.classList.remove('is-invalid');
             if (!name) {
-                input.classList.add('is-invalid');
-                feedback.textContent = 'Bitte geben Sie eine Bezeichnung ein.';
+                addCategoryInput.classList.add('is-invalid');
+                addCategoryFeedback.textContent = 'Bitte geben Sie eine Bezeichnung ein.';
                 return;
             }
             try {
                 await createCategoryRequest(name);
                 feedbackBox.className = 'mt-3 alert alert-success';
                 feedbackBox.textContent = `Kategorie "${name}" wurde gespeichert.`;
-                addCategoryModal?.hide();
+                categorySelect.value = name;
+                categoryModal.hide();
+                addCategoryInput.value = '';
+                addCategoryFeedback.textContent = '';
             } catch (error) {
-                input.classList.add('is-invalid');
-                feedback.textContent = error.message;
+                addCategoryInput.classList.add('is-invalid');
+                addCategoryFeedback.textContent = error.message;
             }
         });
 
         document.getElementById('confirm-remove-category')?.addEventListener('click', async () => {
-            const select = document.getElementById('remove-category-select');
-            const feedback = document.getElementById('remove-category-feedback');
-            feedback.textContent = '';
-            select.classList.remove('is-invalid');
-            const name = select.value;
+            if (!removeCategorySelect) return;
+            const name = removeCategorySelect.value;
+            removeCategoryFeedback.textContent = '';
+            removeCategorySelect.classList.remove('is-invalid');
             if (!name) {
-                select.classList.add('is-invalid');
-                feedback.textContent = 'Bitte wählen Sie eine Kategorie aus.';
+                removeCategorySelect.classList.add('is-invalid');
+                removeCategoryFeedback.textContent = 'Bitte wählen Sie eine Kategorie aus.';
                 return;
             }
             try {
                 await deleteCategoryRequest(name);
                 feedbackBox.className = 'mt-3 alert alert-success';
                 feedbackBox.textContent = `Kategorie "${name}" wurde gelöscht.`;
-                removeCategoryModal?.hide();
+                categoryModal.hide();
             } catch (error) {
-                select.classList.add('is-invalid');
-                feedback.textContent = error.message;
+                removeCategorySelect.classList.add('is-invalid');
+                removeCategoryFeedback.textContent = error.message;
             }
         });
 
@@ -712,7 +703,8 @@
                 prompt: promptInput.value,
                 max_results: parseInt(maxResultsInput.value, 10) || {{ search_defaults.max_results }},
                 model: modelSelect.value,
-                temperature: parseFloat(temperatureInput.value) || {{ search_defaults.temperature|default(0.2) }}
+                temperature: parseFloat(temperatureInput.value) || {{ search_defaults.temperature|default(0.2) }},
+                concurrency: parseInt(concurrencyInput?.value || '', 10) || {{ search_defaults.concurrency|default(20) }}
             };
         }
 
