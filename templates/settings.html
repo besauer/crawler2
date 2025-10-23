@@ -194,7 +194,7 @@
                 </div>
                 <div class="col-md-4 col-12">
                     <label for="dq_max_search_results" class="form-label">Treffer pro Google-Suche</label>
-                    <input type="number" class="form-control" id="dq_max_search_results" name="dq_max_search_results" min="1" max="10"
+                    <input type="number" class="form-control" id="dq_max_search_results" name="dq_max_search_results" min="1" max="100"
                            value="{{ data_quality_settings.max_search_results }}" required>
                 </div>
                 <div class="col-md-4 col-12">
@@ -230,6 +230,24 @@
                     <label for="dq_blocked_domains" class="form-label">Ausgeschlossene Domains (optional)</label>
                     <textarea class="form-control" id="dq_blocked_domains" name="dq_blocked_domains" rows="3">{{ data_quality_settings.blocked_domains | join('\n') }}</textarea>
                     <div class="form-text">Eine Domain pro Zeile, wird vor der Bewertung verworfen.</div>
+                </div>
+                <div class="col-12">
+                    <label for="dq_site_prompt" class="form-label">Prompt – Prüfung starten</label>
+                    <textarea class="form-control" id="dq_site_prompt" name="site_prompt" rows="6" required>{{ data_quality_settings.site_prompt }}</textarea>
+                    <div class="form-text">Legt fest, wie das LLM die Hauptprüfung (inklusive Auftrittstyp) bewertet.</div>
+                </div>
+                <div class="col-12">
+                    <label for="dq_site_scope_prompt" class="form-label">Prompt – Auftrittstyp prüfen</label>
+                    <textarea class="form-control" id="dq_site_scope_prompt" name="site_scope_prompt" rows="6" required>{{ data_quality_settings.site_scope_prompt }}</textarea>
+                    <div class="form-text">Wird nur verwendet, wenn in Datenqualität explizit „Auftrittstyp prüfen“ gestartet wird.</div>
+                </div>
+                <div class="col-12">
+                    <label for="dq_search_prompt" class="form-label">Prompt – Google-Suche (LLM-Auswertung)</label>
+                    <textarea class="form-control" id="dq_search_prompt" name="search_prompt" rows="5" required>{{ data_quality_settings.search_prompt }}</textarea>
+                    <div class="form-text">Beschreibt, wie vorgeschlagene Google-Treffer bewertet und priorisiert werden.</div>
+                </div>
+                <div class="col-12 text-muted small">
+                    Hinweis: Die Aktion „Falschvorschläge übernehmen“ nutzt kein Sprachmodell, daher ist kein Prompt erforderlich.
                 </div>
                 <div class="col-12">
                     <button type="submit" class="btn btn-primary">Einstellungen speichern</button>

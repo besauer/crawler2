@@ -108,12 +108,24 @@ AVAILABLE_OPENAI_MODELS = [
 data_quality_lock = threading.Lock()
 DATA_QUALITY_SITE_PROMPT = (
     "Du prüfst, ob eine Webseite zur angegebenen Schule gehört. Du erhältst Schulname und Ort sowie komprimierte "
-    "Textauszüge aus Startseite und Impressum. Bewerte ausschließlich, ob die Seite mit hoher Wahrscheinlichkeit "
-    "die offizielle Webseite der Schule ist. Antworte als JSON-Objekt mit den Schlüsseln \"bewertung\" (Werte: OK, "
-    "NEIN, UNSICHER), \"confidence\" (0.0–1.0), \"begruendung\" (kurze Begründung), \"gefundene_signale\" "
-    "(Liste kurzer Stichworte), \"auftritt_typ\" (Werte: EXKLUSIV für eine eigenständige Schulwebseite oder GETEILT "
-    "für einen geteilten Auftritt auf einer fremden Domain) und \"auftritt_begruendung\" (kurze Begründung für den "
-    "Auftrittstyp)."
+    "Textauszüge, Navigationspunkte, Überschriften, Inhaltsabschnitte, Impressumsdaten und weitere Signale. Nutze "
+    "den gesamten Seitenaufbau (z. B. Navigation, Footer, Kontaktangaben, Adressen, E-Mail-Domains, thematische "
+    "Schwerpunkte), nicht nur die URL. Die Domain allein ist kein starkes Signal. Bewerte ausschließlich, ob die "
+    "Seite mit hoher Wahrscheinlichkeit die offizielle Webseite der Schule ist. Antworte als JSON-Objekt mit den "
+    "Schlüsseln \"bewertung\" (Werte: OK, NEIN, UNSICHER), \"confidence\" (0.0–1.0), \"begruendung\" (kurze "
+    "Begründung), \"gefundene_signale\" (Liste kurzer Stichworte), \"auftritt_typ\" (Werte: EXKLUSIV für eine "
+    "eigenständige Schulwebseite oder GETEILT für einen geteilten Auftritt auf einer fremden Domain) und "
+    "\"auftritt_begruendung\" (kurze Begründung für den Auftrittstyp)."
+)
+
+DATA_QUALITY_SITE_SCOPE_PROMPT = (
+    "Du entscheidest, ob der übergebene Webauftritt exklusiv nur diese Schule behandelt oder Teil einer größeren "
+    "Webpräsenz ist. Dir liegen Schulname, Ort, vollständige Textauszüge der Startseite, Navigation, Überschriften, "
+    "wichtige Inhaltsabschnitte, Impressumsdaten sowie erkannte Signale (z. B. Adressen, Kontaktwege, Domains) vor. "
+    "Gewichte die URL nur gering: Entscheidend sind Inhalte, Struktur, Navigation, Ansprechpersonen, Logos und "
+    "sprachliche Hinweise auf weitere Organisationen. Antworte im gleichen JSON-Format wie bei der Hauptprüfung mit "
+    "den Feldern \"bewertung\", \"confidence\", \"begruendung\", \"gefundene_signale\", \"auftritt_typ\" "
+    "(EXKLUSIV oder GETEILT) und \"auftritt_begruendung\"."
 )
 DATA_QUALITY_SEARCH_PROMPT = (
     "Du erhältst Schulname, Ort und eine Liste möglicher Webseiten aus einer Google-Suche. Wähle die URL aus, die am "
@@ -133,6 +145,9 @@ DEFAULT_DATA_QUALITY_SETTINGS = {
     "search_region": "de",
     "allowed_domains": [],
     "blocked_domains": [],
+    "site_prompt": DATA_QUALITY_SITE_PROMPT,
+    "site_scope_prompt": DATA_QUALITY_SITE_SCOPE_PROMPT,
+    "search_prompt": DATA_QUALITY_SEARCH_PROMPT,
 }
 GOOGLE_SEARCH_API_URL = "https://www.googleapis.com/customsearch/v1"
 GOOGLE_SEARCH_TIMEOUT = 20
@@ -675,6 +690,18 @@ def get_data_quality_settings() -> Dict[str, object]:
     else:
         blocked = []
     result["blocked_domains"] = blocked
+    site_prompt = str(stored.get("site_prompt", defaults["site_prompt"]) or defaults["site_prompt"]).strip()
+    if not site_prompt:
+        site_prompt = defaults["site_prompt"]
+    result["site_prompt"] = site_prompt
+    scope_prompt = str(stored.get("site_scope_prompt", defaults["site_scope_prompt"]) or defaults["site_scope_prompt"]).strip()
+    if not scope_prompt:
+        scope_prompt = defaults["site_scope_prompt"]
+    result["site_scope_prompt"] = scope_prompt
+    search_prompt = str(stored.get("search_prompt", defaults["search_prompt"]) or defaults["search_prompt"]).strip()
+    if not search_prompt:
+        search_prompt = defaults["search_prompt"]
+    result["search_prompt"] = search_prompt
     return result
 
 
@@ -726,6 +753,15 @@ def update_data_quality_settings(values: Dict[str, object]) -> Dict[str, object]
         blocked_domains = [str(item).strip() for item in blocked_raw if str(item).strip()]
     else:
         blocked_domains = []
+    site_prompt = str(values.get("site_prompt", defaults["site_prompt"]) or defaults["site_prompt"]).strip()
+    if not site_prompt:
+        site_prompt = defaults["site_prompt"]
+    scope_prompt = str(values.get("site_scope_prompt", defaults["site_scope_prompt"]) or defaults["site_scope_prompt"]).strip()
+    if not scope_prompt:
+        scope_prompt = defaults["site_scope_prompt"]
+    search_prompt = str(values.get("search_prompt", defaults["search_prompt"]) or defaults["search_prompt"]).strip()
+    if not search_prompt:
+        search_prompt = defaults["search_prompt"]
     data["data_quality_settings"] = {
         "model": model,
         "temperature": temperature,
@@ -738,6 +774,9 @@ def update_data_quality_settings(values: Dict[str, object]) -> Dict[str, object]
         "search_region": region,
         "allowed_domains": allowed_domains,
         "blocked_domains": blocked_domains,
+        "site_prompt": site_prompt,
+        "site_scope_prompt": scope_prompt,
+        "search_prompt": search_prompt,
     }
     save_settings_data(data)
     return get_data_quality_settings()
@@ -2646,6 +2685,10 @@ def collect_site_snapshot(url: str) -> Dict[str, object]:
         "structured_signals": {},
         "fetched_urls": [],
         "errors": [],
+        "navigation_items": [],
+        "heading_texts": [],
+        "content_snippets": [],
+        "link_domains": [],
     }
     html = fetch_url_text(url)
     if not html:
@@ -2658,7 +2701,7 @@ def collect_site_snapshot(url: str) -> Dict[str, object]:
     if description_tag:
         snapshot["description"] = _collapse_whitespace(description_tag.get("content", ""))
     text = extract_visible_text(html)
-    snapshot["main_excerpt"] = _truncate_text(text, 1500)
+    snapshot["main_excerpt"] = _truncate_text(text, 3500)
     snapshot["fetched_urls"].append(url)
 
     structured: Dict[str, object] = {}
@@ -2674,6 +2717,66 @@ def collect_site_snapshot(url: str) -> Dict[str, object]:
     if postal_lines:
         structured["addresses"] = postal_lines
     snapshot["structured_signals"] = structured
+
+    nav_items: List[str] = []
+    seen_nav_texts: Set[str] = set()
+    nav_candidates = soup.find_all("nav")
+    if not nav_candidates:
+        nav_candidates = soup.select(
+            "ul[class*='nav'], ul[class*='menu'], ol[class*='nav'], ol[class*='menu'], div[class*='nav'], div[class*='menu']"
+        )
+    for nav in nav_candidates:
+        for anchor in nav.find_all("a", href=True):
+            label = _collapse_whitespace(anchor.get_text(" ", strip=True))
+            if not label or label.lower() in seen_nav_texts:
+                continue
+            seen_nav_texts.add(label.lower())
+            nav_items.append(label)
+            if len(nav_items) >= 40:
+                break
+        if len(nav_items) >= 40:
+            break
+    snapshot["navigation_items"] = nav_items
+
+    heading_texts: List[str] = []
+    seen_heading_texts: Set[str] = set()
+    for level in range(1, 5):
+        for heading in soup.find_all(f"h{level}"):
+            label = _collapse_whitespace(heading.get_text(" ", strip=True))
+            if not label:
+                continue
+            lowered = label.lower()
+            if lowered in seen_heading_texts:
+                continue
+            seen_heading_texts.add(lowered)
+            heading_texts.append(label)
+            if len(heading_texts) >= 40:
+                break
+        if len(heading_texts) >= 40:
+            break
+    snapshot["heading_texts"] = heading_texts
+
+    content_snippets: List[str] = []
+    seen_snippets: Set[str] = set()
+    for element in soup.find_all(["p", "li", "article", "section", "div"]):
+        if element.name in {"div", "section", "article"}:
+            if not any(
+                cls for cls in (element.get("class") or []) if re.search(r"(content|text|beschreibung|body)", cls, re.I)
+            ):
+                continue
+        snippet = _collapse_whitespace(element.get_text(" ", strip=True))
+        if len(snippet) < 40:
+            continue
+        lowered = snippet.lower()
+        if lowered in seen_snippets:
+            continue
+        seen_snippets.add(lowered)
+        content_snippets.append(snippet[:400])
+        if len(content_snippets) >= 25:
+            break
+    if not content_snippets and text:
+        content_snippets.append(_collapse_whitespace(text)[:400])
+    snapshot["content_snippets"] = content_snippets
 
     base_url = url
     impressum_links: List[str] = []
@@ -2703,6 +2806,16 @@ def collect_site_snapshot(url: str) -> Dict[str, object]:
         if len(nav_links) >= 3:
             break
 
+    seen_link_domains: Set[str] = set()
+    for anchor in soup.find_all("a", href=True):
+        absolute = urljoin(base_url, anchor["href"])
+        domain = urlparse(absolute).netloc.lower()
+        if domain and domain not in seen_link_domains:
+            seen_link_domains.add(domain)
+            snapshot["link_domains"].append(domain)
+            if len(snapshot["link_domains"]) >= 25:
+                break
+
     for nav_url in nav_links:
         html_nav = fetch_url_text(nav_url)
         if not html_nav:
@@ -2731,6 +2844,7 @@ def assess_school_website_with_llm(
     *,
     api_key: str,
     settings: Dict[str, object],
+    mode: str = "full",
 ) -> Optional[Dict[str, object]]:
     headers = {
         "Authorization": f"Bearer {api_key}",
@@ -2738,6 +2852,33 @@ def assess_school_website_with_llm(
     }
     model_name = str(settings.get("model") or OPENAI_MODEL_NAME)
     temperature = float(settings.get("temperature", DEFAULT_DATA_QUALITY_SETTINGS["temperature"]))
+    if mode == "site_scope":
+        prompt_text = str(settings.get("site_scope_prompt") or settings.get("site_prompt") or DATA_QUALITY_SITE_SCOPE_PROMPT)
+    else:
+        prompt_text = str(settings.get("site_prompt") or DATA_QUALITY_SITE_PROMPT)
+    prompt_text = prompt_text.strip() or (DATA_QUALITY_SITE_SCOPE_PROMPT if mode == "site_scope" else DATA_QUALITY_SITE_PROMPT)
+
+    navigation_items = [
+        str(item)
+        for item in snapshot.get("navigation_items", [])
+        if isinstance(item, str) and str(item).strip()
+    ]
+    heading_items = [
+        str(item)
+        for item in snapshot.get("heading_texts", [])
+        if isinstance(item, str) and str(item).strip()
+    ]
+    content_items = [
+        str(item)
+        for item in snapshot.get("content_snippets", [])
+        if isinstance(item, str) and str(item).strip()
+    ]
+    link_domains = [
+        str(item)
+        for item in snapshot.get("link_domains", [])
+        if isinstance(item, str) and str(item).strip()
+    ]
+
     payload = {
         "schule": schulname,
         "ort": ort,
@@ -2748,11 +2889,15 @@ def assess_school_website_with_llm(
         "startseite_text": snapshot.get("main_excerpt"),
         "impressum_text": snapshot.get("impressum_excerpt"),
         "signale": snapshot.get("structured_signals", {}),
+        "navigation": navigation_items,
+        "ueberschriften": heading_items,
+        "inhaltssegmente": content_items,
+        "verlinkte_domains": link_domains,
     }
     request_payload = {
         "model": model_name,
         "messages": [
-            {"role": "system", "content": DATA_QUALITY_SITE_PROMPT},
+            {"role": "system", "content": prompt_text},
             {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
         ],
         "temperature": temperature,
@@ -3183,6 +3328,7 @@ def analyse_search_results_with_llm(
     }
     model_name = str(settings.get("model") or OPENAI_MODEL_NAME)
     temperature = float(settings.get("temperature", DEFAULT_DATA_QUALITY_SETTINGS["temperature"]))
+    prompt_text = str(settings.get("search_prompt") or DATA_QUALITY_SEARCH_PROMPT).strip() or DATA_QUALITY_SEARCH_PROMPT
     payload = {
         "schule": schulname,
         "ort": ort,
@@ -3192,7 +3338,7 @@ def analyse_search_results_with_llm(
     request_payload = {
         "model": model_name,
         "messages": [
-            {"role": "system", "content": DATA_QUALITY_SEARCH_PROMPT},
+            {"role": "system", "content": prompt_text},
             {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
         ],
         "temperature": temperature,
@@ -4873,6 +5019,7 @@ def run_data_quality_job(job: DataQualityJob) -> None:
                 snapshot,
                 api_key=openai_key,
                 settings=settings,
+                mode=mode,
             )
 
             status_primary = QUALITY_STATUS_UNSURE
@@ -4932,6 +5079,10 @@ def run_data_quality_job(job: DataQualityJob) -> None:
                     "structured_signals": snapshot.get("structured_signals"),
                     "errors": snapshot.get("errors"),
                     "fetched_urls": snapshot.get("fetched_urls"),
+                    "navigation_items": snapshot.get("navigation_items"),
+                    "heading_texts": snapshot.get("heading_texts"),
+                    "content_snippets": snapshot.get("content_snippets"),
+                    "link_domains": snapshot.get("link_domains"),
                 },
                 "site_scope": site_scope,
                 "site_scope_reason": site_scope_reason,
@@ -6714,6 +6865,9 @@ def settings():
                 "search_region": request.form.get("dq_search_region", ""),
                 "allowed_domains": request.form.get("dq_allowed_domains", ""),
                 "blocked_domains": request.form.get("dq_blocked_domains", ""),
+                "site_prompt": request.form.get("site_prompt", ""),
+                "site_scope_prompt": request.form.get("site_scope_prompt", ""),
+                "search_prompt": request.form.get("search_prompt", ""),
             }
             data_quality_settings = update_data_quality_settings(values)
             message = "Die Einstellungen für die Datenqualität wurden gespeichert."
