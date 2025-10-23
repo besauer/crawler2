@@ -139,6 +139,26 @@
                             </div>
                         </div>
                     </div>
+                    <div class="mt-3">
+                        <span class="text-muted small text-uppercase fw-semibold">Datenqualitätsstatus</span>
+                        <div class="btn-group btn-group-sm flex-wrap" role="group" id="dq-status-filter">
+                            <button type="button" class="btn btn-outline-secondary active" data-dq-status="all">Alle</button>
+                            <button type="button" class="btn btn-outline-secondary" data-dq-status="pending">{{ quality_status_labels['pending'] }}</button>
+                            <button type="button" class="btn btn-outline-secondary" data-dq-status="ok">{{ quality_status_labels['ok'] }}</button>
+                            <button type="button" class="btn btn-outline-secondary" data-dq-status="unsure">{{ quality_status_labels['unsure'] }}</button>
+                            <button type="button" class="btn btn-outline-secondary" data-dq-status="invalid">{{ quality_status_labels['invalid'] }}</button>
+                            <button type="button" class="btn btn-outline-secondary" data-dq-status="corrected">Richtiger Wert</button>
+                        </div>
+                    </div>
+                    <div class="mt-2">
+                        <span class="text-muted small text-uppercase fw-semibold">Auftrittstyp</span>
+                        <div class="btn-group btn-group-sm flex-wrap" role="group" id="dq-scope-filter">
+                            <button type="button" class="btn btn-outline-secondary active" data-site-scope="all">Alle</button>
+                            <button type="button" class="btn btn-outline-secondary" data-site-scope="exclusive">{{ site_scope_labels['exclusive'] }}</button>
+                            <button type="button" class="btn btn-outline-secondary" data-site-scope="shared">{{ site_scope_labels['shared'] }}</button>
+                            <button type="button" class="btn btn-outline-secondary" data-site-scope="unknown">{{ site_scope_labels['unknown'] }}</button>
+                        </div>
+                    </div>
                     <div class="mb-3">
                         <div class="btn-group btn-group-sm" role="group">
                             <button class="btn btn-outline-secondary" id="select-all">Alle auswählen</button>
@@ -406,6 +426,8 @@ seite">{{ index_settings.parameter_whitelist|join('\n') }}</textarea>
     const selectNoneBtn = document.getElementById('select-none');
     const selectVisibleBtn = document.getElementById('select-visible');
     const resetFiltersBtn = document.getElementById('reset-filters');
+    const dqStatusButtons = document.querySelectorAll('#dq-status-filter [data-dq-status]');
+    const dqScopeButtons = document.querySelectorAll('#dq-scope-filter [data-site-scope]');
     const selectionSummary = document.getElementById('selection-summary');
     const startBtn = document.getElementById('start-index-btn');
     const cancelBtn = document.getElementById('cancel-index-btn');
@@ -434,7 +456,15 @@ seite">{{ index_settings.parameter_whitelist|join('\n') }}</textarea>
     const linksTableBody = document.querySelector('#links-table tbody');
     const logsContainer = document.getElementById('logs-container');
 
-    let currentFilters = { text: '', boolean: '', numeric: null };
+    const createDefaultFilters = () => ({
+        text: '',
+        boolean: '',
+        numeric: null,
+        dqStatus: 'all',
+        siteScope: 'all',
+    });
+
+    let currentFilters = createDefaultFilters();
     let selectedSchools = new Set();
     let currentJobId = null;
     let pollTimer = null;
@@ -442,14 +472,24 @@ seite">{{ index_settings.parameter_whitelist|join('\n') }}</textarea>
 
     function renderSchools() {
         tableBody.innerHTML = '';
-        const text = currentFilters.text.toLowerCase();
+        const text = (currentFilters.text || '').toLowerCase();
         const booleanKey = currentFilters.boolean;
         const numericFilter = currentFilters.numeric;
+        const statusFilter = (currentFilters.dqStatus || 'all').toLowerCase();
+        const scopeFilter = (currentFilters.siteScope || 'all').toLowerCase();
         let visible = 0;
+        let visibleSelected = 0;
         records.forEach(record => {
             const schulId = record.schul_id;
             if (!schulId) return;
-            const haystack = [record.schulname, record.ort, record.homepage, record.status].filter(Boolean).join(' ').toLowerCase();
+            const haystack = [
+                record.schulname,
+                record.ort,
+                record.homepage,
+                record.status,
+                record.dq_status_label,
+                record.dq_site_scope_label,
+            ].filter(Boolean).join(' ').toLowerCase();
             if (text && !haystack.includes(text)) {
                 return;
             }
@@ -475,20 +515,64 @@ seite">{{ index_settings.parameter_whitelist|join('\n') }}</textarea>
                     return;
                 }
             }
+            const recordStatus = (record.dq_status || 'pending').toString().toLowerCase();
+            if (statusFilter !== 'all') {
+                if (statusFilter === 'corrected') {
+                    if (!record.dq_correction_applied) {
+                        return;
+                    }
+                } else if (recordStatus !== statusFilter) {
+                    return;
+                }
+            }
+            const recordScope = (record.dq_site_scope || 'unknown').toString().toLowerCase();
+            if (scopeFilter !== 'all' && recordScope !== scopeFilter) {
+                return;
+            }
             const tr = document.createElement('tr');
             tr.dataset.schoolId = schulId;
-            const checked = selectedSchools.has(schulId);
+            const isSelected = selectedSchools.has(schulId);
+            if (isSelected) {
+                visibleSelected += 1;
+            }
+            const statusParts = [];
+            if (record.status) {
+                statusParts.push(record.status);
+            }
+            if (record.dq_status_label) {
+                statusParts.push(record.dq_status_label);
+            }
+            const statusHtml = statusParts.length ? `<div class="small text-muted">${statusParts.join(' • ')}</div>` : '';
+            const badgeParts = [];
+            if (record.dq_site_scope_label) {
+                const scopeClass = record.dq_site_scope_class || 'text-bg-secondary';
+                badgeParts.push(`<span class="badge rounded-pill ${scopeClass}">${record.dq_site_scope_label}</span>`);
+            }
+            if (record.dq_correction_applied) {
+                badgeParts.push('<span class="badge bg-success-subtle text-success border border-success-subtle">Richtiger Wert übernommen</span>');
+            }
+            const badgeHtml = badgeParts.length ? `<div class="mt-1 d-flex flex-wrap gap-1">${badgeParts.join('')}</div>` : '';
+            const homepage = record.homepage || '';
+            const homepageCell = homepage
+                ? `<a href="${homepage}" target="_blank" rel="noopener">${homepage}</a>`
+                : '–';
             tr.innerHTML = `
-                <td><input class="form-check-input" type="checkbox" value="${schulId}" ${checked ? 'checked' : ''}></td>
-                <td><strong>${record.schulname || '–'}</strong><br><small class="text-muted">${record.status || ''}</small></td>
+                <td><input class="form-check-input" type="checkbox" value="${schulId}" ${isSelected ? 'checked' : ''}></td>
+                <td><strong>${record.schulname || '–'}</strong>${statusHtml}${badgeHtml}</td>
                 <td>${record.ort || '–'}</td>
-                <td><a href="${record.homepage || '#'}" target="_blank" rel="noopener">${record.homepage || '–'}</a></td>
+                <td>${homepageCell}</td>
                 <td>${collectSchoolTypes(record).join(', ') || '–'}</td>
             `;
             tableBody.appendChild(tr);
             visible++;
         });
-        headerSelect.checked = visible > 0 && visible === selectedSchools.size;
+        if (visible === 0) {
+            headerSelect.checked = false;
+            headerSelect.indeterminate = false;
+        } else {
+            headerSelect.checked = visibleSelected === visible;
+            headerSelect.indeterminate = visibleSelected > 0 && visibleSelected < visible;
+        }
         updateSelectionSummary();
     }
 
@@ -520,6 +604,38 @@ seite">{{ index_settings.parameter_whitelist|join('\n') }}</textarea>
         renderSchools();
     }
 
+    function setDqStatus(value, skipRender = false) {
+        const target = (value || 'all').toLowerCase();
+        currentFilters.dqStatus = target;
+        dqStatusButtons.forEach(button => {
+            const buttonValue = (button.dataset.dqStatus || 'all').toLowerCase();
+            if (buttonValue === target) {
+                button.classList.add('active');
+            } else {
+                button.classList.remove('active');
+            }
+        });
+        if (!skipRender) {
+            renderSchools();
+        }
+    }
+
+    function setSiteScope(value, skipRender = false) {
+        const target = (value || 'all').toLowerCase();
+        currentFilters.siteScope = target;
+        dqScopeButtons.forEach(button => {
+            const buttonValue = (button.dataset.siteScope || 'all').toLowerCase();
+            if (buttonValue === target) {
+                button.classList.add('active');
+            } else {
+                button.classList.remove('active');
+            }
+        });
+        if (!skipRender) {
+            renderSchools();
+        }
+    }
+
     function setSelected(ids) {
         selectedSchools = new Set(ids);
         renderSchools();
@@ -530,6 +646,20 @@ seite">{{ index_settings.parameter_whitelist|join('\n') }}</textarea>
     numericFieldSelect.addEventListener('change', applyFilters);
     numericOperatorSelect.addEventListener('change', applyFilters);
     numericValueInput.addEventListener('input', applyFilters);
+
+    dqStatusButtons.forEach(button => {
+        button.addEventListener('click', (event) => {
+            event.preventDefault();
+            setDqStatus(button.dataset.dqStatus || 'all');
+        });
+    });
+
+    dqScopeButtons.forEach(button => {
+        button.addEventListener('click', (event) => {
+            event.preventDefault();
+            setSiteScope(button.dataset.siteScope || 'all');
+        });
+    });
 
     tableBody.addEventListener('change', (event) => {
         if (!(event.target instanceof HTMLInputElement)) return;
@@ -580,7 +710,9 @@ seite">{{ index_settings.parameter_whitelist|join('\n') }}</textarea>
         numericFieldSelect.value = '';
         numericOperatorSelect.value = 'eq';
         numericValueInput.value = '';
-        currentFilters = { text: '', boolean: '', numeric: null };
+        currentFilters = createDefaultFilters();
+        setDqStatus(currentFilters.dqStatus, true);
+        setSiteScope(currentFilters.siteScope, true);
         renderSchools();
     });
 
@@ -877,6 +1009,8 @@ seite">{{ index_settings.parameter_whitelist|join('\n') }}</textarea>
         }
     }
 
+    setDqStatus(currentFilters.dqStatus, true);
+    setSiteScope(currentFilters.siteScope, true);
     renderSchools();
     loadRuns();
 })();

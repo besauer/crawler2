@@ -7853,19 +7853,59 @@ def delete_search_result_route(result_id: int) -> ResponseReturnValue:
 @app.route("/indexing")
 def indexing_page() -> ResponseReturnValue:
     records_all = load_stammdaten()
-    active_records = [record for record in records_all if record.get("aktiv", True)]
+    quality_results = load_data_quality_results()
+    enriched_records: List[Dict[str, Any]] = []
+    for record in records_all:
+        if not record.get("aktiv", True):
+            continue
+        school_id = str(record.get("schul_id") or "").strip()
+        quality_entry = quality_results.get(school_id) if school_id else None
+        if not isinstance(quality_entry, dict):
+            quality_entry = {}
+        status_value = str(quality_entry.get("status") or QUALITY_STATUS_PENDING)
+        status_label = quality_status_label(status_value)
+        site_scope_value = normalise_site_scope(quality_entry.get("site_scope"))
+        site_scope_label_value = site_scope_label(site_scope_value)
+        site_scope_class_value = site_scope_class(site_scope_value)
+        quality_payload = dict(quality_entry)
+        quality_payload["status"] = status_value
+        quality_payload.setdefault("status_label", status_label)
+        quality_payload["site_scope"] = site_scope_value
+        quality_payload.setdefault("site_scope_label", site_scope_label_value)
+        quality_payload.setdefault("site_scope_class", site_scope_class_value)
+        quality_payload["correction_applied"] = bool(quality_payload.get("correction_applied"))
+        quality_payload.setdefault("last_checked", quality_entry.get("last_checked"))
+        record_copy = dict(record)
+        record_copy["dq_status"] = status_value
+        record_copy["dq_status_label"] = status_label
+        record_copy["dq_site_scope"] = site_scope_value
+        record_copy["dq_site_scope_label"] = site_scope_label_value
+        record_copy["dq_site_scope_class"] = site_scope_class_value
+        record_copy["dq_correction_applied"] = quality_payload.get("correction_applied", False)
+        record_copy["dq_has_suggestion"] = bool(quality_payload.get("suggested_url"))
+        record_copy["dq_last_checked"] = quality_payload.get("last_checked")
+        record_copy["dq_site_scope_reason"] = quality_payload.get("site_scope_reason")
+        record_copy["quality"] = quality_payload
+        enriched_records.append(record_copy)
     index_settings = get_index_settings()
     runs = list(storage.list_index_runs())
     return render_template(
         "indexing.html",
         active_page="indexing",
-        records=active_records,
+        records=enriched_records,
         stammdaten_fields=STAMMDATEN_FIELDS,
         stammdaten_primary_fields=STAMMDATEN_PRIMARY_FIELDS,
         stammdaten_boolean_fields=STAMMDATEN_BOOLEAN_FIELDS,
         index_settings=index_settings,
         index_runs=runs,
         max_concurrency=MAX_CONCURRENCY,
+        quality_status_labels={
+            QUALITY_STATUS_PENDING: quality_status_label(QUALITY_STATUS_PENDING),
+            QUALITY_STATUS_OK: quality_status_label(QUALITY_STATUS_OK),
+            QUALITY_STATUS_UNSURE: quality_status_label(QUALITY_STATUS_UNSURE),
+            QUALITY_STATUS_INVALID: quality_status_label(QUALITY_STATUS_INVALID),
+        },
+        site_scope_labels=SITE_SCOPE_LABELS,
     )
 
 
