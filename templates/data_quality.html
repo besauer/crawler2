@@ -50,6 +50,11 @@
         .school-meta { color: #6c757d; }
         .school-meta strong { color: inherit; font-weight: 600; }
         .navbar-nav .nav-link { white-space: nowrap; }
+        .students-cell { text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
+        .sortable { cursor: pointer; user-select: none; }
+        .sortable:focus { outline: none; box-shadow: 0 0 0 0.25rem rgba(13, 110, 253, 0.25); }
+        .sortable .sort-indicator { margin-left: 0.35rem; font-size: 0.75rem; opacity: 0.6; }
+        .sortable.active .sort-indicator { opacity: 1; }
         @media (min-width: 992px) {
             .navbar-nav { flex-wrap: nowrap; gap: 0.75rem; }
         }
@@ -233,6 +238,7 @@
                         <th>Aktionen</th>
                         <th><input type="checkbox" class="form-check-input" id="select-master"></th>
                         <th>Schule</th>
+                        <th class="text-end sortable" data-sort-key="students" tabindex="0" role="button" aria-label="Nach Anzahl der Schüler sortieren">Schüler/-innen insgesamt<span class="sort-indicator" aria-hidden="true">↕</span></th>
                         <th>Vorschlag</th>
                         <th>Letzte Prüfung</th>
                     </tr>
@@ -243,7 +249,7 @@
                         {% set scope_label = record.site_scope_label or site_scope_labels.get(scope_value, site_scope_labels[site_scope_unknown]) %}
                         {% set scope_class = site_scope_classes.get(scope_value, site_scope_classes[site_scope_unknown]) %}
                         {% set scope_reason = record.site_scope_reason or record.quality.site_scope_reason or '' %}
-                        <tr data-school-id="{{ record.schul_id }}" data-status="{{ record.status }}" data-school-label="{{ record.schulname|default('')|e }}" data-has-suggestion="{{ '1' if record.quality.suggested_url else '' }}" data-suggested-url="{{ record.quality.suggested_url|default('')|e }}" data-correction-applied="{{ '1' if record.correction_applied else '' }}" data-site-scope="{{ scope_value }}" data-site-scope-reason="{{ scope_reason|e }}">
+                        <tr data-school-id="{{ record.schul_id }}" data-status="{{ record.status }}" data-school-label="{{ record.schulname|default('')|e }}" data-has-suggestion="{{ '1' if record.quality.suggested_url else '' }}" data-suggested-url="{{ record.quality.suggested_url|default('')|e }}" data-correction-applied="{{ '1' if record.correction_applied else '' }}" data-site-scope="{{ scope_value }}" data-site-scope-reason="{{ scope_reason|e }}" data-students="{{ record.schueler_gesamt_numeric if record.schueler_gesamt_numeric is not none else '' }}">
                             <td class="text-nowrap">
                                 <div class="dropdown">
                                     <button class="btn btn-sm btn-outline-primary dropdown-toggle" type="button" data-bs-toggle="dropdown" aria-expanded="false">
@@ -282,6 +288,15 @@
                                 <div class="fw-semibold school-name mt-1">{{ record.schulname|break_every(40) }}</div>
                                 <div class="school-meta">Ort: {{ record.ort }}</div>
                                 <div class="school-meta small">ID: {{ record.schul_id }}</div>
+                            </td>
+                            <td class="text-nowrap text-end students-cell">
+                                {% if record.schueler_gesamt_numeric is not none %}
+                                    {{ '{:,}'.format(record.schueler_gesamt_numeric).replace(',', '.') }}
+                                {% elif record.schueler_gesamt is not none %}
+                                    {{ record.schueler_gesamt }}
+                                {% else %}
+                                    <span class="text-muted">–</span>
+                                {% endif %}
                             </td>
                             <td class="text-nowrap">
                                 {% if record.quality.suggested_url %}
@@ -443,6 +458,10 @@
         const recordIndex = new Map();
         let currentStatusFilter = 'all';
         let currentScopeFilter = 'all';
+        let baseRecords = [];
+        let currentRecords = [];
+        let currentSortKey = null;
+        let currentSortDirection = 'asc';
 
         function escapeHtml(value) {
             return (value == null ? '' : String(value)).replace(/[&<>"']/g, (char) => {
@@ -478,6 +497,38 @@
             return chunkText(value, 40);
         }
 
+        function parseStudents(value) {
+            if (value == null || value === '') {
+                return null;
+            }
+            if (typeof value === 'number') {
+                return Number.isFinite(value) ? Math.round(value) : null;
+            }
+            const text = String(value).trim();
+            if (!text) {
+                return null;
+            }
+            const normalised = text
+                .replace(/[\u202f\u00a0\s]/g, '')
+                .replace(/\./g, '')
+                .replace(/,/g, '.');
+            const parsed = Number(normalised);
+            if (!Number.isFinite(parsed)) {
+                return null;
+            }
+            return Math.round(parsed);
+        }
+
+        function formatStudentsDisplay(rawValue, numericValue) {
+            if (numericValue != null && !Number.isNaN(numericValue)) {
+                return escapeHtml(new Intl.NumberFormat('de-DE').format(numericValue));
+            }
+            if (rawValue == null || rawValue === '') {
+                return '<span class="text-muted">–</span>';
+            }
+            return escapeHtml(String(rawValue));
+        }
+
         function normalizeScope(value) {
             const text = (value == null ? '' : String(value)).toLowerCase();
             if (!text) {
@@ -502,6 +553,83 @@
             const reasonText = scopeReason ? escapeHtml(scopeReason) : '';
             const titleAttr = reasonText ? ` title="${reasonText}"` : '';
             return `<button type="button" class="badge rounded-pill site-scope-badge ${escapeHtml(cssClass)}" data-site-scope="${escapeHtml(scopeValue)}" data-school-id="${schoolId}" data-scope-reason="${reasonText}"${titleAttr}>${escapeHtml(label)}</button>`;
+        }
+
+        function getSortValue(record, key) {
+            if (!record || typeof record !== 'object') {
+                return null;
+            }
+            switch (key) {
+                case 'students': {
+                    const source = record.schueler_gesamt_numeric != null
+                        ? record.schueler_gesamt_numeric
+                        : record.schueler_gesamt;
+                    return parseStudents(source);
+                }
+                default:
+                    return null;
+            }
+        }
+
+        function sortRecords(records) {
+            if (!Array.isArray(records) || !currentSortKey) {
+                return records;
+            }
+            const direction = currentSortDirection === 'desc' ? -1 : 1;
+            const key = currentSortKey;
+            records.sort((a, b) => {
+                const valueA = getSortValue(a, key);
+                const valueB = getSortValue(b, key);
+                if (valueA == null && valueB == null) {
+                    return 0;
+                }
+                if (valueA == null) {
+                    return 1;
+                }
+                if (valueB == null) {
+                    return -1;
+                }
+                if (valueA < valueB) {
+                    return -1 * direction;
+                }
+                if (valueA > valueB) {
+                    return 1 * direction;
+                }
+                return 0;
+            });
+            return records;
+        }
+
+        function updateSortIndicators() {
+            document.querySelectorAll('[data-sort-key]').forEach(header => {
+                const indicator = header.querySelector('.sort-indicator');
+                if (header.dataset.sortKey === currentSortKey) {
+                    header.classList.add('active');
+                    header.classList.toggle('asc', currentSortDirection === 'asc');
+                    header.classList.toggle('desc', currentSortDirection === 'desc');
+                    if (indicator) {
+                        indicator.textContent = currentSortDirection === 'desc' ? '↓' : '↑';
+                    }
+                } else {
+                    header.classList.remove('active', 'asc', 'desc');
+                    if (indicator) {
+                        indicator.textContent = '↕';
+                    }
+                }
+            });
+        }
+
+        function setSort(key) {
+            if (!key) {
+                return;
+            }
+            if (currentSortKey === key) {
+                currentSortDirection = currentSortDirection === 'asc' ? 'desc' : 'asc';
+            } else {
+                currentSortKey = key;
+                currentSortDirection = 'desc';
+            }
+            updateTable();
         }
 
         function getSelectedIds() {
@@ -574,6 +702,7 @@
                 }
                 const name = row.dataset.schoolLabel || row.querySelector('.school-name')?.textContent?.trim() || '';
                 const homepage = row.querySelector('.school-url a')?.href || '';
+                const studentsValue = row.dataset.students ? Number(row.dataset.students) : null;
                 recordIndex.set(id, {
                     schul_id: id,
                     schulname: name,
@@ -581,19 +710,29 @@
                     status: row.dataset.status || '',
                     suggested_url: row.dataset.suggestedUrl || '',
                     site_scope: row.dataset.siteScope || SITE_SCOPE_UNKNOWN,
+                    schueler_gesamt_numeric: Number.isFinite(studentsValue) ? studentsValue : null,
                 });
             });
         }
 
         function updateTable(records) {
+            if (!tableBody) {
+                return;
+            }
+            if (Array.isArray(records)) {
+                baseRecords = records.slice();
+            }
+            const source = Array.isArray(baseRecords) ? baseRecords.slice() : [];
+            sortRecords(source);
+            currentRecords = source;
             tableBody.innerHTML = '';
             recordIndex.clear();
-            records.forEach(record => {
+            currentRecords.forEach(record => {
                 const row = document.createElement('tr');
-                row.dataset.schoolId = record.schul_id ?? '';
-                row.dataset.status = record.status ?? '';
-                row.dataset.schoolLabel = record.schulname ?? '';
-                recordIndex.set(record.schul_id, record);
+                const schoolId = record?.schul_id ?? '';
+                row.dataset.schoolId = schoolId;
+                row.dataset.status = record?.status ?? '';
+                row.dataset.schoolLabel = record?.schulname ?? '';
                 const suggestionUrl = record?.quality?.suggested_url ? String(record.quality.suggested_url) : '';
                 const suggestionConfidence = record?.quality?.suggested_confidence;
                 const suggestionConfidenceText = suggestionConfidence != null && !Number.isNaN(Number(suggestionConfidence))
@@ -602,7 +741,7 @@
                 const suggestionHtml = suggestionUrl
                     ? `<a href="${escapeHtml(suggestionUrl)}" target="_blank" rel="noopener">${formatUrl(suggestionUrl)}</a>${suggestionConfidenceText}`
                     : '<span class="text-muted">—</span>';
-                const homepage = record.homepage ? String(record.homepage) : '';
+                const homepage = record?.homepage ? String(record.homepage) : '';
                 const scopeValue = normalizeScope(record?.site_scope ?? record?.quality?.site_scope);
                 const scopeReason = record?.site_scope_reason || record?.quality?.site_scope_reason || '';
                 const scopeBadge = buildScopeBadge(record, scopeValue, scopeReason);
@@ -611,18 +750,26 @@
                     : '<span class="text-muted">—</span>') + scopeBadge;
                 const manualNoteText = record?.quality?.manual_note ? escapeHtml(record.quality.manual_note) : '';
                 const manualNote = manualNoteText ? `<span class="text-muted quality-note d-block">${manualNoteText}</span>` : '';
-                const lastChecked = record?.quality?.last_checked ? `<time datetime="${escapeHtml(record.quality.last_checked)}">${escapeHtml(record.quality.last_checked)}</time>` : '<span class="text-muted">Noch nicht geprüft</span>';
+                const lastChecked = record?.quality?.last_checked
+                    ? `<time datetime="${escapeHtml(record.quality.last_checked)}">${escapeHtml(record.quality.last_checked)}</time>`
+                    : '<span class="text-muted">Noch nicht geprüft</span>';
                 const statusBadge = `<span class="badge bg-secondary status-badge" data-status="${escapeHtml(record.status)}">${escapeHtml(record.status_label)}</span>`;
                 const correctionBadge = (record?.quality?.correction_applied ?? record?.correction_applied)
                     ? '<span class="badge bg-success-subtle text-success border border-success-subtle ms-1">Richtiger Wert übernommen</span>'
                     : '';
                 const inlineStatus = `<div class="school-status">${statusBadge}${correctionBadge}${manualNote}</div>`;
+                const rawStudents = record?.schueler_gesamt != null ? record.schueler_gesamt : record?.schueler_gesamt_numeric;
+                const studentsNumeric = parseStudents(
+                    record?.schueler_gesamt_numeric != null ? record.schueler_gesamt_numeric : rawStudents
+                );
+                const studentsDisplay = formatStudentsDisplay(rawStudents, studentsNumeric);
 
                 row.dataset.hasSuggestion = suggestionUrl ? '1' : '';
                 row.dataset.suggestedUrl = suggestionUrl;
                 row.dataset.correctionApplied = record?.quality?.correction_applied || record?.correction_applied ? '1' : '';
                 row.dataset.siteScope = scopeValue;
                 row.dataset.siteScopeReason = scopeReason;
+                row.dataset.students = studentsNumeric != null ? String(studentsNumeric) : '';
 
                 row.innerHTML = `
                     <td class="text-nowrap">
@@ -641,14 +788,21 @@
                             </ul>
                         </div>
                     </td>
-                    <td><input type="checkbox" class="form-check-input record-checkbox" value="${escapeHtml(record.schul_id)}"></td>
-                    <td class="school-cell"><div class="school-url">${homepageHtml}</div>${inlineStatus}<div class="fw-semibold school-name mt-1">${formatSchoolName(record.schulname || '')}</div><div class="school-meta">Ort: ${escapeHtml(record.ort || '')}</div><div class="school-meta small">ID: ${escapeHtml(record.schul_id || '')}</div></td>
+                    <td><input type="checkbox" class="form-check-input record-checkbox" value="${escapeHtml(schoolId)}"></td>
+                    <td class="school-cell"><div class="school-url">${homepageHtml}</div>${inlineStatus}<div class="fw-semibold school-name mt-1">${formatSchoolName(record.schulname || '')}</div><div class="school-meta">Ort: ${escapeHtml(record.ort || '')}</div><div class="school-meta small">ID: ${escapeHtml(schoolId)}</div></td>
+                    <td class="text-nowrap text-end students-cell">${studentsDisplay}</td>
                     <td class="text-nowrap">${suggestionHtml}</td>
                     <td class="text-nowrap">${lastChecked}</td>
                 `;
+                const indexedRecord = Object.assign({}, record);
+                if (studentsNumeric != null && indexedRecord.schueler_gesamt_numeric == null) {
+                    indexedRecord.schueler_gesamt_numeric = studentsNumeric;
+                }
+                recordIndex.set(schoolId, indexedRecord);
                 tableBody.appendChild(row);
             });
             applyVisibilityFilters();
+            updateSortIndicators();
         }
 
         function applyVisibilityFilters() {
@@ -1146,6 +1300,15 @@
         scopeButtons.forEach(button => {
             button.addEventListener('click', () => setScopeFilter(button.dataset.filterScope || 'all'));
         });
+        document.querySelectorAll('[data-sort-key]').forEach(header => {
+            header.addEventListener('click', () => setSort(header.dataset.sortKey || ''));
+            header.addEventListener('keydown', event => {
+                if (event.key === 'Enter' || event.key === ' ') {
+                    event.preventDefault();
+                    setSort(header.dataset.sortKey || '');
+                }
+            });
+        });
         siteScopeForm?.addEventListener('submit', event => {
             event.preventDefault();
             const schoolId = siteScopeSchoolId?.value || '';
@@ -1239,8 +1402,14 @@
             }
         });
 
-        rebuildRecordIndexFromDom();
-        applyVisibilityFilters();
+        const initialRecords = {{ records|tojson }};
+        if (Array.isArray(initialRecords)) {
+            updateTable(initialRecords);
+        } else {
+            rebuildRecordIndexFromDom();
+            applyVisibilityFilters();
+            updateSortIndicators();
+        }
         resumeActiveJob();
     })();
 </script>

@@ -4158,6 +4158,26 @@ def build_data_quality_dataset() -> List[Dict[str, object]]:
         schul_id = str(entry.get("schul_id") or "").strip()
         if not schul_id:
             continue
+        students_raw = entry.get("schueler_gesamt")
+        students_numeric: Optional[int] = None
+        if isinstance(students_raw, (int, float)) and not math.isnan(float(students_raw)):
+            students_numeric = int(students_raw)
+        elif isinstance(students_raw, str):
+            cleaned = students_raw.strip()
+            if cleaned:
+                cleaned = (
+                    cleaned.replace("\u202f", "")
+                    .replace("\u00a0", "")
+                    .replace(" ", "")
+                    .replace(".", "")
+                )
+                cleaned = cleaned.replace(",", ".")
+                try:
+                    parsed = float(cleaned)
+                except ValueError:
+                    parsed = None
+                if parsed is not None and not math.isnan(parsed):
+                    students_numeric = int(parsed)
         quality_entry = quality.get(schul_id) if isinstance(quality, dict) else None
         if not isinstance(quality_entry, dict):
             quality_entry = {}
@@ -4186,6 +4206,8 @@ def build_data_quality_dataset() -> List[Dict[str, object]]:
                 "schulname": entry.get("schulname"),
                 "ort": entry.get("ort"),
                 "homepage": entry.get("homepage"),
+                "schueler_gesamt": entry.get("schueler_gesamt"),
+                "schueler_gesamt_numeric": students_numeric,
                 "status": formatted["status"],
                 "status_label": formatted["status_label"],
                 "correction_applied": bool(formatted.get("correction_applied")),
