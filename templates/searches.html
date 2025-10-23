@@ -57,6 +57,12 @@
                     </a>
                 </li>
                 <li class="nav-item">
+                    <a class="nav-link {% if active_page == 'indexing' %}active{% endif %}"
+                       href="{{ url_for('indexing_page') }}" {% if active_page == 'indexing' %}aria-current="page"{% endif %}>
+                        Index
+                    </a>
+                </li>
+                <li class="nav-item">
                     <a class="nav-link {% if active_page == 'stammdaten' %}active{% endif %}" href="{{ url_for('stammdaten') }}"
                        {% if active_page == 'stammdaten' %}aria-current="page"{% endif %}>Stammdaten</a>
                 </li>

@@ -2,7 +2,7 @@ import json
 import sqlite3
 import threading
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 
 class SQLiteStorage:
@@ -108,6 +108,41 @@ class SQLiteStorage:
                         created_at TEXT DEFAULT CURRENT_TIMESTAMP
                     );
                     CREATE INDEX IF NOT EXISTS idx_error_log_created ON error_log(created_at DESC);
+                    CREATE TABLE IF NOT EXISTS index_runs (
+                        id TEXT PRIMARY KEY,
+                        payload TEXT NOT NULL,
+                        status TEXT NOT NULL,
+                        started_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                        completed_at TEXT
+                    );
+                    CREATE TABLE IF NOT EXISTS index_documents (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        run_id TEXT NOT NULL,
+                        url TEXT NOT NULL,
+                        content_hash TEXT,
+                        payload TEXT NOT NULL,
+                        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                        FOREIGN KEY(run_id) REFERENCES index_runs(id) ON DELETE CASCADE
+                    );
+                    CREATE TABLE IF NOT EXISTS index_links (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        run_id TEXT NOT NULL,
+                        payload TEXT NOT NULL,
+                        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                        FOREIGN KEY(run_id) REFERENCES index_runs(id) ON DELETE CASCADE
+                    );
+                    CREATE TABLE IF NOT EXISTS index_logs (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        run_id TEXT NOT NULL,
+                        payload TEXT NOT NULL,
+                        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                        FOREIGN KEY(run_id) REFERENCES index_runs(id) ON DELETE CASCADE
+                    );
+                    CREATE INDEX IF NOT EXISTS idx_index_runs_status ON index_runs(status);
+                    CREATE INDEX IF NOT EXISTS idx_index_documents_run ON index_documents(run_id);
+                    CREATE INDEX IF NOT EXISTS idx_index_documents_hash ON index_documents(content_hash);
+                    CREATE INDEX IF NOT EXISTS idx_index_links_run ON index_links(run_id);
+                    CREATE INDEX IF NOT EXISTS idx_index_logs_run ON index_logs(run_id);
                 """
             )
                 conn.commit()
@@ -197,6 +232,224 @@ class SQLiteStorage:
                 "INSERT INTO audit_log(event) VALUES(?)",
                 (payload,),
             )
+
+    # Index data -----------------------------------------------------
+
+    def upsert_index_run(self, run_id: str, payload: Dict[str, Any], status: Optional[str] = None) -> None:
+        if not run_id:
+            raise ValueError("run_id is required")
+        serialised = json.dumps(payload, ensure_ascii=False)
+        status_value = status or str(payload.get("status", "pending"))
+        conn = self._get_connection()
+        with conn:
+            conn.execute(
+                """
+                INSERT INTO index_runs(id, payload, status, started_at, completed_at)
+                VALUES(?, ?, ?, CURRENT_TIMESTAMP, CASE WHEN ? IN ('finished', 'error', 'cancelled') THEN CURRENT_TIMESTAMP ELSE NULL END)
+                ON CONFLICT(id) DO UPDATE SET
+                    payload = excluded.payload,
+                    status = excluded.status,
+                    completed_at = CASE
+                        WHEN excluded.status IN ('finished', 'error', 'cancelled') THEN CURRENT_TIMESTAMP
+                        ELSE index_runs.completed_at
+                    END
+                """,
+                (run_id, serialised, status_value, status_value),
+            )
+
+    def update_index_run(self, run_id: str, updates: Dict[str, Any]) -> None:
+        current = self.get_index_run(run_id) or {}
+        current.update(updates)
+        status_value = current.get("status")
+        self.upsert_index_run(run_id, current, status=status_value)
+
+    def list_index_runs(self) -> Iterable[Dict[str, Any]]:
+        conn = self._get_connection()
+        cursor = conn.execute(
+            "SELECT id, payload, status, started_at, completed_at FROM index_runs ORDER BY started_at DESC"
+        )
+        for row in cursor:
+            try:
+                payload = json.loads(row["payload"])
+            except json.JSONDecodeError:
+                payload = {}
+            if isinstance(payload, dict):
+                payload.setdefault("id", row["id"])
+                payload.setdefault("status", row["status"])
+                payload.setdefault("started_at", row["started_at"])
+                payload.setdefault("completed_at", row["completed_at"])
+                yield payload
+
+    def get_index_run(self, run_id: str) -> Optional[Dict[str, Any]]:
+        conn = self._get_connection()
+        cursor = conn.execute(
+            "SELECT payload, status, started_at, completed_at FROM index_runs WHERE id = ?",
+            (run_id,),
+        )
+        row = cursor.fetchone()
+        if not row:
+            return None
+        try:
+            payload = json.loads(row["payload"])
+        except json.JSONDecodeError:
+            payload = {}
+        if isinstance(payload, dict):
+            payload.setdefault("id", run_id)
+            payload.setdefault("status", row["status"])
+            payload.setdefault("started_at", row["started_at"])
+            payload.setdefault("completed_at", row["completed_at"])
+            return payload
+        return None
+
+    def delete_index_run(self, run_id: str) -> None:
+        if not run_id:
+            return
+        conn = self._get_connection()
+        with conn:
+            conn.execute("DELETE FROM index_runs WHERE id = ?", (run_id,))
+
+    def append_index_documents(self, run_id: str, documents: Iterable[Dict[str, Any]]) -> None:
+        docs: List[Tuple[str, Optional[str], str]] = []
+        for document in documents:
+            if not isinstance(document, dict):
+                continue
+            url = str(document.get("url") or "").strip()
+            if not url:
+                continue
+            payload = json.dumps(document, ensure_ascii=False)
+            content_hash = document.get("content_hash")
+            docs.append((url, content_hash if isinstance(content_hash, str) else None, payload))
+        if not docs:
+            return
+        conn = self._get_connection()
+        with conn:
+            conn.executemany(
+                "INSERT INTO index_documents(run_id, url, content_hash, payload) VALUES(?, ?, ?, ?)",
+                [(run_id, url, content_hash, payload) for url, content_hash, payload in docs],
+            )
+
+    def list_index_documents(self, run_id: str) -> Iterable[Dict[str, Any]]:
+        conn = self._get_connection()
+        cursor = conn.execute(
+            "SELECT payload FROM index_documents WHERE run_id = ? ORDER BY id ASC",
+            (run_id,),
+        )
+        for row in cursor:
+            try:
+                payload = json.loads(row["payload"])
+            except json.JSONDecodeError:
+                continue
+            if isinstance(payload, dict):
+                yield payload
+
+    def append_index_links(self, run_id: str, links: Iterable[Dict[str, Any]]) -> None:
+        entries: List[str] = []
+        for link in links:
+            if not isinstance(link, dict):
+                continue
+            entries.append(json.dumps(link, ensure_ascii=False))
+        if not entries:
+            return
+        conn = self._get_connection()
+        with conn:
+            conn.executemany(
+                "INSERT INTO index_links(run_id, payload) VALUES(?, ?)",
+                [(run_id, entry) for entry in entries],
+            )
+
+    def list_index_links(self, run_id: str) -> Iterable[Dict[str, Any]]:
+        conn = self._get_connection()
+        cursor = conn.execute(
+            "SELECT payload FROM index_links WHERE run_id = ? ORDER BY id ASC",
+            (run_id,),
+        )
+        for row in cursor:
+            try:
+                payload = json.loads(row["payload"])
+            except json.JSONDecodeError:
+                continue
+            if isinstance(payload, dict):
+                yield payload
+
+    def append_index_log(self, run_id: str, entry: Dict[str, Any]) -> None:
+        if not isinstance(entry, dict):
+            return
+        payload = json.dumps(entry, ensure_ascii=False)
+        conn = self._get_connection()
+        with conn:
+            conn.execute(
+                "INSERT INTO index_logs(run_id, payload) VALUES(?, ?)",
+                (run_id, payload),
+            )
+
+    def list_index_logs(self, run_id: str) -> Iterable[Dict[str, Any]]:
+        conn = self._get_connection()
+        cursor = conn.execute(
+            "SELECT payload, created_at FROM index_logs WHERE run_id = ? ORDER BY id ASC",
+            (run_id,),
+        )
+        for row in cursor:
+            try:
+                payload = json.loads(row["payload"])
+            except json.JSONDecodeError:
+                payload = {}
+            if isinstance(payload, dict):
+                payload.setdefault("created_at", row["created_at"])
+                yield payload
+
+    def dump_index_data(self) -> Dict[str, Any]:
+        runs = list(self.list_index_runs())
+        documents: Dict[str, List[Dict[str, Any]]] = {}
+        links: Dict[str, List[Dict[str, Any]]] = {}
+        logs: Dict[str, List[Dict[str, Any]]] = {}
+        for run in runs:
+            run_id = str(run.get("id"))
+            documents[run_id] = list(self.list_index_documents(run_id))
+            links[run_id] = list(self.list_index_links(run_id))
+            logs[run_id] = list(self.list_index_logs(run_id))
+        return {
+            "runs": runs,
+            "documents": documents,
+            "links": links,
+            "logs": logs,
+        }
+
+    def replace_index_data(self, snapshot: Dict[str, Any]) -> None:
+        if not isinstance(snapshot, dict):
+            return
+        runs = snapshot.get("runs")
+        documents = snapshot.get("documents")
+        links = snapshot.get("links")
+        logs = snapshot.get("logs")
+        conn = self._get_connection()
+        with conn:
+            conn.execute("DELETE FROM index_runs")
+        if isinstance(runs, list):
+            for run in runs:
+                if not isinstance(run, dict):
+                    continue
+                run_id = str(run.get("id") or "").strip()
+                if not run_id:
+                    continue
+                status = str(run.get("status", "pending"))
+                self.upsert_index_run(run_id, run, status=status)
+                doc_items = []
+                if isinstance(documents, dict):
+                    doc_items = documents.get(run_id) or []
+                if doc_items:
+                    self.append_index_documents(run_id, doc_items)
+                link_items = []
+                if isinstance(links, dict):
+                    link_items = links.get(run_id) or []
+                if link_items:
+                    self.append_index_links(run_id, link_items)
+                log_items = []
+                if isinstance(logs, dict):
+                    log_items = logs.get(run_id) or []
+                if log_items:
+                    for entry in log_items:
+                        if isinstance(entry, dict):
+                            self.append_index_log(run_id, entry)
 
     def read_audit_log(self) -> Iterable[Dict[str, Any]]:
         conn = self._get_connection()

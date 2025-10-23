@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import io
 import json
 import math
@@ -13,12 +14,15 @@ import time
 import traceback
 import unicodedata
 import uuid
-from concurrent.futures import ThreadPoolExecutor, as_completed
+import xml.etree.ElementTree as ET
+from collections import defaultdict, deque
+from queue import Empty, Queue
+from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
-from urllib.parse import urljoin, urlparse, urlunparse
+from urllib.parse import parse_qsl, urlencode, urljoin, urlparse, urlunparse, urldefrag
 
 import requests
 from flask import Flask, Response, jsonify, render_template, request
@@ -34,6 +38,10 @@ from crawler import (
     CrawlResult,
     crawl_site,
     MAX_PAGES_DEFAULT,
+    USER_AGENT,
+    build_robot_parser,
+    parse_date_string,
+    normalize_url,
 )
 from storage import storage
 
@@ -55,6 +63,7 @@ search_run_lock = threading.Lock()
 search_result_lock = threading.Lock()
 search_log_lock = threading.Lock()
 search_jobs_lock = threading.Lock()
+index_jobs_lock = threading.Lock()
 search_categories_lock = threading.Lock()
 DEFAULT_CONCURRENCY = 5
 MAX_CONCURRENCY = 150
@@ -173,6 +182,20 @@ DEFAULT_DATA_QUALITY_SETTINGS = {
     "site_scope_prompt": DATA_QUALITY_SITE_SCOPE_PROMPT,
     "search_prompt": DATA_QUALITY_SEARCH_PROMPT,
 }
+DEFAULT_INDEX_SETTINGS = {
+    "depth": 1,
+    "respect_robots": True,
+    "max_pages_per_domain": 200,
+    "path_whitelist": [],
+    "path_blacklist": [],
+    "parameter_whitelist": [],
+    "include_pdfs": False,
+    "concurrency": 10,
+    "rate_limit": 0.5,
+    "retry_attempts": 3,
+}
+INDEX_REQUEST_TIMEOUT = 15
+INDEX_SITEMAP_LIMIT = 5000
 GOOGLE_SEARCH_API_URL = "https://www.googleapis.com/customsearch/v1"
 GOOGLE_SEARCH_TIMEOUT = 20
 DATA_QUALITY_IMPRESSUM_KEYWORDS = {
@@ -254,6 +277,10 @@ EXPORT_SECTION_DEFINITIONS: Dict[str, Dict[str, str]] = {
         "label": "Suchergebnisse",
         "description": "Suchdefinitionen, Auswertungen und Bewertungsresultate.",
     },
+    "index": {
+        "label": "Indexdaten",
+        "description": "Indexläufe, extrahierte Dokumente, Links und Laufprotokolle.",
+    },
     "settings": {
         "label": "Anwendungs- & Crawl-Einstellungen",
         "description": "Voreinstellungen für Synonyme, Crawl, Keyword-Finder und Datenqualität.",
@@ -275,6 +302,7 @@ EXPORT_SECTION_ORDER = [
     "stammdaten",
     "keywords",
     "searches",
+    "index",
     "settings",
     "data_quality",
     "debug",
@@ -392,6 +420,30 @@ def _default_search_settings() -> Dict[str, object]:
         "model": DEFAULT_SEARCH_MODEL,
         "concurrency": DEFAULT_SEARCH_CONCURRENCY,
     }
+
+
+def _default_index_settings() -> Dict[str, object]:
+    return dict(DEFAULT_INDEX_SETTINGS)
+
+
+def _normalise_list_setting(value: Any) -> List[str]:
+    if isinstance(value, list):
+        candidates = value
+    elif value is None:
+        candidates = []
+    else:
+        text = str(value)
+        candidates = re.split(r"[\n,]", text)
+    seen: Set[str] = set()
+    result: List[str] = []
+    for candidate in candidates:
+        item = str(candidate or "").strip()
+        if not item:
+            continue
+        if item not in seen:
+            seen.add(item)
+            result.append(item)
+    return result
 
 
 def _read_settings_unlocked() -> Dict[str, object]:
@@ -804,6 +856,104 @@ def update_data_quality_settings(values: Dict[str, object]) -> Dict[str, object]
     }
     save_settings_data(data)
     return get_data_quality_settings()
+
+
+def get_index_settings() -> Dict[str, object]:
+    data = load_settings_data()
+    defaults = _default_index_settings()
+    result = dict(defaults)
+    stored = data.get("index_settings") if isinstance(data, dict) else {}
+    if isinstance(stored, dict):
+        try:
+            depth = int(stored.get("depth", defaults["depth"]))
+        except (TypeError, ValueError):
+            depth = defaults["depth"]
+        result["depth"] = max(0, depth)
+        result["respect_robots"] = bool(stored.get("respect_robots", defaults["respect_robots"]))
+        max_pages_value = stored.get("max_pages_per_domain", defaults["max_pages_per_domain"])
+        try:
+            max_pages = int(max_pages_value)
+        except (TypeError, ValueError):
+            max_pages = defaults["max_pages_per_domain"]
+        if max_pages <= 0:
+            result["max_pages_per_domain"] = None
+        else:
+            result["max_pages_per_domain"] = max_pages
+        result["path_whitelist"] = _normalise_list_setting(stored.get("path_whitelist", defaults["path_whitelist"]))
+        result["path_blacklist"] = _normalise_list_setting(stored.get("path_blacklist", defaults["path_blacklist"]))
+        result["parameter_whitelist"] = _normalise_list_setting(stored.get("parameter_whitelist", defaults["parameter_whitelist"]))
+        result["include_pdfs"] = bool(stored.get("include_pdfs", defaults["include_pdfs"]))
+        try:
+            concurrency = int(stored.get("concurrency", defaults["concurrency"]))
+        except (TypeError, ValueError):
+            concurrency = defaults["concurrency"]
+        result["concurrency"] = max(1, min(concurrency, MAX_CONCURRENCY))
+        try:
+            rate_limit = float(stored.get("rate_limit", defaults["rate_limit"]))
+        except (TypeError, ValueError):
+            rate_limit = defaults["rate_limit"]
+        result["rate_limit"] = max(0.0, rate_limit)
+        try:
+            retry_attempts = int(stored.get("retry_attempts", defaults["retry_attempts"]))
+        except (TypeError, ValueError):
+            retry_attempts = defaults["retry_attempts"]
+        result["retry_attempts"] = max(1, retry_attempts)
+    return result
+
+
+def update_index_settings(values: Dict[str, object]) -> Dict[str, object]:
+    current = load_settings_data()
+    defaults = _default_index_settings()
+    try:
+        depth = int(values.get("depth", defaults["depth"]))
+    except (TypeError, ValueError):
+        depth = defaults["depth"]
+    depth = max(0, depth)
+    respect_robots = bool(values.get("respect_robots", defaults["respect_robots"]))
+    max_pages_raw = values.get("max_pages_per_domain")
+    try:
+        max_pages = int(max_pages_raw)
+    except (TypeError, ValueError):
+        max_pages = defaults["max_pages_per_domain"]
+    if max_pages is not None and max_pages <= 0:
+        max_pages_value: Optional[int] = None
+    else:
+        max_pages_value = max_pages if max_pages else None
+    path_whitelist = _normalise_list_setting(values.get("path_whitelist", []))
+    path_blacklist = _normalise_list_setting(values.get("path_blacklist", []))
+    parameter_whitelist = _normalise_list_setting(values.get("parameter_whitelist", []))
+    include_pdfs = bool(values.get("include_pdfs", defaults["include_pdfs"]))
+    try:
+        concurrency = int(values.get("concurrency", defaults["concurrency"]))
+    except (TypeError, ValueError):
+        concurrency = defaults["concurrency"]
+    concurrency = max(1, min(concurrency, MAX_CONCURRENCY))
+    try:
+        rate_limit = float(values.get("rate_limit", defaults["rate_limit"]))
+    except (TypeError, ValueError):
+        rate_limit = defaults["rate_limit"]
+    rate_limit = max(0.0, rate_limit)
+    try:
+        retry_attempts = int(values.get("retry_attempts", defaults["retry_attempts"]))
+    except (TypeError, ValueError):
+        retry_attempts = defaults["retry_attempts"]
+    retry_attempts = max(1, retry_attempts)
+
+    current.setdefault("index_settings", {})
+    current["index_settings"] = {
+        "depth": depth,
+        "respect_robots": respect_robots,
+        "max_pages_per_domain": max_pages_value,
+        "path_whitelist": path_whitelist,
+        "path_blacklist": path_blacklist,
+        "parameter_whitelist": parameter_whitelist,
+        "include_pdfs": include_pdfs,
+        "concurrency": concurrency,
+        "rate_limit": rate_limit,
+        "retry_attempts": retry_attempts,
+    }
+    save_settings_data(current)
+    return get_index_settings()
 
 
 def _default_crawl_settings() -> Dict[str, int]:
@@ -1271,6 +1421,40 @@ def summarize_section(section: str, data: Any) -> Dict[str, Any]:
                 "result_sets": len(results),
             }
         )
+    elif section == "index":
+        runs = []
+        documents: Dict[str, Any] = {}
+        links: Dict[str, Any] = {}
+        logs: Dict[str, Any] = {}
+        if isinstance(data, dict):
+            if isinstance(data.get("runs"), list):
+                runs = data["runs"]
+            if isinstance(data.get("documents"), dict):
+                documents = data["documents"]
+            if isinstance(data.get("links"), dict):
+                links = data["links"]
+            if isinstance(data.get("logs"), dict):
+                logs = data["logs"]
+        doc_count = 0
+        for value in documents.values():
+            if isinstance(value, list):
+                doc_count += len(value)
+        link_count = 0
+        for value in links.values():
+            if isinstance(value, list):
+                link_count += len(value)
+        log_count = 0
+        for value in logs.values():
+            if isinstance(value, list):
+                log_count += len(value)
+        base.update(
+            {
+                "runs": len(runs),
+                "documents": doc_count,
+                "links": link_count,
+                "logs": log_count,
+            }
+        )
     elif section == "data_quality":
         records = None
         if isinstance(data, dict):
@@ -1355,6 +1539,11 @@ def build_export_payload(selected_sections: Set[str]) -> Tuple[Dict[str, Any], D
         searches_payload = collect_all_search_data()
         payload["sections"]["searches"] = searches_payload
         summary["sections"]["searches"] = summarize_section("searches", searches_payload)
+
+    if "index" in requested:
+        index_payload = storage.dump_index_data()
+        payload["sections"]["index"] = index_payload
+        summary["sections"]["index"] = summarize_section("index", index_payload)
 
     if "settings" in requested:
         settings_payload = load_settings_data()
@@ -1753,6 +1942,134 @@ def apply_searches_import(data: Any, mode: str, dry_run: bool) -> Dict[str, Any]
     }
 
 
+def apply_index_import(data: Any, mode: str, dry_run: bool) -> Dict[str, Any]:
+    if not isinstance(data, dict):
+        return {"status": "skipped", "reason": "Ungültiges Format"}
+
+    runs = data.get("runs") if isinstance(data.get("runs"), list) else []
+    documents = data.get("documents") if isinstance(data.get("documents"), dict) else {}
+    links = data.get("links") if isinstance(data.get("links"), dict) else {}
+    logs = data.get("logs") if isinstance(data.get("logs"), dict) else {}
+
+    run_count = len(runs)
+    document_count = sum(len(value) for value in documents.values() if isinstance(value, list))
+    link_count = sum(len(value) for value in links.values() if isinstance(value, list))
+    log_count = sum(len(value) for value in logs.values() if isinstance(value, list))
+
+    normalised_documents: Dict[str, List[Dict[str, Any]]] = {}
+    for run_id, entries in documents.items():
+        run_id_str = str(run_id or "").strip()
+        if not run_id_str or not isinstance(entries, list):
+            continue
+        normalised_documents[run_id_str] = [entry for entry in entries if isinstance(entry, dict)]
+
+    normalised_links: Dict[str, List[Dict[str, Any]]] = {}
+    for run_id, entries in links.items():
+        run_id_str = str(run_id or "").strip()
+        if not run_id_str or not isinstance(entries, list):
+            continue
+        normalised_links[run_id_str] = [entry for entry in entries if isinstance(entry, dict)]
+
+    normalised_logs: Dict[str, List[Dict[str, Any]]] = {}
+    for run_id, entries in logs.items():
+        run_id_str = str(run_id or "").strip()
+        if not run_id_str or not isinstance(entries, list):
+            continue
+        normalised_logs[run_id_str] = [entry for entry in entries if isinstance(entry, dict)]
+
+    if mode == "replace":
+        if not dry_run:
+            storage.replace_index_data(
+                {
+                    "runs": [run for run in runs if isinstance(run, dict)],
+                    "documents": normalised_documents,
+                    "links": normalised_links,
+                    "logs": normalised_logs,
+                }
+            )
+        return {
+            "status": "replaced",
+            "runs": run_count,
+            "documents": document_count,
+            "links": link_count,
+            "logs": log_count,
+        }
+
+    existing = storage.dump_index_data()
+    merged_runs: Dict[str, Dict[str, Any]] = {}
+    for run in existing.get("runs", []):
+        if isinstance(run, dict):
+            identifier = str(run.get("id") or "").strip()
+            if identifier:
+                merged_runs[identifier] = run
+    for run in runs:
+        if not isinstance(run, dict):
+            continue
+        identifier = str(run.get("id") or "").strip()
+        if not identifier:
+            continue
+        merged_runs[identifier] = run
+
+    def merge_entries(
+        current: Dict[str, List[Dict[str, Any]]],
+        incoming: Dict[str, List[Dict[str, Any]]],
+    ) -> Dict[str, List[Dict[str, Any]]]:
+        merged: Dict[str, List[Dict[str, Any]]] = {}
+        for run_id, entries in current.items():
+            if isinstance(entries, list):
+                merged[run_id] = [entry for entry in entries if isinstance(entry, dict)]
+        for run_id, entries in incoming.items():
+            if not isinstance(entries, list):
+                continue
+            run_id_str = str(run_id or "").strip()
+            if not run_id_str:
+                continue
+            merged.setdefault(run_id_str, [])
+            merged[run_id_str].extend(entry for entry in entries if isinstance(entry, dict))
+        deduplicated: Dict[str, List[Dict[str, Any]]] = {}
+        for run_id, entries in merged.items():
+            seen: Set[str] = set()
+            cleaned: List[Dict[str, Any]] = []
+            for entry in entries:
+                try:
+                    fingerprint = json.dumps(entry, sort_keys=True, ensure_ascii=False)
+                except (TypeError, ValueError):
+                    fingerprint = None
+                if fingerprint is not None and fingerprint in seen:
+                    continue
+                if fingerprint is not None:
+                    seen.add(fingerprint)
+                cleaned.append(entry)
+            deduplicated[run_id] = cleaned
+        return deduplicated
+
+    existing_documents = existing.get("documents", {})
+    existing_links = existing.get("links", {})
+    existing_logs = existing.get("logs", {})
+
+    merged_documents = merge_entries(existing_documents if isinstance(existing_documents, dict) else {}, normalised_documents)
+    merged_links = merge_entries(existing_links if isinstance(existing_links, dict) else {}, normalised_links)
+    merged_logs = merge_entries(existing_logs if isinstance(existing_logs, dict) else {}, normalised_logs)
+
+    merged_payload = {
+        "runs": list(merged_runs.values()),
+        "documents": merged_documents,
+        "links": merged_links,
+        "logs": merged_logs,
+    }
+
+    if not dry_run:
+        storage.replace_index_data(merged_payload)
+
+    return {
+        "status": "merged",
+        "runs": len(merged_runs),
+        "documents": sum(len(entries) for entries in merged_documents.values()),
+        "links": sum(len(entries) for entries in merged_links.values()),
+        "logs": sum(len(entries) for entries in merged_logs.values()),
+    }
+
+
 def apply_data_quality_import(data: Any, mode: str, dry_run: bool) -> Dict[str, Any]:
     records = None
     if isinstance(data, dict):
@@ -1893,6 +2210,8 @@ def apply_import(payload: Dict[str, Any], actions: Dict[str, str], dry_run: bool
             results[section] = apply_keywords_import(data, mode, dry_run)
         elif section == "searches":
             results[section] = apply_searches_import(data, mode, dry_run)
+        elif section == "index":
+            results[section] = apply_index_import(data, mode, dry_run)
         elif section == "settings":
             results[section] = apply_settings_import(data, mode, dry_run)
         elif section == "data_quality":
@@ -4254,6 +4573,314 @@ def site_scope_class(value: str) -> str:
     return SITE_SCOPE_CLASSES.get(value or "", SITE_SCOPE_CLASSES[SITE_SCOPE_UNKNOWN])
 
 
+def _normalise_domain(domain: str) -> str:
+    text = str(domain or "").strip().lower()
+    if text.startswith("www."):
+        text = text[4:]
+    return text
+
+
+def _domains_match(candidate: str, reference: str) -> bool:
+    candidate_norm = _normalise_domain(candidate)
+    reference_norm = _normalise_domain(reference)
+    if not candidate_norm or not reference_norm:
+        return False
+    return candidate_norm == reference_norm or candidate_norm.endswith("." + reference_norm)
+
+
+def canonicalize_index_url(url: str, parameter_whitelist: Iterable[str]) -> str:
+    cleaned, _fragment = urldefrag(url)
+    parsed = urlparse(cleaned)
+    scheme = parsed.scheme.lower() if parsed.scheme else "https"
+    netloc = parsed.netloc.lower()
+    if scheme == "http" and netloc.endswith(":80"):
+        netloc = netloc[:-3]
+    elif scheme == "https" and netloc.endswith(":443"):
+        netloc = netloc[:-4]
+    path = parsed.path or "/"
+    if not path.startswith("/"):
+        path = "/" + path
+    path = re.sub(r"/+", "/", path)
+    allowed = {str(param).lower() for param in parameter_whitelist if str(param).strip()}
+    query_pairs = []
+    for key, value in parse_qsl(parsed.query, keep_blank_values=False):
+        if allowed and key.lower() not in allowed:
+            continue
+        query_pairs.append((key, value))
+    query_pairs.sort()
+    query = urlencode(query_pairs, doseq=True)
+    return urlunparse((scheme, netloc, path, "", query, ""))
+
+
+def _normalise_path_list(values: Iterable[str]) -> List[str]:
+    normalised: List[str] = []
+    seen: Set[str] = set()
+    for value in values:
+        text = str(value or "").strip()
+        if not text:
+            continue
+        if not text.startswith("/"):
+            text = "/" + text
+        text = re.sub(r"/+", "/", text)
+        if text not in seen:
+            seen.add(text)
+            normalised.append(text)
+    return normalised
+
+
+def _extract_language(soup: BeautifulSoup) -> Optional[str]:
+    if soup.html and soup.html.get("lang"):
+        return soup.html.get("lang").strip()
+    meta = soup.find("meta", attrs={"http-equiv": re.compile("content-language", re.I)})
+    if meta and meta.get("content"):
+        return meta.get("content").strip()
+    og_locale = soup.find("meta", attrs={"property": "og:locale"})
+    if og_locale and og_locale.get("content"):
+        return og_locale.get("content").strip()
+    return None
+
+
+def _extract_meta_description(soup: BeautifulSoup) -> Optional[str]:
+    tag = soup.find("meta", attrs={"name": "description"})
+    if tag and tag.get("content"):
+        return tag.get("content").strip()
+    return None
+
+
+def _extract_meta_robots(soup: BeautifulSoup) -> Optional[str]:
+    tag = soup.find("meta", attrs={"name": "robots"})
+    if tag and tag.get("content"):
+        return tag.get("content").strip()
+    return None
+
+
+def detect_publication_metadata(soup: BeautifulSoup, response: Optional[requests.Response] = None) -> Dict[str, Optional[str]]:
+    candidates: List[Tuple[str, str, str]] = []
+    meta_candidates = [
+        ("meta", {"itemprop": "datePublished"}, "schema.org/datePublished", "high"),
+        ("meta", {"property": "article:published_time"}, "article:published_time", "high"),
+        ("meta", {"property": "article:modified_time"}, "article:modified_time", "medium"),
+        ("meta", {"name": "date"}, "meta[name=date]", "medium"),
+        ("meta", {"name": "publishdate"}, "meta[name=publishdate]", "medium"),
+        ("meta", {"name": "dc.date"}, "dc.date", "medium"),
+    ]
+    for tag_name, attrs, source, confidence in meta_candidates:
+        tag = soup.find(tag_name, attrs=attrs)
+        if tag and tag.get("content"):
+            parsed = parse_date_string(tag.get("content"))
+            if parsed:
+                candidates.append((parsed.isoformat(), source, confidence))
+                break
+
+    if not candidates:
+        time_tag = soup.find("time", attrs={"datetime": True})
+        if time_tag and time_tag.get("datetime"):
+            parsed = parse_date_string(time_tag.get("datetime"))
+            if parsed:
+                candidates.append((parsed.isoformat(), "time[datetime]", "medium"))
+
+    if not candidates:
+        text_candidate = soup.find(
+            lambda tag: tag.name in {"span", "div", "p"}
+            and any(cls in (tag.get("class") or []) for cls in ["date", "datum", "published", "zeit"])
+        )
+        if text_candidate:
+            parsed = parse_date_string(text_candidate.get_text(" ", strip=True))
+            if parsed:
+                candidates.append((parsed.isoformat(), "heuristic", "low"))
+
+    header_date = None
+    if response is not None:
+        last_modified = response.headers.get("Last-Modified")
+        if last_modified:
+            parsed = parse_date_string(last_modified)
+            if parsed:
+                header_date = parsed.isoformat()
+
+    if candidates:
+        value, source, confidence = candidates[0]
+    elif header_date:
+        value, source, confidence = header_date, "http:last-modified", "low"
+    else:
+        value = datetime.utcnow().isoformat()
+        source = "fallback"
+        confidence = "low"
+
+    return {"value": value, "source": source, "confidence": confidence}
+
+
+def extract_blocks_from_html(soup: BeautifulSoup) -> Tuple[str, List[Dict[str, Any]]]:
+    blocks: List[Dict[str, Any]] = []
+    parts: List[str] = []
+    offset = 0
+
+    def append_block(block_type: str, text: str) -> None:
+        nonlocal offset
+        cleaned = " ".join(text.split())
+        if not cleaned:
+            return
+        start = offset
+        parts.append(cleaned)
+        offset += len(cleaned)
+        blocks.append({"type": block_type, "text": cleaned, "offsets": {"start": start, "end": offset}})
+        parts.append("\n")
+        offset += 1
+
+    if soup.title and soup.title.get_text(strip=True):
+        append_block("title", soup.title.get_text(" ", strip=True))
+
+    for element in soup.find_all(["h1", "h2", "h3", "h4", "h5", "h6", "p", "li", "td", "caption"]):
+        block_type = element.name
+        if block_type == "td":
+            block_type = "table_cell"
+        text = element.get_text(" ", strip=True)
+        append_block(block_type, text)
+
+    if parts:
+        if parts[-1] == "\n":
+            parts.pop()
+            if blocks:
+                blocks[-1]["offsets"]["end"] -= 1
+
+    return "".join(parts), blocks
+
+
+def extract_pdf_blocks(content: bytes) -> Tuple[str, List[Dict[str, Any]]]:
+    try:
+        from pdfminer.high_level import extract_text
+    except ImportError:
+        return "", []
+
+    try:
+        text = extract_text(io.BytesIO(content))
+    except Exception:
+        return "", []
+
+    blocks: List[Dict[str, Any]] = []
+    offset = 0
+    parts: List[str] = []
+    for index, page in enumerate(text.split("\f"), start=1):
+        cleaned = " ".join(page.split())
+        if not cleaned:
+            continue
+        start = offset
+        parts.append(cleaned)
+        offset += len(cleaned)
+        blocks.append(
+            {
+                "type": "pdf_page",
+                "page": index,
+                "text": cleaned,
+                "offsets": {"start": start, "end": offset},
+            }
+        )
+        parts.append("\n")
+        offset += 1
+    if parts and parts[-1] == "\n":
+        parts.pop()
+        if blocks:
+            blocks[-1]["offsets"]["end"] -= 1
+    return "".join(parts), blocks
+
+
+def extract_links_from_html(base_url: str, soup: BeautifulSoup, seed_domain: str) -> List[Dict[str, Any]]:
+    links: List[Dict[str, Any]] = []
+    for anchor in soup.find_all("a", href=True):
+        href = anchor.get("href")
+        if not href:
+            continue
+        absolute = urljoin(base_url, href)
+        if not absolute.lower().startswith(("http://", "https://")):
+            continue
+        parsed = urlparse(absolute)
+        if parsed.scheme not in {"http", "https"}:
+            continue
+        if parsed.path and parsed.path.lower().endswith((".jpg", ".jpeg", ".png", ".gif", ".svg", ".mp4", ".mp3", ".zip", ".exe")):
+            continue
+        rel_raw = anchor.get("rel")
+        if isinstance(rel_raw, str):
+            rel = [rel_raw]
+        elif isinstance(rel_raw, (list, tuple)):
+            rel = [str(item) for item in rel_raw]
+        else:
+            rel = []
+        link_type = "internal" if _domains_match(parsed.netloc, seed_domain) else "external"
+        links.append(
+            {
+                "source_url": base_url,
+                "target_url": normalize_url(absolute),
+                "link_text": anchor.get_text(" ", strip=True),
+                "rel": rel,
+                "type": link_type,
+            }
+        )
+    return links
+
+
+def _index_log(job: "IndexJob", level: str, message: str, **extra: Any) -> None:
+    entry = {
+        "level": level,
+        "message": message,
+        "timestamp": datetime.utcnow().isoformat() + "Z",
+    }
+    if extra:
+        entry.update(extra)
+    with job._lock:
+        job.messages.append(entry)
+        if len(job.messages) > 50:
+            job.messages = job.messages[-50:]
+    storage.append_index_log(job.id, entry)
+
+
+def fetch_sitemap_entries(sitemap_url: str, seen: Optional[Set[str]] = None) -> List[Dict[str, Any]]:
+    tracker = seen if seen is not None else set()
+    if sitemap_url in tracker:
+        return []
+    tracker.add(sitemap_url)
+    try:
+        response = requests.get(sitemap_url, headers={"User-Agent": USER_AGENT}, timeout=INDEX_REQUEST_TIMEOUT)
+    except requests.RequestException:
+        return []
+    if response.status_code >= 400:
+        return []
+    try:
+        root = ET.fromstring(response.content)
+    except ET.ParseError:
+        return []
+
+    tag = root.tag.lower()
+    entries: List[Dict[str, Any]] = []
+    if tag.endswith("urlset"):
+        for url_node in root.findall(".//{*}url"):
+            loc_node = url_node.find("{*}loc")
+            if loc_node is None or not loc_node.text:
+                continue
+            record: Dict[str, Any] = {
+                "loc": loc_node.text.strip(),
+                "sitemap": sitemap_url,
+            }
+            lastmod_node = url_node.find("{*}lastmod")
+            if lastmod_node is not None and lastmod_node.text:
+                record["lastmod"] = lastmod_node.text.strip()
+            changefreq_node = url_node.find("{*}changefreq")
+            if changefreq_node is not None and changefreq_node.text:
+                record["changefreq"] = changefreq_node.text.strip()
+            priority_node = url_node.find("{*}priority")
+            if priority_node is not None and priority_node.text:
+                record["priority"] = priority_node.text.strip()
+            entries.append(record)
+    elif tag.endswith("sitemapindex"):
+        for sitemap_node in root.findall(".//{*}sitemap"):
+            loc_node = sitemap_node.find("{*}loc")
+            if loc_node is None or not loc_node.text:
+                continue
+            nested_url = loc_node.text.strip()
+            if len(tracker) >= INDEX_SITEMAP_LIMIT:
+                break
+            entries.extend(fetch_sitemap_entries(nested_url, tracker))
+    return entries
+
+
 def build_data_quality_dataset() -> List[Dict[str, object]]:
     records = load_stammdaten()
     quality = load_data_quality_results()
@@ -4531,6 +5158,7 @@ def collect_backup_snapshot() -> Dict[str, object]:
         "keyword_finder_cache": load_keyword_finder_cache(),
         "data_quality_results": load_data_quality_results(),
         "searches": collect_all_search_data(),
+        "index": storage.dump_index_data(),
     }
 
 
@@ -4589,6 +5217,12 @@ def restore_from_backup() -> None:
     if isinstance(search_snapshot, dict):
         if not load_search_definitions() and not list_search_runs():
             apply_searches_import(search_snapshot, "replace", dry_run=False)
+
+    index_snapshot = snapshot.get("index")
+    if isinstance(index_snapshot, dict):
+        existing_index_runs = list(storage.list_index_runs())
+        if not existing_index_runs:
+            storage.replace_index_data(index_snapshot)
 
 
 def _backup_worker() -> None:
@@ -4974,6 +5608,197 @@ def persist_search_job_state(job: SearchJob) -> None:
         save_search_run(payload)
 
 
+index_jobs: Dict[str, IndexJob] = {}
+
+
+def register_index_job(job: IndexJob) -> None:
+    with index_jobs_lock:
+        index_jobs[job.id] = job
+
+
+def get_index_job(job_id: str) -> Optional[IndexJob]:
+    with index_jobs_lock:
+        return index_jobs.get(job_id)
+
+
+def remove_index_job(job_id: str) -> None:
+    with index_jobs_lock:
+        index_jobs.pop(job_id, None)
+
+
+def persist_index_job_state(job: IndexJob) -> None:
+    with job._lock:
+        payload = job.as_dict()
+        payload["started_at_iso"] = datetime.utcfromtimestamp(job.started_at).isoformat() + "Z"
+        if job.completed_at:
+            payload["completed_at_iso"] = datetime.utcfromtimestamp(job.completed_at).isoformat() + "Z"
+        storage.upsert_index_run(job.id, payload, status=payload.get("status", "pending"))
+
+
+@dataclass
+class IndexJob:
+    id: str
+    start_urls: List[str]
+    start_map: Dict[str, str]
+    school_records: Dict[str, Dict[str, Any]]
+    school_domains: Dict[str, str]
+    school_start_urls: Dict[str, str]
+    filters: Dict[str, Any]
+    depth: int
+    respect_robots: bool
+    include_pdfs: bool
+    max_pages_per_domain: Optional[int]
+    path_whitelist: List[str]
+    path_blacklist: List[str]
+    parameter_whitelist: List[str]
+    concurrency: int
+    rate_limit: float
+    retry_attempts: int
+    status: str = "pending"
+    discovered: int = 0
+    processed: int = 0
+    stored_documents: int = 0
+    stored_links: int = 0
+    errors: int = 0
+    queue_size: int = 0
+    current_url: Optional[str] = None
+    current_domain: Optional[str] = None
+    messages: List[Dict[str, Any]] = field(default_factory=list)
+    sitemap_stats: Dict[str, Any] = field(default_factory=dict)
+    started_at: float = field(default_factory=time.time)
+    completed_at: Optional[float] = None
+    completed: bool = False
+    error: Optional[str] = None
+    cancel_event: threading.Event = field(default_factory=threading.Event, repr=False, compare=False)
+    _lock: threading.Lock = field(default_factory=threading.Lock, repr=False, compare=False)
+
+    def as_dict(self) -> Dict[str, Any]:
+        with self._lock:
+            progress = 0
+            total = max(self.discovered, 1)
+            if total:
+                progress = min(100, int((self.processed / total) * 100))
+            return {
+                "job_id": self.id,
+                "status": self.status,
+                "error": self.error,
+                "start_urls": list(self.start_urls),
+                "filters": self.filters,
+                "settings": {
+                    "depth": self.depth,
+                    "respect_robots": self.respect_robots,
+                    "include_pdfs": self.include_pdfs,
+                    "max_pages_per_domain": self.max_pages_per_domain,
+                    "path_whitelist": list(self.path_whitelist),
+                    "path_blacklist": list(self.path_blacklist),
+                    "parameter_whitelist": list(self.parameter_whitelist),
+                    "concurrency": self.concurrency,
+                    "rate_limit": self.rate_limit,
+                    "retry_attempts": self.retry_attempts,
+                },
+                "stats": {
+                    "discovered": self.discovered,
+                    "processed": self.processed,
+                    "documents": self.stored_documents,
+                    "links": self.stored_links,
+                    "errors": self.errors,
+                },
+                "schools": {
+                    school_id: {
+                        "domain": self.school_domains.get(school_id),
+                        "start_url": self.school_start_urls.get(school_id),
+                        "record": self.school_records.get(school_id, {}),
+                    }
+                    for school_id in self.school_records.keys()
+                },
+                "queue_size": self.queue_size,
+                "current_url": self.current_url,
+                "current_domain": self.current_domain,
+                "messages": list(self.messages),
+                "sitemaps": dict(self.sitemap_stats),
+                "progress_percent": progress,
+                "started_at": self.started_at,
+                "completed_at": self.completed_at,
+                "completed": self.completed,
+            }
+
+    def update_queue_size(self, size: int) -> None:
+        with self._lock:
+            self.queue_size = max(0, size)
+
+    def update_current(self, *, url: Optional[str] = None, domain: Optional[str] = None) -> None:
+        with self._lock:
+            if url is not None:
+                self.current_url = url
+            if domain is not None:
+                self.current_domain = domain
+
+    def increment_discovered(self, value: int = 1) -> None:
+        if value <= 0:
+            return
+        with self._lock:
+            self.discovered += value
+
+    def record_result(
+        self,
+        *,
+        documents: int = 0,
+        links: int = 0,
+        errors: int = 0,
+    ) -> None:
+        with self._lock:
+            self.processed += 1
+            if documents:
+                self.stored_documents += documents
+            if links:
+                self.stored_links += links
+            if errors:
+                self.errors += errors
+
+    def add_message(self, level: str, message: str, **extra: Any) -> None:
+        entry = {
+            "level": level,
+            "message": message,
+            "timestamp": datetime.utcnow().isoformat() + "Z",
+        }
+        if extra:
+            entry.update(extra)
+        with self._lock:
+            self.messages.append(entry)
+            if len(self.messages) > 50:
+                self.messages = self.messages[-50:]
+
+    def mark_completed(self, *, error: Optional[str] = None) -> None:
+        with self._lock:
+            self.completed = True
+            self.completed_at = time.time()
+            if error:
+                self.status = "error"
+                self.error = error
+            else:
+                self.status = "finished"
+                self.error = None
+            self.queue_size = 0
+            self.current_url = None
+            self.current_domain = None
+
+    def mark_cancelled(self) -> None:
+        with self._lock:
+            self.completed = True
+            self.completed_at = time.time()
+            self.status = "cancelled"
+            self.queue_size = 0
+            self.current_url = None
+            self.current_domain = None
+        self.cancel_event.set()
+
+    def request_cancel(self) -> None:
+        with self._lock:
+            if not self.completed and self.status not in {"cancelled", "cancelling"}:
+                self.status = "cancelling"
+        self.cancel_event.set()
+
+
 def run_crawl_job(job: CrawlJob) -> None:
     try:
         for index, start_url in enumerate(job.start_urls, start=1):
@@ -5021,6 +5846,516 @@ def run_crawl_job(job: CrawlJob) -> None:
             },
             stack="".join(traceback.format_exception(type(exc), exc, exc.__traceback__)),
         )
+
+
+
+def run_index_job(job: IndexJob) -> None:
+    """Execute an indexing run asynchronously."""
+
+    def resolve_school_for_domain(domain: str, fallback: Optional[str] = None) -> Optional[str]:
+        domain_norm = _normalise_domain(domain)
+        if fallback and fallback in job.school_records:
+            return fallback
+        for school_id, school_domain in job.school_domains.items():
+            if school_domain and _domains_match(domain_norm, school_domain):
+                return school_id
+        return fallback
+
+    def enqueue_url(
+        candidate_url: str,
+        depth: int,
+        school_id: Optional[str],
+        sitemap_meta: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        canonical = canonicalize_index_url(candidate_url, job.parameter_whitelist)
+        if not canonical:
+            return
+        parsed = urlparse(canonical)
+        domain = parsed.netloc.lower()
+        with state_lock:
+            if canonical in enqueued_urls:
+                return
+            if depth > job.depth:
+                return
+            if depth > 0:
+                if job.path_whitelist and not any(
+                    parsed.path.startswith(prefix) for prefix in job.path_whitelist
+                ):
+                    return
+                if job.path_blacklist and any(
+                    parsed.path.startswith(prefix) for prefix in job.path_blacklist
+                ):
+                    return
+            assigned_school = resolve_school_for_domain(domain, school_id)
+            if not assigned_school:
+                return
+            if job.max_pages_per_domain is not None and domain_discovered[domain] >= job.max_pages_per_domain:
+                return
+            enqueued_urls.add(canonical)
+            domain_discovered[domain] += 1
+            if sitemap_meta:
+                sitemap_entries[canonical] = sitemap_meta
+            pending_size = queue.qsize() + 1
+        job.increment_discovered()
+        job.update_queue_size(pending_size)
+        queue.put((canonical, depth, assigned_school))
+
+    def record_error(message: str, **extra: Any) -> None:
+        _index_log(job, "error", message, **extra)
+
+    def record_info(message: str, **extra: Any) -> None:
+        _index_log(job, "info", message, **extra)
+
+    def handle_internal_links(
+        links: Iterable[Dict[str, Any]], depth: int, school_id: str
+    ) -> None:
+        if depth >= job.depth:
+            return
+        for link in links:
+            if not isinstance(link, dict):
+                continue
+            if link.get("type") != "internal":
+                continue
+            target = link.get("target_url")
+            if not isinstance(target, str):
+                continue
+            enqueue_url(target, depth + 1, school_id)
+
+    def process_html(
+        url: str,
+        depth: int,
+        school_id: str,
+        response: requests.Response,
+        soup: BeautifulSoup,
+        sitemap_meta: Optional[Dict[str, Any]],
+    ) -> None:
+        canonical_tag = None
+        canonical_link = soup.find("link", attrs={"rel": re.compile("canonical", re.I)})
+        if canonical_link and canonical_link.get("href"):
+            try:
+                canonical_candidate = urljoin(url, canonical_link.get("href"))
+            except Exception:
+                canonical_candidate = canonical_link.get("href")
+            new_canonical = canonicalize_index_url(canonical_candidate, job.parameter_whitelist)
+            if new_canonical and new_canonical != url:
+                enqueue_url(new_canonical, depth, school_id, sitemap_meta)
+                url = new_canonical
+            canonical_tag = new_canonical or canonical_link.get("href")
+
+        meta_robots = _extract_meta_robots(soup)
+        if meta_robots and "noindex" in meta_robots.lower():
+            record_info("Seite wegen noindex ausgelassen", url=url)
+            job.record_result()
+            return
+
+        language = _extract_language(soup)
+        meta_description = _extract_meta_description(soup)
+        text_content, blocks = extract_blocks_from_html(soup)
+        if text_content:
+            content_hash = hashlib.sha256(text_content.encode("utf-8")).hexdigest()
+        else:
+            content_hash = hashlib.sha256(response.content).hexdigest()
+
+        with state_lock:
+            duplicate = content_hash in seen_hashes
+            if not duplicate:
+                seen_hashes.add(content_hash)
+
+        publication = detect_publication_metadata(soup, response)
+        document_payload = {
+            "url": url,
+            "original_url": response.url or url,
+            "depth": depth,
+            "school_id": school_id,
+            "school_name": job.school_records.get(school_id, {}).get("schulname"),
+            "school_record": job.school_records.get(school_id, {}),
+            "title": soup.title.get_text(" ", strip=True) if soup.title else "",
+            "language": language,
+            "meta_description": meta_description,
+            "meta_robots": meta_robots,
+            "canonical": canonical_tag,
+            "content_type": response.headers.get("Content-Type"),
+            "content_length": len(response.content),
+            "http_status": response.status_code,
+            "http_headers": {
+                "etag": response.headers.get("ETag"),
+                "last_modified": response.headers.get("Last-Modified"),
+                "content_type": response.headers.get("Content-Type"),
+            },
+            "publication": publication,
+            "blocks": blocks,
+            "text": text_content,
+            "content_hash": content_hash,
+            "fetched_at": datetime.utcnow().isoformat() + "Z",
+            "extracted_at": datetime.utcnow().isoformat() + "Z",
+            "from_sitemap": bool(sitemap_meta),
+            "sitemap_entry": sitemap_meta,
+        }
+
+        links = extract_links_from_html(url, soup, urlparse(url).netloc)
+        if links:
+            for link in links:
+                link["school_id"] = school_id
+                link["depth"] = depth
+            storage.append_index_links(job.id, links)
+
+        if not duplicate:
+            storage.append_index_documents(job.id, [document_payload])
+            record_info("Dokument gespeichert", url=url, blocks=len(blocks))
+            job.record_result(documents=1, links=len(links))
+        else:
+            record_info("Duplikat übersprungen", url=url)
+            job.record_result(links=len(links))
+
+        handle_internal_links(links, depth, school_id)
+
+    def process_pdf(
+        url: str,
+        depth: int,
+        school_id: str,
+        response: requests.Response,
+        sitemap_meta: Optional[Dict[str, Any]],
+    ) -> None:
+        if not job.include_pdfs:
+            record_info("PDF übersprungen (deaktiviert)", url=url)
+            job.record_result()
+            return
+        text_content, blocks = extract_pdf_blocks(response.content)
+        if not text_content:
+            record_info("PDF konnte nicht extrahiert werden", url=url)
+            job.record_result(errors=1)
+            return
+        content_hash = hashlib.sha256(text_content.encode("utf-8")).hexdigest()
+        with state_lock:
+            duplicate = content_hash in seen_hashes
+            if not duplicate:
+                seen_hashes.add(content_hash)
+        document_payload = {
+            "url": url,
+            "original_url": response.url or url,
+            "depth": depth,
+            "school_id": school_id,
+            "school_name": job.school_records.get(school_id, {}).get("schulname"),
+            "school_record": job.school_records.get(school_id, {}),
+            "title": os.path.basename(urlparse(url).path) or "PDF-Dokument",
+            "language": None,
+            "meta_description": None,
+            "meta_robots": None,
+            "canonical": None,
+            "content_type": response.headers.get("Content-Type"),
+            "content_length": len(response.content),
+            "http_status": response.status_code,
+            "http_headers": {
+                "etag": response.headers.get("ETag"),
+                "last_modified": response.headers.get("Last-Modified"),
+                "content_type": response.headers.get("Content-Type"),
+            },
+            "publication": {
+                "value": None,
+                "source": None,
+                "confidence": None,
+            },
+            "blocks": blocks,
+            "text": text_content,
+            "content_hash": content_hash,
+            "fetched_at": datetime.utcnow().isoformat() + "Z",
+            "extracted_at": datetime.utcnow().isoformat() + "Z",
+            "from_sitemap": bool(sitemap_meta),
+            "sitemap_entry": sitemap_meta,
+        }
+        if duplicate:
+            record_info("PDF-Duplikat übersprungen", url=url)
+            job.record_result()
+            return
+        storage.append_index_documents(job.id, [document_payload])
+        record_info("PDF gespeichert", url=url, blocks=len(blocks))
+        job.record_result(documents=1)
+
+    def process_task(url: str, depth: int, school_id: str) -> None:
+        if job.cancel_event.is_set():
+            return
+        sitemap_meta = sitemap_entries.get(url)
+        parsed = urlparse(url)
+        domain = parsed.netloc.lower()
+        job.update_current(url=url, domain=domain)
+        job.update_queue_size(queue.qsize())
+        persist_index_job_state(job)
+
+        if job.respect_robots:
+            with state_lock:
+                robot_parser = robots_cache.get(domain)
+            if robot_parser is None:
+                robot_parser = build_robot_parser(url)
+                with state_lock:
+                    robots_cache[domain] = robot_parser
+            if not robot_parser.can_fetch(USER_AGENT, url):
+                record_info("Durch robots.txt blockiert", url=url)
+                job.record_result()
+                persist_index_job_state(job)
+                return
+
+        if job.rate_limit > 0:
+            with state_lock:
+                last_ts = last_request_time.get(domain)
+            if last_ts is not None:
+                wait_for = job.rate_limit - (time.time() - last_ts)
+                if wait_for > 0:
+                    time.sleep(wait_for)
+
+        headers = {
+            "User-Agent": USER_AGENT,
+            "Accept": "text/html,application/xhtml+xml,application/pdf;q=0.9,*/*;q=0.1",
+        }
+        response: Optional[requests.Response] = None
+        error_text: Optional[str] = None
+        for attempt in range(max(1, job.retry_attempts)):
+            if job.cancel_event.is_set():
+                break
+            try:
+                response = requests.get(
+                    url,
+                    headers=headers,
+                    timeout=INDEX_REQUEST_TIMEOUT,
+                    allow_redirects=True,
+                )
+            except requests.RequestException as exc:
+                error_text = str(exc)
+                response = None
+            else:
+                error_text = None
+                if response.status_code in {429, 500, 502, 503, 504} and attempt + 1 < job.retry_attempts:
+                    time.sleep(min(5.0, 0.5 * (attempt + 1)))
+                    continue
+                break
+        with state_lock:
+            last_request_time[domain] = time.time()
+
+        if response is None:
+            record_error("Abruf fehlgeschlagen", url=url, error=error_text)
+            job.record_result(errors=1)
+            persist_index_job_state(job)
+            return
+
+        final_url = canonicalize_index_url(response.url or url, job.parameter_whitelist)
+        if final_url != url:
+            final_parsed = urlparse(final_url)
+            final_domain = final_parsed.netloc.lower()
+            if not resolve_school_for_domain(final_domain, school_id):
+                record_info("Weiterleitung außerhalb des Suchbereichs", url=final_url)
+                job.record_result()
+                persist_index_job_state(job)
+                return
+            with state_lock:
+                enqueued_urls.add(final_url)
+                processed_urls.add(final_url)
+            url = final_url
+            parsed = final_parsed
+            domain = final_domain
+            sitemap_meta = sitemap_entries.get(final_url, sitemap_meta)
+            job.update_current(url=url, domain=domain)
+
+        with state_lock:
+            processed_urls.add(url)
+            domain_processed[domain] += 1
+
+        if response.status_code >= 400:
+            record_error("HTTP-Fehler", url=url, status=response.status_code)
+            job.record_result(errors=1)
+            persist_index_job_state(job)
+            return
+
+        content_type = response.headers.get("Content-Type", "").lower()
+        if "pdf" in content_type:
+            process_pdf(url, depth, school_id, response, sitemap_meta)
+        elif "html" in content_type or "text" in content_type:
+            try:
+                soup = BeautifulSoup(response.text, "html.parser")
+            except Exception as exc:
+                record_error("HTML konnte nicht geparst werden", url=url, error=str(exc))
+                job.record_result(errors=1)
+            else:
+                process_html(url, depth, school_id, response, soup, sitemap_meta)
+        else:
+            record_info("Inhaltstyp nicht indizierbar", url=url, content_type=content_type)
+            job.record_result()
+
+        job.update_queue_size(queue.qsize())
+        persist_index_job_state(job)
+
+    def worker() -> None:
+        while not stop_event.is_set():
+            if job.cancel_event.is_set() and queue.empty():
+                break
+            try:
+                task = queue.get(timeout=0.5)
+            except Empty:
+                continue
+            if task is None:
+                queue.task_done()
+                break
+            url, depth, school_id = task
+            if job.cancel_event.is_set():
+                queue.task_done()
+                continue
+            try:
+                with state_lock:
+                    if url in processed_urls:
+                        skip = True
+                    else:
+                        skip = False
+                        processed_urls.add(url)
+                if not skip:
+                    process_task(url, depth, school_id)
+                else:
+                    job.update_queue_size(queue.qsize())
+            finally:
+                queue.task_done()
+
+    queue: Queue[Tuple[str, int, str]] = Queue()
+    state_lock = threading.Lock()
+    stop_event = threading.Event()
+    robots_cache: Dict[str, Any] = {}
+    last_request_time: Dict[str, float] = {}
+    sitemap_entries: Dict[str, Dict[str, Any]] = {}
+    enqueued_urls: Set[str] = set()
+    processed_urls: Set[str] = set()
+    seen_hashes: Set[str] = set()
+    domain_discovered: Dict[str, int] = defaultdict(int)
+    domain_processed: Dict[str, int] = defaultdict(int)
+    workers: List[threading.Thread] = []
+
+    try:
+        with job._lock:
+            job.status = "running"
+            job.error = None
+            job.completed = False
+            job.started_at = time.time()
+        persist_index_job_state(job)
+
+        log_developer_event(
+            "index-run",
+            "Indexlauf gestartet",
+            details={
+                "job_id": job.id,
+                "start_urls": len(job.start_urls),
+                "depth": job.depth,
+                "respect_robots": job.respect_robots,
+                "include_pdfs": job.include_pdfs,
+            },
+        )
+
+        for start_url in job.start_urls:
+            school_id = job.start_map.get(start_url) or resolve_school_for_domain(urlparse(start_url).netloc)
+            if not school_id:
+                record_error("Start-URL keiner Schule zugeordnet", url=start_url)
+                continue
+            enqueue_url(start_url, 0, school_id)
+
+        persist_index_job_state(job)
+
+        for school_id, start_url in job.school_start_urls.items():
+            parsed = urlparse(start_url)
+            domain = parsed.netloc.lower()
+            sitemap_urls: List[str] = []
+            if job.respect_robots:
+                robot_parser = build_robot_parser(start_url)
+                robots_cache[domain] = robot_parser
+                sitemap_urls = robot_parser.site_maps() or []
+            if not sitemap_urls:
+                sitemap_urls = [f"{parsed.scheme or 'https'}://{parsed.netloc}/sitemap.xml"]
+            seen_maps: Set[str] = set()
+            sitemap_records: List[Dict[str, Any]] = []
+            for sitemap_url in sitemap_urls:
+                if len(seen_maps) >= INDEX_SITEMAP_LIMIT:
+                    break
+                sitemap_records.extend(fetch_sitemap_entries(sitemap_url, seen_maps))
+            queued = 0
+            if sitemap_records and job.depth >= 1:
+                for entry in sitemap_records:
+                    loc = entry.get("loc")
+                    if not isinstance(loc, str):
+                        continue
+                    enqueue_url(loc, 1, school_id, entry)
+                    queued += 1
+            with job._lock:
+                job.sitemap_stats[domain] = {
+                    "sitemaps": len(sitemap_urls),
+                    "entries": len(sitemap_records),
+                    "queued": queued,
+                }
+            if sitemap_records:
+                record_info("Sitemap ausgewertet", domain=domain, entries=len(sitemap_records))
+            persist_index_job_state(job)
+
+        for _ in range(max(1, job.concurrency)):
+            thread = threading.Thread(target=worker, daemon=True)
+            workers.append(thread)
+            thread.start()
+
+        queue.join()
+
+        if job.cancel_event.is_set():
+            job.mark_cancelled()
+            storage.update_index_run(
+                job.id,
+                {
+                    "status": job.status,
+                    "completed": True,
+                    "completed_at": datetime.utcnow().isoformat() + "Z",
+                    "stats": job.as_dict().get("stats", {}),
+                },
+            )
+            persist_index_job_state(job)
+            log_developer_event(
+                "index-run",
+                "Indexlauf abgebrochen",
+                details={"job_id": job.id, "processed": job.processed},
+            )
+        else:
+            job.mark_completed()
+            storage.update_index_run(
+                job.id,
+                {
+                    "status": job.status,
+                    "completed": True,
+                    "completed_at": datetime.utcnow().isoformat() + "Z",
+                    "stats": job.as_dict().get("stats", {}),
+                },
+            )
+            persist_index_job_state(job)
+            log_developer_event(
+                "index-run",
+                "Indexlauf abgeschlossen",
+                details={"job_id": job.id, "documents": job.stored_documents},
+            )
+
+    except Exception as exc:
+        job.mark_completed(error=str(exc))
+        storage.update_index_run(
+            job.id,
+            {
+                "status": job.status,
+                "completed": True,
+                "completed_at": datetime.utcnow().isoformat() + "Z",
+                "error": str(exc),
+                "stats": job.as_dict().get("stats", {}),
+            },
+        )
+        persist_index_job_state(job)
+        record_error("Indexlauf fehlgeschlagen", error=str(exc))
+        log_error_event(
+            "index-run-error",
+            str(exc),
+            details={"job_id": job.id, "success": False},
+            stack="".join(traceback.format_exception(type(exc), exc, exc.__traceback__)),
+        )
+    finally:
+        stop_event.set()
+        for _ in workers:
+            queue.put(None)
+        for thread in workers:
+            thread.join()
+        remove_index_job(job.id)
 
 
 
@@ -6515,6 +7850,246 @@ def delete_search_result_route(result_id: int) -> ResponseReturnValue:
     return jsonify({"status": "deleted"})
 
 
+@app.route("/indexing")
+def indexing_page() -> ResponseReturnValue:
+    records_all = load_stammdaten()
+    active_records = [record for record in records_all if record.get("aktiv", True)]
+    index_settings = get_index_settings()
+    runs = list(storage.list_index_runs())
+    return render_template(
+        "indexing.html",
+        active_page="indexing",
+        records=active_records,
+        stammdaten_fields=STAMMDATEN_FIELDS,
+        stammdaten_primary_fields=STAMMDATEN_PRIMARY_FIELDS,
+        stammdaten_boolean_fields=STAMMDATEN_BOOLEAN_FIELDS,
+        index_settings=index_settings,
+        index_runs=runs,
+        max_concurrency=MAX_CONCURRENCY,
+    )
+
+
+def _parse_index_settings(payload: Dict[str, Any]) -> Dict[str, Any]:
+    defaults = get_index_settings()
+    settings_payload = payload.get("settings")
+    if not isinstance(settings_payload, dict):
+        settings_payload = {}
+    try:
+        depth = int(settings_payload.get("depth", defaults["depth"]))
+    except (TypeError, ValueError):
+        depth = defaults["depth"]
+    depth = max(0, depth)
+    respect_robots = bool(settings_payload.get("respect_robots", defaults["respect_robots"]))
+    include_pdfs = bool(settings_payload.get("include_pdfs", defaults["include_pdfs"]))
+    max_pages_raw = settings_payload.get("max_pages_per_domain", defaults["max_pages_per_domain"])
+    try:
+        max_pages_value = int(max_pages_raw) if max_pages_raw is not None else defaults["max_pages_per_domain"]
+    except (TypeError, ValueError):
+        max_pages_value = defaults["max_pages_per_domain"]
+    if isinstance(max_pages_value, int) and max_pages_value <= 0:
+        max_pages = None
+    else:
+        max_pages = max_pages_value if isinstance(max_pages_value, int) else None
+    path_whitelist = _normalise_path_list(settings_payload.get("path_whitelist", defaults["path_whitelist"]))
+    path_blacklist = _normalise_path_list(settings_payload.get("path_blacklist", defaults["path_blacklist"]))
+    parameter_whitelist = _normalise_list_setting(
+        settings_payload.get("parameter_whitelist", defaults["parameter_whitelist"])
+    )
+    try:
+        concurrency = int(settings_payload.get("concurrency", defaults["concurrency"]))
+    except (TypeError, ValueError):
+        concurrency = defaults["concurrency"]
+    concurrency = max(1, min(concurrency, MAX_CONCURRENCY))
+    try:
+        rate_limit = float(settings_payload.get("rate_limit", defaults["rate_limit"]))
+    except (TypeError, ValueError):
+        rate_limit = defaults["rate_limit"]
+    rate_limit = max(0.0, rate_limit)
+    try:
+        retry_attempts = int(settings_payload.get("retry_attempts", defaults["retry_attempts"]))
+    except (TypeError, ValueError):
+        retry_attempts = defaults["retry_attempts"]
+    retry_attempts = max(1, retry_attempts)
+    return {
+        "depth": depth,
+        "respect_robots": respect_robots,
+        "include_pdfs": include_pdfs,
+        "max_pages_per_domain": max_pages,
+        "path_whitelist": path_whitelist,
+        "path_blacklist": path_blacklist,
+        "parameter_whitelist": parameter_whitelist,
+        "concurrency": concurrency,
+        "rate_limit": rate_limit,
+        "retry_attempts": retry_attempts,
+    }
+
+
+@app.post("/index/start")
+def start_index_job() -> ResponseReturnValue:
+    payload = request.get_json(silent=True) or {}
+    if not isinstance(payload, dict):
+        return jsonify({"error": "Ungültige Anfrage."}), 400
+
+    school_ids_raw = payload.get("school_ids")
+    if not isinstance(school_ids_raw, list) or not school_ids_raw:
+        return jsonify({"error": "Bitte wählen Sie mindestens eine Schule aus."}), 400
+    school_ids = [str(item).strip() for item in school_ids_raw if str(item).strip()]
+    if not school_ids:
+        return jsonify({"error": "Keine gültigen Schulen ausgewählt."}), 400
+
+    records = load_stammdaten()
+    records_by_id: Dict[str, Dict[str, Any]] = {}
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        sid = str(record.get("schul_id") or "").strip()
+        if sid:
+            records_by_id[sid] = record
+
+    settings_values = _parse_index_settings(payload)
+    filters_value = payload.get("filters") if isinstance(payload.get("filters"), dict) else {}
+
+    start_urls: List[str] = []
+    start_map: Dict[str, str] = {}
+    school_records: Dict[str, Dict[str, Any]] = {}
+    school_domains: Dict[str, str] = {}
+    school_start_urls: Dict[str, str] = {}
+
+    for school_id in school_ids:
+        record = records_by_id.get(school_id)
+        if not record:
+            continue
+        homepage = str(record.get("homepage") or "").strip()
+        if not homepage:
+            continue
+        canonical = canonicalize_index_url(homepage, settings_values["parameter_whitelist"])
+        if not canonical:
+            continue
+        if canonical not in start_map:
+            start_urls.append(canonical)
+        start_map[canonical] = school_id
+        school_records[school_id] = record
+        school_domains[school_id] = urlparse(canonical).netloc.lower()
+        school_start_urls[school_id] = canonical
+
+    if not start_urls:
+        return jsonify({"error": "Für die ausgewählten Schulen wurden keine gültigen URLs gefunden."}), 400
+
+    job_id = str(uuid.uuid4())
+    job = IndexJob(
+        id=job_id,
+        start_urls=start_urls,
+        start_map=start_map,
+        school_records=school_records,
+        school_domains=school_domains,
+        school_start_urls=school_start_urls,
+        filters=filters_value,
+        depth=settings_values["depth"],
+        respect_robots=settings_values["respect_robots"],
+        include_pdfs=settings_values["include_pdfs"],
+        max_pages_per_domain=settings_values["max_pages_per_domain"],
+        path_whitelist=settings_values["path_whitelist"],
+        path_blacklist=settings_values["path_blacklist"],
+        parameter_whitelist=settings_values["parameter_whitelist"],
+        concurrency=settings_values["concurrency"],
+        rate_limit=settings_values["rate_limit"],
+        retry_attempts=settings_values["retry_attempts"],
+    )
+
+    register_index_job(job)
+    storage.upsert_index_run(job.id, job.as_dict(), status="pending")
+    persist_index_job_state(job)
+
+    thread = threading.Thread(target=run_index_job, args=(job,), daemon=True)
+    thread.start()
+
+    log_developer_event(
+        "index-run",
+        "Indexlauf angefordert",
+        details={"job_id": job.id, "schools": len(school_records), "depth": job.depth},
+    )
+
+    return jsonify({"job_id": job.id, "status": "started"})
+
+
+@app.post("/index/cancel/<job_id>")
+def cancel_index_job(job_id: str) -> ResponseReturnValue:
+    job = get_index_job(job_id)
+    if not job:
+        run = storage.get_index_run(job_id)
+        if run:
+            return jsonify({"status": "not-running", "run": run})
+        return jsonify({"error": "Job nicht gefunden."}), 404
+    job.request_cancel()
+    storage.update_index_run(job.id, {"status": "cancelling"})
+    persist_index_job_state(job)
+    return jsonify({"status": "cancelling"})
+
+
+@app.get("/index/status/<job_id>")
+def index_status(job_id: str) -> ResponseReturnValue:
+    job = get_index_job(job_id)
+    if job:
+        return jsonify(job.as_dict())
+    run = storage.get_index_run(job_id)
+    if run:
+        return jsonify(run)
+    return jsonify({"error": "Job nicht gefunden."}), 404
+
+
+@app.get("/index/runs")
+def index_runs() -> ResponseReturnValue:
+    runs = list(storage.list_index_runs())
+    return jsonify({"runs": runs})
+
+
+@app.get("/index/run/<job_id>")
+def index_run_details(job_id: str) -> ResponseReturnValue:
+    run = storage.get_index_run(job_id)
+    if not run:
+        return jsonify({"error": "Lauf nicht gefunden."}), 404
+    return jsonify(run)
+
+
+@app.get("/index/run/<job_id>/documents")
+def index_run_documents(job_id: str) -> ResponseReturnValue:
+    limit = request.args.get("limit", default=200, type=int)
+    if limit is None or limit <= 0:
+        limit = 200
+    documents = []
+    for index, document in enumerate(storage.list_index_documents(job_id)):
+        documents.append(document)
+        if len(documents) >= limit:
+            break
+    return jsonify({"documents": documents, "limit": limit})
+
+
+@app.get("/index/run/<job_id>/links")
+def index_run_links(job_id: str) -> ResponseReturnValue:
+    limit = request.args.get("limit", default=200, type=int)
+    if limit is None or limit <= 0:
+        limit = 200
+    links = []
+    for link in storage.list_index_links(job_id):
+        links.append(link)
+        if len(links) >= limit:
+            break
+    return jsonify({"links": links, "limit": limit})
+
+
+@app.get("/index/run/<job_id>/logs")
+def index_run_logs(job_id: str) -> ResponseReturnValue:
+    limit = request.args.get("limit", default=200, type=int)
+    if limit is None or limit <= 0:
+        limit = 200
+    logs = []
+    for entry in storage.list_index_logs(job_id):
+        logs.append(entry)
+        if len(logs) >= limit:
+            break
+    return jsonify({"logs": logs, "limit": limit})
+
+
 @app.route("/stammdaten", methods=["GET", "POST"])
 def stammdaten():
     message: Optional[str] = None
@@ -6991,6 +8566,7 @@ def settings():
     synonym_defaults = get_synonym_defaults()
     keyword_finder_defaults = get_keyword_finder_defaults()
     crawl_defaults = get_crawl_defaults()
+    index_settings = get_index_settings()
     google_credentials = get_google_search_credentials()
     data_quality_settings = get_data_quality_settings()
     developer_mode_enabled = is_developer_mode_enabled()
@@ -7015,6 +8591,22 @@ def settings():
             }
             crawl_defaults = update_crawl_defaults(values)
             message = "Die Standardwerte für den Crawl wurden gespeichert."
+            message_category = "success"
+        elif form_id == "index-defaults":
+            values = {
+                "depth": request.form.get("index_depth"),
+                "concurrency": request.form.get("index_concurrency"),
+                "rate_limit": request.form.get("index_rate_limit"),
+                "max_pages_per_domain": request.form.get("index_max_pages"),
+                "retry_attempts": request.form.get("index_retry_attempts"),
+                "respect_robots": request.form.get("index_respect_robots"),
+                "include_pdfs": request.form.get("index_include_pdfs"),
+                "path_whitelist": request.form.get("index_path_whitelist", ""),
+                "path_blacklist": request.form.get("index_path_blacklist", ""),
+                "parameter_whitelist": request.form.get("index_parameter_whitelist", ""),
+            }
+            index_settings = update_index_settings(values)
+            message = "Die Index-Standardwerte wurden gespeichert."
             message_category = "success"
         elif form_id == "keyword-finder-defaults":
             values = {
@@ -7168,6 +8760,7 @@ def settings():
     planner_key_present = has_keyword_planner_key()
     keyword_finder_defaults = get_keyword_finder_defaults()
     crawl_defaults = get_crawl_defaults()
+    index_settings = get_index_settings()
     search_defaults = get_search_defaults()
     google_credentials = get_google_search_credentials()
     data_quality_settings = get_data_quality_settings()
@@ -7182,6 +8775,7 @@ def settings():
         synonym_defaults=synonym_defaults,
         available_models=AVAILABLE_OPENAI_MODELS,
         crawl_defaults=crawl_defaults,
+        index_settings=index_settings,
         max_concurrency=MAX_CONCURRENCY,
         max_max_pages=MAX_MAX_PAGES,
         keyword_finder_defaults=keyword_finder_defaults,

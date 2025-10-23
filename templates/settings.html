@@ -50,6 +50,11 @@
                        href="{{ url_for('searches') }}">Suchen verwalten</a>
                 </li>
                 <li class="nav-item">
+                    <a class="nav-link {% if active_page == 'indexing' %}active{% endif %}"
+                       {% if active_page == 'indexing' %}aria-current="page"{% endif %}
+                       href="{{ url_for('indexing_page') }}">Index</a>
+                </li>
+                <li class="nav-item">
                     <a class="nav-link {% if active_page == 'stammdaten' %}active{% endif %}"
                        {% if active_page == 'stammdaten' %}aria-current="page"{% endif %}
                        href="{{ url_for('stammdaten') }}">Stammdaten</a>
@@ -274,6 +279,68 @@
                 </div>
                 <div class="col-12">
                     <button type="submit" class="btn btn-primary">Crawl-Standardwerte speichern</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <div class="card mb-3">
+        <div class="card-body">
+            <h2 class="h5">Index-Standardwerte</h2>
+            <p class="text-muted">Diese Werte werden auf der Index-Seite vorausgefüllt und können dort pro Lauf angepasst werden.</p>
+            <form method="post" class="row g-3">
+                <input type="hidden" name="form_id" value="index-defaults">
+                <div class="col-md-4 col-12">
+                    <label for="index_depth" class="form-label">Crawltiefe</label>
+                    <input type="number" class="form-control" id="index_depth" name="index_depth" min="0" value="{{ index_settings.depth }}" required>
+                </div>
+                <div class="col-md-4 col-12">
+                    <label for="index_concurrency" class="form-label">Parallele Abrufe</label>
+                    <input type="number" class="form-control" id="index_concurrency" name="index_concurrency" min="1" max="{{ max_concurrency }}" value="{{ index_settings.concurrency }}" required>
+                    <div class="form-text">Maximal {{ max_concurrency }} gleichzeitige Abrufe.</div>
+                </div>
+                <div class="col-md-4 col-12">
+                    <label for="index_rate_limit" class="form-label">Rate-Limit (Sekunden)</label>
+                    <input type="number" class="form-control" id="index_rate_limit" name="index_rate_limit" min="0" step="0.1" value="{{ index_settings.rate_limit }}" required>
+                </div>
+                <div class="col-md-6 col-12">
+                    <label for="index_max_pages" class="form-label">Max. Seiten pro Domain</label>
+                    <input type="number" class="form-control" id="index_max_pages" name="index_max_pages" min="0" placeholder="unbegrenzt" value="{{ index_settings.max_pages_per_domain or '' }}">
+                    <div class="form-text">0 oder leer bedeutet unbegrenzt.</div>
+                </div>
+                <div class="col-md-6 col-12">
+                    <label for="index_retry_attempts" class="form-label">Retry-Versuche</label>
+                    <input type="number" class="form-control" id="index_retry_attempts" name="index_retry_attempts" min="1" value="{{ index_settings.retry_attempts }}" required>
+                </div>
+                <div class="col-md-6 col-12">
+                    <div class="form-check mt-4">
+                        <input class="form-check-input" type="checkbox" id="index_respect_robots" name="index_respect_robots" value="on" {% if index_settings.respect_robots %}checked{% endif %}>
+                        <label class="form-check-label" for="index_respect_robots">robots.txt respektieren</label>
+                    </div>
+                </div>
+                <div class="col-md-6 col-12">
+                    <div class="form-check mt-4">
+                        <input class="form-check-input" type="checkbox" id="index_include_pdfs" name="index_include_pdfs" value="on" {% if index_settings.include_pdfs %}checked{% endif %}>
+                        <label class="form-check-label" for="index_include_pdfs">PDF-Inhalte indizieren</label>
+                    </div>
+                </div>
+                <div class="col-12">
+                    <label for="index_path_whitelist" class="form-label">Pfad-Whitelist</label>
+                    <textarea class="form-control" id="index_path_whitelist" name="index_path_whitelist" rows="3" placeholder="z. B. /aktuelles">{{ index_settings.path_whitelist|join('\n') }}</textarea>
+                    <div class="form-text">Nur Pfade in dieser Liste werden berücksichtigt (leer = keine Einschränkung).</div>
+                </div>
+                <div class="col-12">
+                    <label for="index_path_blacklist" class="form-label">Pfad-Blacklist</label>
+                    <textarea class="form-control" id="index_path_blacklist" name="index_path_blacklist" rows="3" placeholder="z. B. /suche">{{ index_settings.path_blacklist|join('\n') }}</textarea>
+                    <div class="form-text">Pfad-Anfänge, die ausgeschlossen werden sollen.</div>
+                </div>
+                <div class="col-12">
+                    <label for="index_parameter_whitelist" class="form-label">Parameter-Whitelist</label>
+                    <textarea class="form-control" id="index_parameter_whitelist" name="index_parameter_whitelist" rows="3" placeholder="page&#10;p">{{ index_settings.parameter_whitelist|join('\n') }}</textarea>
+                    <div class="form-text">Nur diese Query-Parameter bleiben in URLs erhalten.</div>
+                </div>
+                <div class="col-12">
+                    <button type="submit" class="btn btn-primary">Index-Standardwerte speichern</button>
                 </div>
             </form>
         </div>
