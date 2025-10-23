@@ -161,6 +161,7 @@
                     <button type="button" class="btn btn-outline-secondary btn-sm" id="select-none">Keine auswählen</button>
                     <button type="button" class="btn btn-outline-primary" id="start-quality-check">Prüfung starten</button>
                     <button type="button" class="btn btn-outline-warning" id="start-site-scope">Auftrittstyp prüfen</button>
+                    <button type="button" class="btn btn-outline-secondary" id="bulk-site-scope">Auftrittstyp ändern</button>
                     <button type="button" class="btn btn-outline-info" id="start-google-search">Google-Suche (100 Treffer)</button>
                     <button type="button" class="btn btn-outline-success" id="accept-invalid">„Falsch“-Vorschläge übernehmen</button>
                     <button type="button" class="btn btn-outline-danger" id="cancel-quality-check" disabled>Abbrechen</button>
@@ -388,6 +389,41 @@
     </div>
 </div>
 
+<div class="modal fade" id="bulkSiteScopeModal" tabindex="-1" aria-labelledby="bulkSiteScopeLabel" aria-hidden="true">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <form id="bulk-site-scope-form">
+                <div class="modal-header">
+                    <h5 class="modal-title" id="bulkSiteScopeLabel">Auftrittstyp für Auswahl ändern</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Schließen"></button>
+                </div>
+                <div class="modal-body">
+                    <p class="text-muted">Auftrittstyp für <span id="bulk-site-scope-count">0</span> Schulen setzen.</p>
+                    <div class="mb-3">
+                        <label class="form-label">Auftrittstyp auswählen</label>
+                        <div class="form-check">
+                            <input class="form-check-input" type="radio" name="bulk_site_scope_choice" id="bulkScopeExclusive" value="exclusive" checked>
+                            <label class="form-check-label" for="bulkScopeExclusive">Exklusive Webseite</label>
+                        </div>
+                        <div class="form-check">
+                            <input class="form-check-input" type="radio" name="bulk_site_scope_choice" id="bulkScopeShared" value="shared">
+                            <label class="form-check-label" for="bulkScopeShared">Geteilter Auftritt</label>
+                        </div>
+                        <div class="form-check">
+                            <input class="form-check-input" type="radio" name="bulk_site_scope_choice" id="bulkScopeUnknown" value="unknown">
+                            <label class="form-check-label" for="bulkScopeUnknown">Unklar</label>
+                        </div>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Abbrechen</button>
+                    <button type="submit" class="btn btn-primary">Speichern</button>
+                </div>
+            </form>
+        </div>
+    </div>
+</div>
+
 <div class="offcanvas offcanvas-end offcanvas-lg" tabindex="-1" id="detailsPanel" aria-labelledby="detailsLabel">
     <div class="offcanvas-header">
         <div>
@@ -430,6 +466,12 @@
         const siteScopeSchoolId = document.getElementById('site-scope-school-id');
         const siteScopeReasonInput = document.getElementById('site-scope-reason');
         const siteScopeChoices = Array.from(document.querySelectorAll('input[name="site_scope_choice"]'));
+        const bulkSiteScopeBtn = document.getElementById('bulk-site-scope');
+        const bulkScopeModalEl = document.getElementById('bulkSiteScopeModal');
+        const bulkScopeModal = bulkScopeModalEl && window.bootstrap && window.bootstrap.Modal ? new window.bootstrap.Modal(bulkScopeModalEl) : null;
+        const bulkScopeForm = document.getElementById('bulk-site-scope-form');
+        const bulkScopeChoices = Array.from(document.querySelectorAll('input[name="bulk_site_scope_choice"]'));
+        const bulkScopeCount = document.getElementById('bulk-site-scope-count');
         const detailsPanelEl = document.getElementById('detailsPanel');
         const detailsPanel = detailsPanelEl && window.bootstrap && window.bootstrap.Offcanvas ? new window.bootstrap.Offcanvas(detailsPanelEl) : null;
         const detailsContent = document.getElementById('detailsContent');
@@ -438,6 +480,7 @@
         const progressResultsBody = document.getElementById('progress-results-body');
         const selectVisibleBtn = document.getElementById('select-visible');
         const siteScopeBtn = document.getElementById('start-site-scope');
+        const bulkSiteScopeUrl = "{{ url_for('bulk_update_site_scope') }}";
         const googleBtn = document.getElementById('start-google-search');
         const acceptInvalidBtn = document.getElementById('accept-invalid');
         const bulkAcceptUrl = "{{ url_for('bulk_accept_data_quality') }}";
@@ -462,6 +505,7 @@
         let currentRecords = [];
         let currentSortKey = null;
         let currentSortDirection = 'asc';
+        let pendingBulkScopeIds = [];
 
         function escapeHtml(value) {
             return (value == null ? '' : String(value)).replace(/[&<>"']/g, (char) => {
@@ -1285,12 +1329,101 @@
             });
         }
 
+        function openBulkScopeDialog(ids) {
+            if (!Array.isArray(ids) || !ids.length) {
+                appendMessage('Bitte wählen Sie mindestens eine Schule aus.');
+                return;
+            }
+            pendingBulkScopeIds = ids.slice();
+            if (bulkScopeCount) {
+                bulkScopeCount.textContent = String(ids.length);
+            }
+            if (bulkScopeModal) {
+                let hasChecked = false;
+                bulkScopeChoices.forEach(radio => {
+                    if (radio.checked) {
+                        hasChecked = true;
+                    }
+                });
+                if (!hasChecked) {
+                    const fallback = bulkScopeChoices[0];
+                    if (fallback) {
+                        fallback.checked = true;
+                    }
+                }
+                bulkScopeModal.show();
+            } else {
+                const fallbackChoice = window.prompt('Auftrittstyp (exclusive/shared/unknown):', 'exclusive');
+                if (!fallbackChoice) {
+                    pendingBulkScopeIds = [];
+                    return;
+                }
+                submitBulkScope(ids, fallbackChoice);
+            }
+        }
+
+        function submitBulkScope(ids, scopeValue, reason) {
+            if (!Array.isArray(ids) || !ids.length) {
+                appendMessage('Bitte wählen Sie mindestens eine Schule aus.');
+                return Promise.resolve(null);
+            }
+            const normalised = normalizeScope(scopeValue || SITE_SCOPE_UNKNOWN);
+            const payload = {
+                school_ids: ids,
+                site_scope: normalised,
+            };
+            if (typeof reason === 'string' && reason.trim()) {
+                payload.reason = reason.trim();
+            }
+            return fetch(bulkSiteScopeUrl, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            }).then(resp => resp.json()).then(data => {
+                if (!data) {
+                    return null;
+                }
+                if (data.error) {
+                    appendMessage(data.error);
+                }
+                if (data.message) {
+                    appendMessage(data.message);
+                }
+                if (data.summary && typeof data.summary.updated === 'number') {
+                    const updatedCount = Number(data.summary.updated) || 0;
+                    const totalCount = Number(data.summary.processed || data.summary.requested || ids.length) || ids.length;
+                    if (updatedCount > 0) {
+                        const note = updatedCount === 1
+                            ? '1 Schule aktualisiert.'
+                            : `${updatedCount} Schulen aktualisiert.`;
+                        appendMessage(`Auftrittstyp gesetzt: ${note}`);
+                    } else if (totalCount > 0) {
+                        appendMessage('Keine Datensätze wurden geändert.');
+                    }
+                    if (typeof data.summary.skipped === 'number' && data.summary.skipped > 0) {
+                        const skippedCount = Number(data.summary.skipped);
+                        appendMessage(`${skippedCount} Schule${skippedCount === 1 ? '' : 'n'} übersprungen.`);
+                    }
+                }
+                if (Array.isArray(data.records)) {
+                    updateTable(data.records);
+                }
+                return data;
+            }).catch(() => {
+                appendMessage('Sammelaktualisierung des Auftrittstyps fehlgeschlagen.');
+                return null;
+            }).finally(() => {
+                pendingBulkScopeIds = [];
+            });
+        }
+
         selectAllBtn?.addEventListener('click', () => setAllCheckboxes(true));
         selectVisibleBtn?.addEventListener('click', () => setCheckboxesForRows(getVisibleRows(), true));
         selectNoneBtn?.addEventListener('click', () => setAllCheckboxes(false));
         selectMaster?.addEventListener('change', event => setCheckboxesForRows(getVisibleRows(), event.target.checked));
         startBtn?.addEventListener('click', startQualityWorkflow);
         siteScopeBtn?.addEventListener('click', startSiteScopeWorkflow);
+        bulkSiteScopeBtn?.addEventListener('click', () => openBulkScopeDialog(getSelectedIds()));
         googleBtn?.addEventListener('click', startGoogleWorkflow);
         cancelBtn?.addEventListener('click', cancelJob);
         refreshBtn?.addEventListener('click', refreshData);
@@ -1327,6 +1460,31 @@
                 }
             });
         });
+
+        bulkScopeForm?.addEventListener('submit', event => {
+            event.preventDefault();
+            const ids = pendingBulkScopeIds.slice();
+            if (!ids.length) {
+                appendMessage('Bitte wählen Sie mindestens eine Schule aus.');
+                if (bulkScopeModal) {
+                    bulkScopeModal.hide();
+                }
+                return;
+            }
+            const selected = bulkScopeChoices.find(radio => radio.checked);
+            const scopeValue = normalizeScope(selected ? selected.value : SITE_SCOPE_UNKNOWN);
+            submitBulkScope(ids, scopeValue).finally(() => {
+                if (bulkScopeModal) {
+                    bulkScopeModal.hide();
+                }
+            });
+        });
+
+        if (bulkScopeModalEl && window.bootstrap && window.bootstrap.Modal) {
+            bulkScopeModalEl.addEventListener('hidden.bs.modal', () => {
+                pendingBulkScopeIds = [];
+            });
+        }
 
         acceptInvalidBtn?.addEventListener('click', () => {
             acceptInvalidBtn.disabled = true;

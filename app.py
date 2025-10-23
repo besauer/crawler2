@@ -6904,6 +6904,84 @@ def bulk_accept_data_quality() -> ResponseReturnValue:
     return jsonify(response)
 
 
+@app.route("/data-quality/bulk-site-scope", methods=["POST"])
+def bulk_update_site_scope() -> ResponseReturnValue:
+    payload = request.get_json(silent=True) or {}
+    requested_ids_raw = payload.get("school_ids")
+
+    if not isinstance(requested_ids_raw, list) or not requested_ids_raw:
+        return jsonify({"error": "Keine Schulen ausgewählt."}), 400
+
+    dataset = build_data_quality_dataset()
+    dataset_map: Dict[str, Dict[str, object]] = {
+        str(record.get("schul_id")): record
+        for record in dataset
+        if isinstance(record, dict) and record.get("schul_id")
+    }
+
+    target_ids: List[str] = []
+    skipped: List[Dict[str, object]] = []
+    seen: Set[str] = set()
+
+    for raw_id in requested_ids_raw:
+        sid = str(raw_id).strip()
+        if not sid or sid in seen:
+            continue
+        seen.add(sid)
+        if sid not in dataset_map:
+            skipped.append({"schul_id": sid, "reason": "Unbekannte Schule"})
+            continue
+        target_ids.append(sid)
+
+    if not target_ids:
+        return jsonify({"error": "Keine gültigen Schulen gefunden."}), 400
+
+    scope_value = normalise_site_scope(payload.get("site_scope"))
+    reason_value = str(payload.get("reason") or "").strip()
+    now_iso = datetime.utcnow().isoformat() + "Z"
+
+    updated: List[str] = []
+    for school_id in target_ids:
+        update_data_quality_record(
+            school_id,
+            {
+                "site_scope": scope_value,
+                "site_scope_reason": reason_value,
+                "site_scope_manual": True,
+                "site_scope_source": "bulk_manual",
+                "site_scope_updated_at": now_iso,
+                "_force_site_scope": True,
+            },
+        )
+        append_data_quality_history(
+            school_id,
+            {
+                "stage": "bulk",
+                "status": "site_scope",
+                "detail": f"Auftrittstyp gesammelt gesetzt auf {site_scope_label(scope_value)}.",
+                "reason": reason_value,
+            },
+        )
+        updated.append(school_id)
+
+    summary = {
+        "requested": len(requested_ids_raw),
+        "processed": len(target_ids),
+        "updated": len(updated),
+        "skipped": len(skipped),
+    }
+
+    response: Dict[str, object] = {
+        "status": "ok",
+        "summary": summary,
+        "updated": updated,
+        "skipped": skipped,
+        "records": build_data_quality_dataset(),
+    }
+
+    return jsonify(response)
+
+
 @app.route("/settings", methods=["GET", "POST"])
 def settings():
     message: Optional[str] = None
