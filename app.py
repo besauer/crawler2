@@ -119,13 +119,16 @@ DATA_QUALITY_SITE_PROMPT = (
 )
 
 DATA_QUALITY_SITE_SCOPE_PROMPT = (
-    "Du entscheidest, ob der übergebene Webauftritt exklusiv nur diese Schule behandelt oder Teil einer größeren "
-    "Webpräsenz ist. Dir liegen Schulname, Ort, vollständige Textauszüge der Startseite, Navigation, Überschriften, "
-    "wichtige Inhaltsabschnitte, Impressumsdaten sowie erkannte Signale (z. B. Adressen, Kontaktwege, Domains) vor. "
-    "Gewichte die URL nur gering: Entscheidend sind Inhalte, Struktur, Navigation, Ansprechpersonen, Logos und "
-    "sprachliche Hinweise auf weitere Organisationen. Antworte im gleichen JSON-Format wie bei der Hauptprüfung mit "
-    "den Feldern \"bewertung\", \"confidence\", \"begruendung\", \"gefundene_signale\", \"auftritt_typ\" "
-    "(EXKLUSIV oder GETEILT) und \"auftritt_begruendung\"."
+    "Du führst eine Tiefenprüfung des kompletten Webauftritts durch und entscheidest, ob die Seite exklusiv nur diese "
+    "Schule abbildet oder Teil einer größeren Organisation ist. Dir liegen Schulname, Ort, umfangreiche Textauszüge, "
+    "vollständige Navigations- und Übersichtsstrukturen, Inhaltssegmente, Impressumsdaten, erkannte Signale (Adressen, "
+    "Kontaktwege, wiederkehrende Organisationen) sowie Listen verlinkter Domains vor. Analysiere Navigation, "
+    "Seitenstruktur, Überschriften, wiederkehrende Namensnennungen, Kontakt- und Impressumsangaben sowie den gesamten "
+    "Fließtext. Die URL ist nur ein schwaches Indiz – relevante Kriterien sind inhaltliche Fokussierung auf die Schule, "
+    "Hinweise auf andere Einrichtungen, Betreiber oder Sammelauftritte, Verweise auf Träger oder Gemeinden und die "
+    "Breite des Angebots. Antworte im gleichen JSON-Format wie bei der Hauptprüfung mit den Feldern \"bewertung\", "
+    "\"confidence\", \"begruendung\", \"gefundene_signale\", \"auftritt_typ\" (EXKLUSIV oder GETEILT) und "
+    "\"auftritt_begruendung\"."
 )
 DATA_QUALITY_SEARCH_PROMPT = (
     "Du erhältst Schulname, Ort und eine Liste möglicher Webseiten aus einer Google-Suche. Wähle die URL aus, die am "
@@ -133,6 +136,27 @@ DATA_QUALITY_SEARCH_PROMPT = (
     "Schlüsseln \"empfehlung\" (URL oder null), \"confidence\" (0.0–1.0), \"begruendung\" (kurze Begründung) und "
     "\"signale\" (Liste kurzer Stichworte) zurück."
 )
+
+SITE_SCOPE_ORG_KEYWORDS: Dict[str, str] = {
+    "gemeinde": "Hinweis auf kommunalen Gesamtauftritt",
+    "stadt": "Hinweis auf städtischen Gesamtauftritt",
+    "landkreis": "Hinweis auf Landkreis-Auftritt",
+    "kreis": "Hinweis auf Kreis- oder Amtsportal",
+    "stiftung": "Hinweis auf Stiftung oder Trägerorganisation",
+    "diözese": "Hinweis auf kirchlichen Träger",
+    "bistum": "Hinweis auf kirchlichen Träger",
+    "kirche": "Hinweis auf kirchlichen Gesamtauftritt",
+    "träger": "Explizite Trägerhinweise",
+    "klinikum": "Hinweis auf Klinik- oder Krankenhausportal",
+    "kliniken": "Hinweis auf Klinik- oder Krankenhausportal",
+    "verein": "Hinweis auf Vereins- oder Verbandsauftritt",
+    "verband": "Hinweis auf Verbandsauftritt",
+    "campus": "Hinweis auf Gesamtcampus",
+    "schulverbund": "Hinweis auf Verbund mehrerer Schulen",
+    "bildungszentrum": "Hinweis auf Bildungszentrum mit mehreren Einrichtungen",
+    "schulzentrum": "Hinweis auf Schulzentrum oder Mehrfachauftritt",
+}
+
 DEFAULT_DATA_QUALITY_SETTINGS = {
     "model": OPENAI_MODEL_NAME,
     "temperature": 0.1,
@@ -2674,20 +2698,24 @@ def extract_visible_text(html: str) -> str:
     return " ".join(texts)
 
 
-def collect_site_snapshot(url: str) -> Dict[str, object]:
+def collect_site_snapshot(url: str, schulname: Optional[str] = None, ort: Optional[str] = None) -> Dict[str, object]:
     snapshot = {
         "url": url,
         "domain": urlparse(url).netloc,
         "title": "",
         "description": "",
         "main_excerpt": "",
+        "full_text": "",
         "impressum_excerpt": "",
         "structured_signals": {},
         "fetched_urls": [],
         "errors": [],
         "navigation_items": [],
+        "navigation_details": [],
         "heading_texts": [],
+        "heading_outline": [],
         "content_snippets": [],
+        "content_sections": [],
         "link_domains": [],
     }
     html = fetch_url_text(url)
@@ -2701,7 +2729,8 @@ def collect_site_snapshot(url: str) -> Dict[str, object]:
     if description_tag:
         snapshot["description"] = _collapse_whitespace(description_tag.get("content", ""))
     text = extract_visible_text(html)
-    snapshot["main_excerpt"] = _truncate_text(text, 3500)
+    snapshot["full_text"] = _truncate_text(text, 12000)
+    snapshot["main_excerpt"] = _truncate_text(text, 4500)
     snapshot["fetched_urls"].append(url)
 
     structured: Dict[str, object] = {}
@@ -2719,6 +2748,7 @@ def collect_site_snapshot(url: str) -> Dict[str, object]:
     snapshot["structured_signals"] = structured
 
     nav_items: List[str] = []
+    nav_details: List[Dict[str, str]] = []
     seen_nav_texts: Set[str] = set()
     nav_candidates = soup.find_all("nav")
     if not nav_candidates:
@@ -2732,13 +2762,17 @@ def collect_site_snapshot(url: str) -> Dict[str, object]:
                 continue
             seen_nav_texts.add(label.lower())
             nav_items.append(label)
+            absolute = urljoin(url, anchor["href"])
+            nav_details.append({"label": label, "url": absolute})
             if len(nav_items) >= 40:
                 break
         if len(nav_items) >= 40:
             break
     snapshot["navigation_items"] = nav_items
+    snapshot["navigation_details"] = nav_details
 
     heading_texts: List[str] = []
+    heading_outline: List[Dict[str, object]] = []
     seen_heading_texts: Set[str] = set()
     for level in range(1, 5):
         for heading in soup.find_all(f"h{level}"):
@@ -2750,13 +2784,16 @@ def collect_site_snapshot(url: str) -> Dict[str, object]:
                 continue
             seen_heading_texts.add(lowered)
             heading_texts.append(label)
+            heading_outline.append({"level": f"h{level}", "text": label})
             if len(heading_texts) >= 40:
                 break
         if len(heading_texts) >= 40:
             break
     snapshot["heading_texts"] = heading_texts
+    snapshot["heading_outline"] = heading_outline
 
     content_snippets: List[str] = []
+    content_sections: List[Dict[str, object]] = []
     seen_snippets: Set[str] = set()
     for element in soup.find_all(["p", "li", "article", "section", "div"]):
         if element.name in {"div", "section", "article"}:
@@ -2772,11 +2809,24 @@ def collect_site_snapshot(url: str) -> Dict[str, object]:
             continue
         seen_snippets.add(lowered)
         content_snippets.append(snippet[:400])
+        content_sections.append(
+            {
+                "tag": element.name,
+                "classes": (element.get("class") or [])[:5],
+                "text": snippet[:600],
+            }
+        )
         if len(content_snippets) >= 25:
             break
     if not content_snippets and text:
         content_snippets.append(_collapse_whitespace(text)[:400])
     snapshot["content_snippets"] = content_snippets
+    if not content_sections and content_snippets:
+        content_sections = [
+            {"tag": "text", "classes": [], "text": snippet}
+            for snippet in content_snippets[:5]
+        ]
+    snapshot["content_sections"] = content_sections
 
     base_url = url
     impressum_links: List[str] = []
@@ -2830,8 +2880,35 @@ def collect_site_snapshot(url: str) -> Dict[str, object]:
             if not snapshot["impressum_excerpt"]:
                 snapshot["impressum_excerpt"] = _truncate_text(nav_text, 800)
         snapshot["fetched_urls"].append(nav_url)
-        if snapshot["impressum_excerpt"]:
-            break
+
+    text_lower = text.lower()
+    if schulname:
+        norm_name = _collapse_whitespace(str(schulname)).lower()
+        if norm_name:
+            pattern = re.compile(r"\b" + re.escape(norm_name).replace("\\ ", r"\\s+") + r"\b", re.I)
+            mentions = len(pattern.findall(text))
+            if mentions:
+                structured["school_name_mentions"] = mentions
+    if ort:
+        norm_city = _collapse_whitespace(str(ort)).lower()
+        if norm_city:
+            pattern_city = re.compile(r"\b" + re.escape(norm_city).replace("\\ ", r"\\s+") + r"\b", re.I)
+            city_mentions = len(pattern_city.findall(text))
+            if city_mentions:
+                structured["city_mentions"] = city_mentions
+
+    org_matches: List[str] = []
+    for keyword, description in SITE_SCOPE_ORG_KEYWORDS.items():
+        if keyword in text_lower:
+            org_matches.append(description)
+    if org_matches:
+        structured["organisation_hinweise"] = sorted(set(org_matches))
+
+    structured["navigation_count"] = len(nav_items)
+    structured["heading_count"] = len(heading_texts)
+    structured["content_section_count"] = len(content_sections)
+    structured["unique_link_domains"] = len(snapshot["link_domains"])
+    snapshot["structured_signals"] = structured
 
     return snapshot
 
@@ -2863,15 +2940,38 @@ def assess_school_website_with_llm(
         for item in snapshot.get("navigation_items", [])
         if isinstance(item, str) and str(item).strip()
     ]
+    navigation_details = [
+        {"label": str(item.get("label")), "url": str(item.get("url"))}
+        for item in snapshot.get("navigation_details", [])
+        if isinstance(item, dict)
+        and str(item.get("label", "")).strip()
+        and str(item.get("url", "")).strip()
+    ]
     heading_items = [
         str(item)
         for item in snapshot.get("heading_texts", [])
         if isinstance(item, str) and str(item).strip()
     ]
+    heading_outline = [
+        {"level": str(item.get("level")), "text": str(item.get("text"))}
+        for item in snapshot.get("heading_outline", [])
+        if isinstance(item, dict)
+        and str(item.get("text", "")).strip()
+        and str(item.get("level", "")).strip()
+    ]
     content_items = [
         str(item)
         for item in snapshot.get("content_snippets", [])
         if isinstance(item, str) and str(item).strip()
+    ]
+    content_sections = [
+        {
+            "tag": str(item.get("tag")),
+            "classes": item.get("classes", []),
+            "text": str(item.get("text")),
+        }
+        for item in snapshot.get("content_sections", [])
+        if isinstance(item, dict) and str(item.get("text", "")).strip()
     ]
     link_domains = [
         str(item)
@@ -2887,12 +2987,18 @@ def assess_school_website_with_llm(
         "seitentitel": snapshot.get("title"),
         "beschreibung": snapshot.get("description"),
         "startseite_text": snapshot.get("main_excerpt"),
+        "volltext": snapshot.get("full_text"),
         "impressum_text": snapshot.get("impressum_excerpt"),
+        "impressum_url": snapshot.get("impressum_url"),
         "signale": snapshot.get("structured_signals", {}),
         "navigation": navigation_items,
+        "navigation_detailliert": navigation_details,
         "ueberschriften": heading_items,
+        "ueberschriften_detailliert": heading_outline,
         "inhaltssegmente": content_items,
+        "inhalt_abschnitte": content_sections,
         "verlinkte_domains": link_domains,
+        "abgerufene_urls": snapshot.get("fetched_urls", []),
     }
     request_payload = {
         "model": model_name,
@@ -5015,7 +5121,7 @@ def run_data_quality_job(job: DataQualityJob) -> None:
 
             job.update_progress(current_school=school_id)
 
-            snapshot = collect_site_snapshot(homepage)
+            snapshot = collect_site_snapshot(homepage, schulname=schulname, ort=ort)
             location_match, location_context, mismatch_hint = _check_impressum_location(snapshot, ort)
             structured = snapshot.get("structured_signals")
             if not isinstance(structured, dict):
@@ -5097,13 +5203,18 @@ def run_data_quality_job(job: DataQualityJob) -> None:
                     "title": snapshot.get("title"),
                     "description": snapshot.get("description"),
                     "main_excerpt": snapshot.get("main_excerpt"),
+                    "full_text": snapshot.get("full_text"),
                     "impressum_excerpt": snapshot.get("impressum_excerpt"),
+                    "impressum_url": snapshot.get("impressum_url"),
                     "structured_signals": snapshot.get("structured_signals"),
                     "errors": snapshot.get("errors"),
                     "fetched_urls": snapshot.get("fetched_urls"),
                     "navigation_items": snapshot.get("navigation_items"),
+                    "navigation_details": snapshot.get("navigation_details"),
                     "heading_texts": snapshot.get("heading_texts"),
+                    "heading_outline": snapshot.get("heading_outline"),
                     "content_snippets": snapshot.get("content_snippets"),
+                    "content_sections": snapshot.get("content_sections"),
                     "link_domains": snapshot.get("link_domains"),
                 },
                 "site_scope": site_scope,
@@ -5212,10 +5323,19 @@ def run_data_quality_job(job: DataQualityJob) -> None:
                     "title": snapshot.get("title"),
                     "description": snapshot.get("description"),
                     "main_excerpt": snapshot.get("main_excerpt"),
+                    "full_text": snapshot.get("full_text"),
                     "impressum_excerpt": snapshot.get("impressum_excerpt"),
+                    "impressum_url": snapshot.get("impressum_url"),
                     "structured_signals": snapshot.get("structured_signals"),
                     "errors": snapshot.get("errors"),
                     "fetched_urls": snapshot.get("fetched_urls"),
+                    "navigation_items": snapshot.get("navigation_items"),
+                    "navigation_details": snapshot.get("navigation_details"),
+                    "heading_texts": snapshot.get("heading_texts"),
+                    "heading_outline": snapshot.get("heading_outline"),
+                    "content_snippets": snapshot.get("content_snippets"),
+                    "content_sections": snapshot.get("content_sections"),
+                    "link_domains": snapshot.get("link_domains"),
                 },
                 "site_scope": site_scope,
                 "site_scope_reason": site_scope_reason,
