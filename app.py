@@ -5866,31 +5866,34 @@ def run_index_job(job: IndexJob) -> None:
         depth: int,
         school_id: Optional[str],
         sitemap_meta: Optional[Dict[str, Any]] = None,
-    ) -> None:
+    ) -> bool:
         canonical = canonicalize_index_url(candidate_url, job.parameter_whitelist)
         if not canonical:
-            return
+            return False
         parsed = urlparse(canonical)
         domain = parsed.netloc.lower()
         with state_lock:
             if canonical in enqueued_urls:
-                return
+                return False
             if depth > job.depth:
-                return
+                return False
             if depth > 0:
                 if job.path_whitelist and not any(
                     parsed.path.startswith(prefix) for prefix in job.path_whitelist
                 ):
-                    return
+                    return False
                 if job.path_blacklist and any(
                     parsed.path.startswith(prefix) for prefix in job.path_blacklist
                 ):
-                    return
+                    return False
             assigned_school = resolve_school_for_domain(domain, school_id)
             if not assigned_school:
-                return
-            if job.max_pages_per_domain is not None and domain_discovered[domain] >= job.max_pages_per_domain:
-                return
+                return False
+            if (
+                job.max_pages_per_domain is not None
+                and domain_discovered[domain] >= job.max_pages_per_domain
+            ):
+                return False
             enqueued_urls.add(canonical)
             domain_discovered[domain] += 1
             if sitemap_meta:
@@ -5899,6 +5902,7 @@ def run_index_job(job: IndexJob) -> None:
         job.increment_discovered()
         job.update_queue_size(pending_size)
         queue.put((canonical, depth, assigned_school))
+        return True
 
     def record_error(message: str, **extra: Any) -> None:
         _index_log(job, "error", message, **extra)
@@ -5908,9 +5912,10 @@ def run_index_job(job: IndexJob) -> None:
 
     def handle_internal_links(
         links: Iterable[Dict[str, Any]], depth: int, school_id: str
-    ) -> None:
+    ) -> int:
         if depth >= job.depth:
-            return
+            return 0
+        added = 0
         for link in links:
             if not isinstance(link, dict):
                 continue
@@ -5919,7 +5924,9 @@ def run_index_job(job: IndexJob) -> None:
             target = link.get("target_url")
             if not isinstance(target, str):
                 continue
-            enqueue_url(target, depth + 1, school_id)
+            if enqueue_url(target, depth + 1, school_id):
+                added += 1
+        return added
 
     def process_html(
         url: str,
@@ -5944,7 +5951,7 @@ def run_index_job(job: IndexJob) -> None:
 
         meta_robots = _extract_meta_robots(soup)
         if meta_robots and "noindex" in meta_robots.lower():
-            record_info("Seite wegen noindex ausgelassen", url=url)
+            record_info(f"Seite wegen noindex ausgelassen – {url}", url=url)
             job.record_result()
             return
 
@@ -5993,6 +6000,23 @@ def run_index_job(job: IndexJob) -> None:
         }
 
         links = extract_links_from_html(url, soup, urlparse(url).netloc)
+        total_links = len(links)
+        internal_links = sum(1 for link in links if link.get("type") == "internal")
+        external_links = total_links - internal_links
+        if total_links:
+            record_info(
+                f"{total_links} Links analysiert – {url}",
+                url=url,
+                internal_links=internal_links,
+                external_links=external_links,
+                depth=depth,
+            )
+        else:
+            record_info(
+                f"Keine Links gefunden – {url}",
+                url=url,
+                depth=depth,
+            )
         if links:
             for link in links:
                 link["school_id"] = school_id
@@ -6001,13 +6025,29 @@ def run_index_job(job: IndexJob) -> None:
 
         if not duplicate:
             storage.append_index_documents(job.id, [document_payload])
-            record_info("Dokument gespeichert", url=url, blocks=len(blocks))
+            record_info(
+                f"Dokument gespeichert – {url}",
+                url=url,
+                blocks=len(blocks),
+                depth=depth,
+            )
             job.record_result(documents=1, links=len(links))
         else:
-            record_info("Duplikat übersprungen", url=url)
+            record_info(
+                f"Duplikat übersprungen – {url}",
+                url=url,
+                depth=depth,
+            )
             job.record_result(links=len(links))
 
-        handle_internal_links(links, depth, school_id)
+        added_internal = handle_internal_links(links, depth, school_id)
+        if added_internal:
+            record_info(
+                f"{added_internal} interne Links zur Warteschlange hinzugefügt (Tiefe {depth + 1}) – {url}",
+                url=url,
+                added=added_internal,
+                next_depth=depth + 1,
+            )
 
     def process_pdf(
         url: str,
@@ -6017,12 +6057,12 @@ def run_index_job(job: IndexJob) -> None:
         sitemap_meta: Optional[Dict[str, Any]],
     ) -> None:
         if not job.include_pdfs:
-            record_info("PDF übersprungen (deaktiviert)", url=url)
+            record_info(f"PDF übersprungen (deaktiviert) – {url}", url=url)
             job.record_result()
             return
         text_content, blocks = extract_pdf_blocks(response.content)
         if not text_content:
-            record_info("PDF konnte nicht extrahiert werden", url=url)
+            record_info(f"PDF konnte nicht extrahiert werden – {url}", url=url)
             job.record_result(errors=1)
             return
         content_hash = hashlib.sha256(text_content.encode("utf-8")).hexdigest()
@@ -6064,11 +6104,11 @@ def run_index_job(job: IndexJob) -> None:
             "sitemap_entry": sitemap_meta,
         }
         if duplicate:
-            record_info("PDF-Duplikat übersprungen", url=url)
+            record_info(f"PDF-Duplikat übersprungen – {url}", url=url)
             job.record_result()
             return
         storage.append_index_documents(job.id, [document_payload])
-        record_info("PDF gespeichert", url=url, blocks=len(blocks))
+        record_info(f"PDF gespeichert – {url}", url=url, blocks=len(blocks))
         job.record_result(documents=1)
 
     def process_task(url: str, depth: int, school_id: str) -> None:
@@ -6080,6 +6120,18 @@ def run_index_job(job: IndexJob) -> None:
         job.update_current(url=url, domain=domain)
         job.update_queue_size(queue.qsize())
         persist_index_job_state(job)
+        school_label = (
+            job.school_records.get(school_id, {}).get("schulname")
+            if school_id
+            else None
+        )
+        display_school = school_label or school_id or "Unbekannt"
+        record_info(
+            f"Öffne URL (Tiefe {depth}) – {url}",
+            school_id=school_id,
+            school=display_school,
+            depth=depth,
+        )
 
         if job.respect_robots:
             with state_lock:
@@ -6089,7 +6141,7 @@ def run_index_job(job: IndexJob) -> None:
                 with state_lock:
                     robots_cache[domain] = robot_parser
             if not robot_parser.can_fetch(USER_AGENT, url):
-                record_info("Durch robots.txt blockiert", url=url)
+                record_info(f"Durch robots.txt blockiert – {url}", url=url)
                 job.record_result()
                 persist_index_job_state(job)
                 return
@@ -6131,7 +6183,12 @@ def run_index_job(job: IndexJob) -> None:
             last_request_time[domain] = time.time()
 
         if response is None:
-            record_error("Abruf fehlgeschlagen", url=url, error=error_text)
+            record_error(
+                f"Abruf fehlgeschlagen – {url}",
+                url=url,
+                error=error_text,
+                depth=depth,
+            )
             job.record_result(errors=1)
             persist_index_job_state(job)
             return
@@ -6141,7 +6198,10 @@ def run_index_job(job: IndexJob) -> None:
             final_parsed = urlparse(final_url)
             final_domain = final_parsed.netloc.lower()
             if not resolve_school_for_domain(final_domain, school_id):
-                record_info("Weiterleitung außerhalb des Suchbereichs", url=final_url)
+                record_info(
+                    f"Weiterleitung außerhalb des Suchbereichs – {final_url}",
+                    url=final_url,
+                )
                 job.record_result()
                 persist_index_job_state(job)
                 return
@@ -6159,24 +6219,46 @@ def run_index_job(job: IndexJob) -> None:
             domain_processed[domain] += 1
 
         if response.status_code >= 400:
-            record_error("HTTP-Fehler", url=url, status=response.status_code)
+            record_error(
+                f"HTTP-Fehler {response.status_code} – {url}",
+                url=url,
+                status=response.status_code,
+                depth=depth,
+            )
             job.record_result(errors=1)
             persist_index_job_state(job)
             return
 
         content_type = response.headers.get("Content-Type", "").lower()
+        record_info(
+            f"Antwort {response.status_code} ({content_type or 'unbekannt'}) – {url}",
+            status=response.status_code,
+            content_type=content_type,
+            bytes=len(response.content),
+            depth=depth,
+        )
         if "pdf" in content_type:
             process_pdf(url, depth, school_id, response, sitemap_meta)
         elif "html" in content_type or "text" in content_type:
             try:
                 soup = BeautifulSoup(response.text, "html.parser")
             except Exception as exc:
-                record_error("HTML konnte nicht geparst werden", url=url, error=str(exc))
+                record_error(
+                    f"HTML konnte nicht geparst werden – {url}",
+                    url=url,
+                    error=str(exc),
+                    depth=depth,
+                )
                 job.record_result(errors=1)
             else:
                 process_html(url, depth, school_id, response, soup, sitemap_meta)
         else:
-            record_info("Inhaltstyp nicht indizierbar", url=url, content_type=content_type)
+            record_info(
+                f"Inhaltstyp nicht indizierbar – {url}",
+                url=url,
+                content_type=content_type,
+                depth=depth,
+            )
             job.record_result()
 
         job.update_queue_size(queue.qsize())
@@ -6247,9 +6329,17 @@ def run_index_job(job: IndexJob) -> None:
         for start_url in job.start_urls:
             school_id = job.start_map.get(start_url) or resolve_school_for_domain(urlparse(start_url).netloc)
             if not school_id:
-                record_error("Start-URL keiner Schule zugeordnet", url=start_url)
+                record_error(
+                    f"Start-URL keiner Schule zugeordnet – {start_url}",
+                    url=start_url,
+                )
                 continue
-            enqueue_url(start_url, 0, school_id)
+            if enqueue_url(start_url, 0, school_id):
+                record_info(
+                    f"Start-URL in Warteschlange – {start_url}",
+                    url=start_url,
+                    school_id=school_id,
+                )
 
         persist_index_job_state(job)
 
@@ -6275,8 +6365,8 @@ def run_index_job(job: IndexJob) -> None:
                     loc = entry.get("loc")
                     if not isinstance(loc, str):
                         continue
-                    enqueue_url(loc, 1, school_id, entry)
-                    queued += 1
+                    if enqueue_url(loc, 1, school_id, entry):
+                        queued += 1
             with job._lock:
                 job.sitemap_stats[domain] = {
                     "sitemaps": len(sitemap_urls),
@@ -6284,7 +6374,11 @@ def run_index_job(job: IndexJob) -> None:
                     "queued": queued,
                 }
             if sitemap_records:
-                record_info("Sitemap ausgewertet", domain=domain, entries=len(sitemap_records))
+                record_info(
+                    f"Sitemap ausgewertet – {domain}",
+                    domain=domain,
+                    entries=len(sitemap_records),
+                )
             persist_index_job_state(job)
 
         for _ in range(max(1, job.concurrency)):
