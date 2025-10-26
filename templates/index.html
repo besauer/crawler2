@@ -1,0 +1,947 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+    <meta charset="UTF-8">
+    <title>Suche anlegen – Schul-Webseiten Crawler</title>
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Ctext y='14' font-size='14'%3E%F0%9F%94%8D%3C/text%3E%3C/svg%3E">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css"
+          integrity="sha384-QWTKZyjpPEjISv5WaRU9OFeRpok6YctnYmDr5pNlyT2bRjXh0JMhjY6hW+ALEwIH"
+          crossorigin="anonymous">
+    <style>
+        body { padding-top: 0; }
+        textarea { min-height: 120px; }
+        .section-heading { font-size: 1.25rem; font-weight: 600; }
+        .school-table-wrapper { max-height: 320px; overflow-y: auto; }
+        .query-preview { font-family: var(--bs-font-monospace); font-size: .875rem; }
+        .table-nowrap td, .table-nowrap th { white-space: nowrap; }
+        .table-nowrap td { vertical-align: top; }
+        .navbar-nav .nav-link { white-space: nowrap; }
+        @media (min-width: 992px) {
+            .navbar-nav { flex-wrap: nowrap; gap: 0.75rem; }
+        }
+        .modal-open-fallback { display: block; opacity: 1; position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); z-index: 1055; width: min(520px, 92%); }
+        .modal-open-fallback .modal-dialog { margin: 0; max-width: 100%; }
+        .modal-open-fallback .modal-content { box-shadow: 0 0.5rem 1rem rgba(0,0,0,0.15); border: 1px solid rgba(0,0,0,0.175); }
+        .modal-backdrop-simple { position: fixed; inset: 0; background: rgba(0,0,0,0.5); z-index: 1050; }
+        body.modal-open { overflow: hidden; }
+        .category-list { max-height: 220px; overflow-y: auto; }
+    </style>
+</head>
+<body>
+<nav class="navbar navbar-expand-lg navbar-light bg-light border-bottom">
+    <div class="container">
+        <div class="d-flex align-items-center w-100">
+            <div class="d-flex align-items-center">
+                <a class="navbar-brand me-3" href="{{ url_for('index') }}">Schul-Crawler</a>
+                <div class="d-none d-lg-flex align-items-center gap-2">
+                    <button type="button" class="btn btn-sm btn-outline-secondary" data-bundle-action="import">Import</button>
+                    <button type="button" class="btn btn-sm btn-primary" data-bundle-action="export">Export</button>
+                </div>
+            </div>
+            <button class="navbar-toggler ms-auto" type="button" data-bs-toggle="collapse" data-bs-target="#mainNav"
+                    aria-controls="mainNav" aria-expanded="false" aria-label="Navigation umschalten">
+                <span class="navbar-toggler-icon"></span>
+            </button>
+        </div>
+        <div class="collapse navbar-collapse" id="mainNav">
+            <div class="d-lg-none py-3 border-top">
+                <div class="d-grid gap-2 mb-2">
+                    <button type="button" class="btn btn-outline-secondary" data-bundle-action="import">Vollständiger Import</button>
+                    <button type="button" class="btn btn-primary" data-bundle-action="export">Vollständiger Export</button>
+                </div>
+            </div>
+            <ul class="navbar-nav ms-auto mb-2 mb-lg-0">
+                <li class="nav-item">
+                    <a class="nav-link {% if active_page == 'search_create' %}active{% endif %}" href="{{ url_for('index') }}"
+                       {% if active_page == 'search_create' %}aria-current="page"{% endif %}>Suche anlegen</a>
+                </li>
+                <li class="nav-item">
+                    <a class="nav-link {% if active_page == 'search_results' %}active{% endif %}"
+                       href="{{ url_for('searches') }}" {% if active_page == 'search_results' %}aria-current="page"{% endif %}>
+                        Suchen verwalten
+                    </a>
+                </li>
+                <li class="nav-item">
+                    <a class="nav-link {% if active_page == 'indexing' %}active{% endif %}"
+                       href="{{ url_for('indexing_page') }}" {% if active_page == 'indexing' %}aria-current="page"{% endif %}>
+                        Index
+                    </a>
+                </li>
+                <li class="nav-item">
+                    <a class="nav-link {% if active_page == 'stammdaten' %}active{% endif %}" href="{{ url_for('stammdaten') }}"
+                       {% if active_page == 'stammdaten' %}aria-current="page"{% endif %}>Stammdaten</a>
+                </li>
+                <li class="nav-item">
+                    <a class="nav-link {% if active_page == 'data_quality' %}active{% endif %}" href="{{ url_for('data_quality') }}"
+                       {% if active_page == 'data_quality' %}aria-current="page"{% endif %}>Datenqualität</a>
+                </li>
+                <li class="nav-item">
+                    <a class="nav-link {% if active_page == 'debug' %}active{% endif %}" href="{{ url_for('debug_page') }}"
+                       {% if active_page == 'debug' %}aria-current="page"{% endif %}>Debugging</a>
+                </li>
+                <li class="nav-item">
+                    <a class="nav-link {% if active_page == 'settings' %}active{% endif %}" href="{{ url_for('settings') }}"
+                       {% if active_page == 'settings' %}aria-current="page"{% endif %}>Einstellungen</a>
+                </li>
+            </ul>
+        </div>
+    </div>
+</nav>
+<main class="container py-4">
+    <div class="d-flex flex-column flex-lg-row justify-content-between align-items-lg-center gap-3 mb-4">
+        <div>
+            <h1 class="mb-1">Suche anlegen</h1>
+            <p class="text-muted mb-0">Konfigurieren Sie eine neue Suche, wählen Sie die passenden Schulen und hinterlegen Sie
+                Keywords sowie einen Bewertungsprompt.</p>
+            {% if prefill_definition %}
+                <div class="alert alert-info py-2 px-3 mt-3 mb-0">
+                    Sie bearbeiten aktuell die gespeicherte Suche
+                    <strong>{{ prefill_definition.name or 'Ohne Titel' }}</strong>.
+                </div>
+            {% endif %}
+        </div>
+        <div class="text-end small text-muted">
+            {% if not has_api_key %}
+                <div class="alert alert-warning py-2 px-3 mb-2">OpenAI-Schlüssel fehlt – Bewertungen können nicht ausgeführt werden.</div>
+            {% endif %}
+            {% if not google_configured %}
+                <div class="alert alert-info py-2 px-3 mb-0">Google Search API ist nicht konfiguriert. Probeläufe verwenden keine externen Ergebnisse.</div>
+            {% endif %}
+        </div>
+    </div>
+
+    <section class="mb-4">
+        <div class="card">
+            <div class="card-header">
+                <span class="section-heading">Abschnitt 0 – Metadaten</span>
+            </div>
+            <div class="card-body row g-4">
+                <div class="col-lg-4">
+                    <label class="form-label" for="search-category">Kategorie der Suche</label>
+                    <div class="input-group">
+                        <select class="form-select" id="search-category"></select>
+                        <button class="btn btn-outline-secondary" type="button" id="manage-categories">Kategorien verwalten</button>
+                    </div>
+                </div>
+                <div class="col-lg-4">
+                    <label class="form-label" for="search-name">Name der Suche</label>
+                    <input type="text" class="form-control" id="search-name" placeholder="z. B. KI-Projekte 2025">
+                </div>
+                <div class="col-lg-4">
+                    <label class="form-label" for="search-description">Beschreibung (optional)</label>
+                    <textarea class="form-control" id="search-description" rows="1" placeholder="Kurze Erläuterung"></textarea>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <section class="mb-4">
+        <div class="card">
+            <div class="card-header d-flex flex-wrap justify-content-between align-items-center gap-2">
+                <span class="section-heading">Abschnitt 1 – Welche Webseiten sollen durchsucht werden?</span>
+                <div class="d-flex flex-wrap gap-2">
+                    <button type="button" class="btn btn-outline-primary btn-sm" id="select-all">Alle auswählen</button>
+                    <button type="button" class="btn btn-outline-secondary btn-sm" id="select-none">Keine auswählen</button>
+                    <button type="button" class="btn btn-outline-danger btn-sm" id="reset-filters">Hard Reset (Filter)</button>
+                </div>
+            </div>
+            <div class="card-body">
+                {% if not stammdaten_records %}
+                    <div class="alert alert-warning mb-0" role="alert">Bitte importieren Sie zuerst eine Excel-Datei mit Stammdaten.</div>
+                {% else %}
+                    <div class="row g-3 mb-3">
+                        {% for field in stammdaten_primary_fields %}
+                            <div class="col-lg-3 col-md-4 col-sm-6">
+                                <label class="form-label mb-1">{{ field.label }}</label>
+                                <div class="input-group input-group-sm">
+                                    {% if field.type == 'numeric' %}
+                                        <select class="form-select form-select-sm filter-operator" data-field="{{ field.key }}"
+                                                aria-label="Vergleichsoperator auswählen">
+                                            <option value="eq">=</option>
+                                            <option value="gt">&gt;</option>
+                                            <option value="lt">&lt;</option>
+                                        </select>
+                                    {% endif %}
+                                    <input type="text" class="form-control filter-input" id="filter-{{ field.key }}"
+                                           placeholder="{% if field.type == 'numeric' %}Zahl eingeben{% else %}Wert enthält …{% endif %}"
+                                           data-field="{{ field.key }}" data-filter-type="{{ field.type or 'text' }}"
+                                           {% if field.type == 'numeric' %}inputmode="decimal"{% endif %}>
+                                    <button type="button" class="btn btn-outline-primary filter-select"
+                                            data-field="{{ field.key }}">Filter anwenden</button>
+                                    {% if field.type == 'numeric' %}
+                                        <div class="invalid-feedback">Bitte geben Sie eine gültige Zahl ein.</div>
+                                    {% endif %}
+                                </div>
+                            </div>
+                        {% endfor %}
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label mb-1">Schularten (müssen vorhanden sein)</label>
+                        <div class="border rounded p-2" style="max-height: 220px; overflow-y: auto;">
+                            {% for field in stammdaten_boolean_fields %}
+                                <div class="form-check form-check-sm">
+                                    <input class="form-check-input boolean-filter" type="checkbox" value="{{ field.key }}"
+                                           id="filter-{{ field.key }}-bool" data-field="{{ field.key }}">
+                                    <label class="form-check-label small" for="filter-{{ field.key }}-bool">{{ field.label }}</label>
+                                </div>
+                            {% endfor %}
+                        </div>
+                        <div class="form-text">Nur Schulen mit allen markierten Angeboten bleiben sichtbar und werden automatisch ausgewählt.</div>
+                    </div>
+                    <div class="form-text mb-2">Ausgewählte Schulen: <span id="selection-count">0</span></div>
+                    <div class="table-responsive school-table-wrapper">
+                        <table class="table table-sm table-hover align-middle mb-0 table-nowrap" id="school-table">
+                            <thead class="table-light">
+                            <tr>
+                                <th scope="col" style="width: 60px;">Auswahl</th>
+                                <th scope="col">Jahr</th>
+                                <th scope="col">Schul&nbsp;ID</th>
+                                <th scope="col">Status</th>
+                                <th scope="col">Schulname</th>
+                                <th scope="col">Ort</th>
+                                <th scope="col">Schüler/-innen</th>
+                                <th scope="col">Klassen</th>
+                                <th scope="col">Schularten</th>
+                                <th scope="col">URL</th>
+                                <th scope="col">Kontakt</th>
+                            </tr>
+                            </thead>
+                            <tbody>
+                            {% for record in stammdaten_records %}
+                                <tr data-school-id="{{ record.schul_id }}" data-homepage="{{ record.homepage or '' }}">
+                                    <td>
+                                        <div class="form-check m-0">
+                                            <input class="form-check-input school-checkbox" type="checkbox"
+                                                   value="{{ record.schul_id }}" id="school-{{ loop.index }}"
+                                                   data-homepage="{{ record.homepage or '' }}"
+                                                   {% for field in stammdaten_fields %}
+                                                       {% set attr_name = field.key|replace('_', '-') %}
+                                                       {% set value = record.get(field.key) %}
+                                                       {% if field.type == 'bool' %}
+                                                           data-{{ attr_name }}="{{ 'true' if value else 'false' }}"
+                                                       {% else %}
+                                                           data-{{ attr_name }}="{{ value if value is not none else '' }}"
+                                                       {% endif %}
+                                                   {% endfor %}>
+                                            <label class="form-check-label small" for="school-{{ loop.index }}">&nbsp;</label>
+                                        </div>
+                                    </td>
+                                    <td>{{ record.jahr if record.jahr is not none else "–" }}</td>
+                                    <td>{{ record.schul_id or "–" }}</td>
+                                    <td>{{ record.status or "–" }}</td>
+                                    <td>{{ record.schulname or "–" }}</td>
+                                    <td>{{ record.ort or "–" }}</td>
+                                    <td>{{ record.schueler_gesamt if record.schueler_gesamt is not none else "–" }}</td>
+                                    <td>{{ record.klassen_gesamt if record.klassen_gesamt is not none else "–" }}</td>
+                                    <td>
+                                        {% set angebote = [] %}
+                                        {% for field in stammdaten_boolean_fields %}
+                                            {% if record.get(field.key) %}
+                                                {% set angebote = angebote + [field.label] %}
+                                            {% endif %}
+                                        {% endfor %}
+                                        {% if angebote %}
+                                            <span class="small">{{ angebote|join(', ') }}</span>
+                                        {% else %}
+                                            <span class="text-muted">–</span>
+                                        {% endif %}
+                                    </td>
+                                    <td>
+                                        {% if record.homepage %}
+                                            <a href="{{ record.homepage }}" target="_blank" rel="noopener">{{ record.homepage }}</a>
+                                        {% else %}
+                                            <span class="text-muted">–</span>
+                                        {% endif %}
+                                    </td>
+                                    <td class="small">
+                                        <div>{{ record.strasse or '–' }}</div>
+                                        <div>{{ record.plz or '' }} {{ record.ort or '' }}</div>
+                                        <div>{{ record.telefon or '–' }}</div>
+                                        {% if record.url %}
+                                            <div><a href="{{ record.url }}" target="_blank" rel="noopener">Weitere Infos</a></div>
+                                        {% endif %}
+                                    </td>
+                                </tr>
+                            {% endfor %}
+                            </tbody>
+                        </table>
+                    </div>
+                {% endif %}
+            </div>
+        </div>
+    </section>
+
+    <section class="mb-4">
+        <div class="card">
+            <div class="card-header">
+                <span class="section-heading">Abschnitt 2 – Suche konfigurieren</span>
+            </div>
+            <div class="card-body">
+                <div class="row g-4">
+                    <div class="col-lg-6">
+                        <label class="form-label" for="search-keywords">Keywords für die Google-Suche <span class="text-muted small">(ein Begriff pro Zeile)</span></label>
+                        <textarea class="form-control" id="search-keywords" placeholder="z. B. Künstliche Intelligenz"></textarea>
+                        <div class="form-text mt-1">Vorschau Abfrage: <code class="query-preview" id="query-preview">site:BEISPIEL (Keyword1 OR Keyword2)</code></div>
+                    </div>
+                    <div class="col-lg-6">
+                        <label class="form-label" for="search-prompt">Prompt für das LLM</label>
+                        <textarea class="form-control" id="search-prompt" rows="8">{{ search_defaults.prompt }}</textarea>
+                    </div>
+                </div>
+                <div class="row g-4 mt-1">
+                    <div class="col-md-3">
+                        <label class="form-label" for="search-max-results">Treffer pro Kombination</label>
+                        <input type="number" class="form-control" id="search-max-results" min="1" max="200"
+                               value="{{ search_defaults.max_results }}">
+                        <div class="form-text">Standard: 200 Ergebnisse</div>
+                    </div>
+                    <div class="col-md-3">
+                        <label class="form-label" for="search-concurrency">Parallele Seitenabrufe</label>
+                        <input type="number" class="form-control" id="search-concurrency" min="1"
+                               value="{{ search_defaults.concurrency|default(20) }}">
+                        <div class="form-text">Standard: 20 Threads, kein festes Maximum.</div>
+                    </div>
+                    <div class="col-md-3">
+                        <label class="form-label" for="search-model">Sprachmodell</label>
+                        <select class="form-select" id="search-model">
+                            {% for model in available_models %}
+                                <option value="{{ model }}" {% if model == search_defaults.model %}selected{% endif %}>{{ model }}</option>
+                            {% endfor %}
+                        </select>
+                    </div>
+                    <div class="col-md-3">
+                        <label class="form-label" for="search-temperature">Temperatur</label>
+                        <input type="number" class="form-control" id="search-temperature" min="0" max="2" step="0.1"
+                               value="{{ '%.1f'|format(search_defaults.temperature|default(0.2)) }}">
+                    </div>
+                </div>
+                <hr>
+                <div class="d-flex flex-wrap gap-2">
+                    <button class="btn btn-outline-primary" type="button" id="search-test">Suche testen</button>
+                    <button class="btn btn-outline-success" type="button" id="search-probe">Probelauf mit erster Schule</button>
+                    <button class="btn btn-primary" type="button" id="search-save">Suche speichern</button>
+                </div>
+                <div class="mt-3" id="search-feedback" role="alert"></div>
+                <div class="mt-3" id="search-test-output"></div>
+                <div class="mt-3" id="search-probe-output"></div>
+            </div>
+        </div>
+    </section>
+</main>
+
+{% include '_data_management_modals.html' %}
+
+<div class="modal fade" id="modal-manage-categories" tabindex="-1" aria-labelledby="modalManageCategories" aria-hidden="true">
+    <div class="modal-dialog modal-dialog-centered">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title" id="modalManageCategories">Kategorien verwalten</h5>
+                <button type="button" class="btn-close" data-modal-close aria-label="Schließen"></button>
+            </div>
+            <div class="modal-body">
+                <div class="mb-3">
+                    <div class="nav nav-tabs" id="category-tabs" role="tablist">
+                        <button class="nav-link active" type="button" data-category-pane="add">Hinzufügen</button>
+                        <button class="nav-link" type="button" data-category-pane="remove">Entfernen</button>
+                    </div>
+                </div>
+                <div data-category-content>
+                    <div class="category-pane active" data-pane="add">
+                        <div class="mb-3">
+                            <label class="form-label" for="new-category-name">Neue Kategorie</label>
+                            <input type="text" class="form-control" id="new-category-name" placeholder="z. B. Digitalisierung">
+                            <div class="invalid-feedback" id="new-category-feedback"></div>
+                        </div>
+                        <button type="button" class="btn btn-primary" id="confirm-add-category">Kategorie hinzufügen</button>
+                        <hr>
+                        <h6 class="mb-2">Bestehende Kategorien</h6>
+                        <ul class="list-group category-list" id="category-list"></ul>
+                    </div>
+                    <div class="category-pane" data-pane="remove">
+                        <div class="mb-3">
+                            <label class="form-label" for="remove-category-select">Kategorie auswählen</label>
+                            <select class="form-select" id="remove-category-select"></select>
+                            <div class="form-text">Standardkategorien können nicht gelöscht werden.</div>
+                            <div class="invalid-feedback" id="remove-category-feedback"></div>
+                        </div>
+                        <button type="button" class="btn btn-danger" id="confirm-remove-category">Kategorie löschen</button>
+                    </div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-modal-close>Schließen</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"
+        integrity="sha384-HoA0FmB07pCg0M8N7TqyXMR9E7QPFhK9l6t84uLQ+W8sELpAo0P5PLf4KJIp4jK" crossorigin="anonymous"></script>
+<script>
+    (function () {
+        let categories = {{ categories|tojson }};
+        const prefillDefinition = {{ prefill_definition|tojson|default('null', true) }};
+        let currentDefinitionId = prefillDefinition ? (prefillDefinition.id || null) : null;
+        let prefillApplied = false;
+        const defaultCategory = {{ default_category|tojson }};
+        const hasApiKey = {{ 'true' if has_api_key else 'false' }} === 'true';
+        const googleConfigured = {{ 'true' if google_configured else 'false' }} === 'true';
+        const categorySelect = document.getElementById('search-category');
+        const searchNameInput = document.getElementById('search-name');
+        const searchDescriptionInput = document.getElementById('search-description');
+        const keywordsInput = document.getElementById('search-keywords');
+        const promptInput = document.getElementById('search-prompt');
+        const maxResultsInput = document.getElementById('search-max-results');
+        const modelSelect = document.getElementById('search-model');
+        const temperatureInput = document.getElementById('search-temperature');
+        const concurrencyInput = document.getElementById('search-concurrency');
+        const queryPreview = document.getElementById('query-preview');
+        const feedbackBox = document.getElementById('search-feedback');
+        const testOutput = document.getElementById('search-test-output');
+        const probeOutput = document.getElementById('search-probe-output');
+        const bootstrapLib = (typeof window !== 'undefined' && window.bootstrap && typeof window.bootstrap.Modal === 'function') ? window.bootstrap : null;
+        const manageCategoriesBtn = document.getElementById('manage-categories');
+        const categoryModalElement = document.getElementById('modal-manage-categories');
+        const categoryModal = createModalController(categoryModalElement);
+        const schoolCheckboxes = Array.from(document.querySelectorAll('.school-checkbox'));
+        const selectionCount = document.getElementById('selection-count');
+
+        async function readJson(response) {
+            const contentType = response.headers ? (response.headers.get('Content-Type') || '') : '';
+            if (contentType.includes('application/json')) {
+                return response.json();
+            }
+            const text = await response.text();
+            if (!text) {
+                return {};
+            }
+            try {
+                return JSON.parse(text);
+            } catch (error) {
+                return { error: text.trim() };
+            }
+        }
+
+        function createModalController(element) {
+            if (!element) {
+                return { show() {}, hide() {} };
+            }
+            if (bootstrapLib && typeof bootstrapLib.Modal === 'function') {
+                const instance = new bootstrapLib.Modal(element);
+                return {
+                    show() { instance.show(); },
+                    hide() { instance.hide(); }
+                };
+            }
+            let backdrop = null;
+            return {
+                show() {
+                    if (backdrop) return;
+                    backdrop = document.createElement('div');
+                    backdrop.className = 'modal-backdrop-simple';
+                    document.body.appendChild(backdrop);
+                    element.classList.add('modal-open-fallback');
+                    element.removeAttribute('aria-hidden');
+                    document.body.classList.add('modal-open');
+                },
+                hide() {
+                    if (backdrop) {
+                        backdrop.remove();
+                        backdrop = null;
+                    }
+                    element.classList.remove('modal-open-fallback');
+                    element.setAttribute('aria-hidden', 'true');
+                    document.body.classList.remove('modal-open');
+                }
+            };
+        }
+
+        function renderCategories(values) {
+            categories = Array.isArray(values) ? [...values] : [];
+            categorySelect.innerHTML = '';
+            values.forEach(value => {
+                const option = document.createElement('option');
+                option.value = value;
+                option.textContent = value;
+                categorySelect.appendChild(option);
+            });
+            if (values.includes(defaultCategory)) {
+                categorySelect.value = defaultCategory;
+            }
+            updateRemoveCategorySelect(values);
+            updateCategoryList(values);
+        }
+
+        function updateCategoryList(values) {
+            const list = document.getElementById('category-list');
+            if (!list) return;
+            list.innerHTML = '';
+            if (!values.length) {
+                list.innerHTML = '<li class="list-group-item text-muted">Keine Kategorien vorhanden.</li>';
+                return;
+            }
+            values.forEach(value => {
+                const item = document.createElement('li');
+                item.className = 'list-group-item d-flex justify-content-between align-items-center';
+                item.textContent = value;
+                if (value === defaultCategory) {
+                    const badge = document.createElement('span');
+                    badge.className = 'badge bg-secondary ms-2';
+                    badge.textContent = 'Standard';
+                    item.appendChild(badge);
+                }
+                list.appendChild(item);
+            });
+        }
+
+        function updateRemoveCategorySelect(values) {
+            const removeSelect = document.getElementById('remove-category-select');
+            if (!removeSelect) return;
+            removeSelect.innerHTML = '';
+            values.forEach(value => {
+                const option = document.createElement('option');
+                option.value = value;
+                option.textContent = value;
+                removeSelect.appendChild(option);
+            });
+        }
+
+        renderCategories(categories);
+
+        const categoryTabButtons = categoryModalElement ? Array.from(categoryModalElement.querySelectorAll('[data-category-pane]')) : [];
+        const categoryPanes = categoryModalElement ? Array.from(categoryModalElement.querySelectorAll('.category-pane')) : [];
+        const modalCloseButtons = categoryModalElement ? Array.from(categoryModalElement.querySelectorAll('[data-modal-close]')) : [];
+
+        function setActiveCategoryPane(name) {
+            categoryPanes.forEach(pane => pane.classList.toggle('active', pane.dataset.pane === name));
+            categoryTabButtons.forEach(btn => btn.classList.toggle('active', btn.dataset.categoryPane === name));
+        }
+
+        categoryTabButtons.forEach(btn => {
+            btn.addEventListener('click', () => setActiveCategoryPane(btn.dataset.categoryPane));
+        });
+        modalCloseButtons.forEach(btn => btn.addEventListener('click', () => categoryModal.hide()));
+        setActiveCategoryPane('add');
+
+        manageCategoriesBtn?.addEventListener('click', () => {
+            setActiveCategoryPane('add');
+            categoryModal.show();
+        });
+
+        function applyPrefill() {
+            if (prefillApplied || !prefillDefinition) {
+                return;
+            }
+            prefillApplied = true;
+            if (prefillDefinition.category) {
+                const categoryValue = prefillDefinition.category;
+                if (!categories.includes(categoryValue)) {
+                    categories.push(categoryValue);
+                    renderCategories(categories);
+                }
+                categorySelect.value = categoryValue;
+            }
+            if (typeof prefillDefinition.name === 'string') {
+                searchNameInput.value = prefillDefinition.name;
+            }
+            if (typeof prefillDefinition.description === 'string') {
+                searchDescriptionInput.value = prefillDefinition.description;
+            }
+            if (Array.isArray(prefillDefinition.keywords)) {
+                keywordsInput.value = prefillDefinition.keywords.join('\n');
+            }
+            if (typeof prefillDefinition.prompt === 'string') {
+                promptInput.value = prefillDefinition.prompt;
+            }
+            if (typeof prefillDefinition.max_results === 'number') {
+                maxResultsInput.value = prefillDefinition.max_results;
+            }
+            if (typeof prefillDefinition.concurrency === 'number') {
+                concurrencyInput.value = prefillDefinition.concurrency;
+            }
+            if (typeof prefillDefinition.model === 'string') {
+                const hasModel = Array.from(modelSelect.options).some(option => option.value === prefillDefinition.model);
+                if (!hasModel) {
+                    const option = document.createElement('option');
+                    option.value = prefillDefinition.model;
+                    option.textContent = prefillDefinition.model;
+                    modelSelect.appendChild(option);
+                }
+                modelSelect.value = prefillDefinition.model;
+            }
+            if (typeof prefillDefinition.temperature === 'number') {
+                temperatureInput.value = prefillDefinition.temperature;
+            }
+            if (Array.isArray(prefillDefinition.school_ids)) {
+                const idSet = new Set(prefillDefinition.school_ids.map(String));
+                schoolCheckboxes.forEach(cb => {
+                    cb.checked = idSet.has(cb.value);
+                });
+            }
+            updateSelectionCount();
+            updateQueryPreview();
+        }
+
+        applyPrefill();
+
+        async function createCategoryRequest(name) {
+            const response = await fetch('{{ url_for('create_search_category_route') }}', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ name })
+            });
+            const data = await readJson(response);
+            if (!response.ok) {
+                throw new Error(data.error || `Kategorie konnte nicht angelegt werden (Status ${response.status}).`);
+            }
+            renderCategories(data.categories);
+            categorySelect.value = name;
+        }
+
+        async function deleteCategoryRequest(name) {
+            const response = await fetch(`${'{{ url_for('delete_search_category_route', category_name='__NAME__') }}'.replace('__NAME__', encodeURIComponent(name))}`, {
+                method: 'DELETE'
+            });
+            const data = await readJson(response);
+            if (!response.ok) {
+                throw new Error(data.error || `Kategorie konnte nicht gelöscht werden (Status ${response.status}).`);
+            }
+            renderCategories(data.categories);
+        }
+
+        function selectedSchools() {
+            return schoolCheckboxes.filter(cb => cb.checked).map(cb => ({
+                id: cb.value,
+                homepage: cb.dataset.homepage || ''
+            }));
+        }
+
+        function updateSelectionCount() {
+            selectionCount.textContent = selectedSchools().length.toString();
+            updateQueryPreview();
+        }
+
+        function updateQueryPreview() {
+            const schools = selectedSchools();
+            const keywords = keywordsInput.value.split('\n').map(line => line.trim()).filter(Boolean);
+            if (!keywords.length) {
+                queryPreview.textContent = 'site:BEISPIEL (Keyword1 OR Keyword2)';
+                return;
+            }
+            const base = schools.length && schools[0].homepage ? schools[0].homepage : 'beispielschule.de';
+            const domain = base.replace(/^https?:\/\//i, '').replace(/\/$/, '');
+            const query = `site:${domain} (${keywords.join(' OR ')})`;
+            queryPreview.textContent = query;
+        }
+
+        keywordsInput.addEventListener('blur', updateQueryPreview);
+        keywordsInput.addEventListener('keyup', updateQueryPreview);
+        schoolCheckboxes.forEach(cb => cb.addEventListener('change', updateSelectionCount));
+        updateSelectionCount();
+
+        document.getElementById('select-all')?.addEventListener('click', () => {
+            schoolCheckboxes.forEach(cb => cb.checked = true);
+            updateSelectionCount();
+        });
+        document.getElementById('select-none')?.addEventListener('click', () => {
+            schoolCheckboxes.forEach(cb => cb.checked = false);
+            updateSelectionCount();
+        });
+
+        const addCategoryInput = document.getElementById('new-category-name');
+        const addCategoryFeedback = document.getElementById('new-category-feedback');
+        const removeCategorySelect = document.getElementById('remove-category-select');
+        const removeCategoryFeedback = document.getElementById('remove-category-feedback');
+
+        document.getElementById('confirm-add-category')?.addEventListener('click', async () => {
+            if (!addCategoryInput) return;
+            const name = addCategoryInput.value.trim();
+            addCategoryFeedback.textContent = '';
+            addCategoryInput.classList.remove('is-invalid');
+            if (!name) {
+                addCategoryInput.classList.add('is-invalid');
+                addCategoryFeedback.textContent = 'Bitte geben Sie eine Bezeichnung ein.';
+                return;
+            }
+            try {
+                await createCategoryRequest(name);
+                feedbackBox.className = 'mt-3 alert alert-success';
+                feedbackBox.textContent = `Kategorie "${name}" wurde gespeichert.`;
+                categorySelect.value = name;
+                categoryModal.hide();
+                addCategoryInput.value = '';
+                addCategoryFeedback.textContent = '';
+            } catch (error) {
+                addCategoryInput.classList.add('is-invalid');
+                addCategoryFeedback.textContent = error.message;
+            }
+        });
+
+        document.getElementById('confirm-remove-category')?.addEventListener('click', async () => {
+            if (!removeCategorySelect) return;
+            const name = removeCategorySelect.value;
+            removeCategoryFeedback.textContent = '';
+            removeCategorySelect.classList.remove('is-invalid');
+            if (!name) {
+                removeCategorySelect.classList.add('is-invalid');
+                removeCategoryFeedback.textContent = 'Bitte wählen Sie eine Kategorie aus.';
+                return;
+            }
+            try {
+                await deleteCategoryRequest(name);
+                feedbackBox.className = 'mt-3 alert alert-success';
+                feedbackBox.textContent = `Kategorie "${name}" wurde gelöscht.`;
+                categoryModal.hide();
+            } catch (error) {
+                removeCategorySelect.classList.add('is-invalid');
+                removeCategoryFeedback.textContent = error.message;
+            }
+        });
+
+        function buildPayload() {
+            return {
+                id: currentDefinitionId,
+                category: categorySelect.value || null,
+                name: searchNameInput.value.trim(),
+                description: searchDescriptionInput.value.trim(),
+                keywords: keywordsInput.value.split('\n').map(line => line.trim()).filter(Boolean),
+                school_ids: selectedSchools().map(item => item.id),
+                prompt: promptInput.value,
+                max_results: parseInt(maxResultsInput.value, 10) || {{ search_defaults.max_results }},
+                model: modelSelect.value,
+                temperature: parseFloat(temperatureInput.value) || {{ search_defaults.temperature|default(0.2) }},
+                concurrency: parseInt(concurrencyInput?.value || '', 10) || {{ search_defaults.concurrency|default(20) }}
+            };
+        }
+
+        function clearFeedback() {
+            feedbackBox.className = 'mt-3';
+            feedbackBox.textContent = '';
+            testOutput.innerHTML = '';
+            probeOutput.innerHTML = '';
+        }
+
+        document.getElementById('search-test')?.addEventListener('click', async () => {
+            clearFeedback();
+            const payload = buildPayload();
+            if (!payload.keywords.length) {
+                feedbackBox.className = 'mt-3 alert alert-danger';
+                feedbackBox.textContent = 'Bitte geben Sie mindestens ein Keyword ein.';
+                return;
+            }
+            if (!payload.school_ids.length) {
+                feedbackBox.className = 'mt-3 alert alert-danger';
+                feedbackBox.textContent = 'Bitte wählen Sie mindestens eine Schule aus.';
+                return;
+            }
+            try {
+                const response = await fetch('{{ url_for('search_test') }}', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+                const data = await readJson(response);
+                if (!response.ok) {
+                    throw new Error(data.error || `Test fehlgeschlagen (Status ${response.status}).`);
+                }
+                feedbackBox.className = 'mt-3 alert alert-success';
+                feedbackBox.textContent = data.message || 'Test erfolgreich durchgeführt.';
+                if (data.queries) {
+                    const list = document.createElement('ul');
+                    list.className = 'list-unstyled mb-0';
+                    data.queries.forEach(item => {
+                        const li = document.createElement('li');
+                        li.innerHTML = `<code>${item}</code>`;
+                        list.appendChild(li);
+                    });
+                    testOutput.innerHTML = '<h5>Generierte Suchanfragen</h5>';
+                    testOutput.appendChild(list);
+                }
+            } catch (error) {
+                feedbackBox.className = 'mt-3 alert alert-danger';
+                feedbackBox.textContent = error && error.message ? error.message : 'Unbekannter Fehler beim Test.';
+            }
+        });
+
+        document.getElementById('search-probe')?.addEventListener('click', async () => {
+            clearFeedback();
+            const payload = buildPayload();
+            if (!payload.keywords.length || !payload.school_ids.length) {
+                feedbackBox.className = 'mt-3 alert alert-danger';
+                feedbackBox.textContent = 'Bitte wählen Sie mindestens eine Schule und ein Keyword.';
+                return;
+            }
+            try {
+                const response = await fetch('{{ url_for('search_probe') }}', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+                const data = await readJson(response);
+                if (!response.ok) {
+                    throw new Error(data.error || `Probelauf fehlgeschlagen (Status ${response.status}).`);
+                }
+                feedbackBox.className = 'mt-3 alert alert-success';
+                feedbackBox.textContent = data.message || 'Probelauf erfolgreich.';
+                probeOutput.innerHTML = '';
+                if (data.preview) {
+                    const card = document.createElement('div');
+                    card.className = 'card card-body';
+                    card.innerHTML = `
+                        <h5 class="card-title mb-2">${data.preview.school_name || 'Erste Schule'}</h5>
+                        <p class="small text-muted mb-2">Analysierte URL: <a href="${data.preview.target_url}" target="_blank" rel="noopener">${data.preview.target_url}</a></p>
+                        <p class="small mb-2">Query: <code>${data.preview.query}</code></p>
+                    `;
+                    if (Array.isArray(data.preview.dimensions)) {
+                        const list = document.createElement('ul');
+                        list.className = 'list-unstyled mb-0';
+                        data.preview.dimensions.forEach(dim => {
+                            const li = document.createElement('li');
+                            li.innerHTML = `<strong>${dim.dimension}</strong>: ${dim.value} (Sicherheit: ${dim.confidence})`;
+                            list.appendChild(li);
+                        });
+                        card.appendChild(list);
+                    }
+                    probeOutput.appendChild(card);
+                }
+            } catch (error) {
+                feedbackBox.className = 'mt-3 alert alert-danger';
+                feedbackBox.textContent = error && error.message ? error.message : 'Unbekannter Fehler beim Probelauf.';
+            }
+        });
+
+        document.getElementById('search-save')?.addEventListener('click', async () => {
+            clearFeedback();
+            const payload = buildPayload();
+            if (!payload.name) {
+                feedbackBox.className = 'mt-3 alert alert-danger';
+                feedbackBox.textContent = 'Bitte vergeben Sie einen Namen für die Suche.';
+                return;
+            }
+            if (!payload.keywords.length) {
+                feedbackBox.className = 'mt-3 alert alert-danger';
+                feedbackBox.textContent = 'Bitte geben Sie mindestens ein Keyword ein.';
+                return;
+            }
+            if (!payload.school_ids.length) {
+                feedbackBox.className = 'mt-3 alert alert-danger';
+                feedbackBox.textContent = 'Bitte wählen Sie mindestens eine Schule aus.';
+                return;
+            }
+            try {
+                const response = await fetch('{{ url_for('create_or_update_search_definition') }}', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+                const data = await readJson(response);
+                if (!response.ok) {
+                    throw new Error(data.error || `Suche konnte nicht gespeichert werden (Status ${response.status}).`);
+                }
+                feedbackBox.className = 'mt-3 alert alert-success';
+                const savedName = data.definition && data.definition.name ? data.definition.name : payload.name || 'Unbenannte Suche';
+                feedbackBox.textContent = `Suche "${savedName}" wurde gespeichert.`;
+                currentDefinitionId = data.definition && data.definition.id ? data.definition.id : currentDefinitionId;
+            } catch (error) {
+                feedbackBox.className = 'mt-3 alert alert-danger';
+                feedbackBox.textContent = error && error.message ? error.message : 'Unbekannter Fehler beim Speichern.';
+            }
+        });
+    })();
+</script>
+<script>
+    (function () {
+        const filters = document.querySelectorAll('.filter-select');
+        const inputs = document.querySelectorAll('.filter-input');
+        const operatorSelects = document.querySelectorAll('.filter-operator');
+        const booleanFilters = document.querySelectorAll('.boolean-filter');
+        const schoolRows = Array.from(document.querySelectorAll('#school-table tbody tr'));
+        const checkboxes = Array.from(document.querySelectorAll('.school-checkbox'));
+
+        function applyFilters() {
+            const activeFilters = {};
+            inputs.forEach(input => {
+                const value = input.value.trim();
+                if (!value) {
+                    delete activeFilters[input.dataset.field];
+                }
+            });
+            checkboxes.forEach(cb => cb.checked = false);
+
+            schoolRows.forEach(row => {
+                let visible = true;
+                inputs.forEach(input => {
+                    const value = input.value.trim();
+                    if (!value) return;
+                    const field = input.dataset.field;
+                    const type = input.dataset.filterType;
+                    const datasetValue = row.querySelector('.school-checkbox').dataset[field.replace(/_/g, '-')];
+                    if (type === 'numeric') {
+                        const operator = document.querySelector(`.filter-operator[data-field="${field}"]`).value;
+                        const numericRow = parseFloat(datasetValue || 'NaN');
+                        const numericFilter = parseFloat(value.replace(',', '.'));
+                        if (Number.isNaN(numericFilter)) {
+                            visible = false;
+                        } else if (operator === 'eq' && numericRow !== numericFilter) {
+                            visible = false;
+                        } else if (operator === 'gt' && !(numericRow > numericFilter)) {
+                            visible = false;
+                        } else if (operator === 'lt' && !(numericRow < numericFilter)) {
+                            visible = false;
+                        }
+                    } else {
+                        if (!datasetValue || datasetValue.toLowerCase().indexOf(value.toLowerCase()) === -1) {
+                            visible = false;
+                        }
+                    }
+                });
+                booleanFilters.forEach(filter => {
+                    if (!filter.checked) return;
+                    const datasetValue = row.querySelector('.school-checkbox').dataset[filter.value.replace(/_/g, '-')];
+                    if (datasetValue !== 'true') {
+                        visible = false;
+                    }
+                });
+                row.classList.toggle('d-none', !visible);
+                if (visible) {
+                    row.querySelector('.school-checkbox').checked = true;
+                }
+            });
+            const event = new Event('change');
+            checkboxes.forEach(cb => cb.dispatchEvent(event));
+        }
+
+        filters.forEach(button => {
+            button.addEventListener('click', () => {
+                const field = button.dataset.field;
+                const input = document.getElementById(`filter-${field}`);
+                if (input && input.dataset.filterType === 'numeric') {
+                    const value = input.value.trim();
+                    if (value && Number.isNaN(Number(value.replace(',', '.')))) {
+                        input.classList.add('is-invalid');
+                        return;
+                    }
+                    input.classList.remove('is-invalid');
+                }
+                applyFilters();
+            });
+        });
+
+        booleanFilters.forEach(filter => filter.addEventListener('change', applyFilters));
+
+        document.getElementById('reset-filters')?.addEventListener('click', () => {
+            inputs.forEach(input => {
+                input.value = '';
+                input.classList.remove('is-invalid');
+            });
+            operatorSelects.forEach(select => select.value = 'eq');
+            booleanFilters.forEach(filter => filter.checked = false);
+            schoolRows.forEach(row => row.classList.remove('d-none'));
+            checkboxes.forEach(cb => cb.checked = false);
+            const event = new Event('change');
+            checkboxes.forEach(cb => cb.dispatchEvent(event));
+        });
+    })();
+</script>
+</body>
+</html>

@@ -1,0 +1,1247 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+    <meta charset="UTF-8">
+    <title>Suchen verwalten – Schul-Webseiten Crawler</title>
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Ctext y='14' font-size='14'%3E%F0%9F%94%8D%3C/text%3E%3C/svg%3E">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css"
+          integrity="sha384-QWTKZyjpPEjISv5WaRU9OFeRpok6YctnYmDr5pNlyT2bRjXh0JMhjY6hW+ALEwIH"
+          crossorigin="anonymous">
+    <style>
+        body { padding-top: 0; }
+        .definition-row.active { background-color: rgba(13, 110, 253, 0.08); }
+        .run-row.active { background-color: rgba(25, 135, 84, 0.08); }
+        .results-table td { vertical-align: top; }
+        .badge-dimension { margin: 0 .25rem .25rem 0; }
+        .results-container { max-height: 360px; overflow-y: auto; }
+        .status-line { font-size: .875rem; }
+        .table-nowrap td, .table-nowrap th { white-space: nowrap; }
+        .navbar-nav .nav-link { white-space: nowrap; }
+        @media (min-width: 992px) {
+            .navbar-nav { flex-wrap: nowrap; gap: 0.75rem; }
+        }
+    </style>
+</head>
+<body>
+<nav class="navbar navbar-expand-lg navbar-light bg-light border-bottom">
+    <div class="container">
+        <div class="d-flex align-items-center w-100">
+            <div class="d-flex align-items-center">
+                <a class="navbar-brand me-3" href="{{ url_for('index') }}">Schul-Crawler</a>
+                <div class="d-none d-lg-flex align-items-center gap-2">
+                    <button type="button" class="btn btn-sm btn-outline-secondary" data-bundle-action="import">Import</button>
+                    <button type="button" class="btn btn-sm btn-primary" data-bundle-action="export">Export</button>
+                </div>
+            </div>
+            <button class="navbar-toggler ms-auto" type="button" data-bs-toggle="collapse" data-bs-target="#mainNav"
+                    aria-controls="mainNav" aria-expanded="false" aria-label="Navigation umschalten">
+                <span class="navbar-toggler-icon"></span>
+            </button>
+        </div>
+        <div class="collapse navbar-collapse" id="mainNav">
+            <div class="d-lg-none py-3 border-top">
+                <div class="d-grid gap-2 mb-2">
+                    <button type="button" class="btn btn-outline-secondary" data-bundle-action="import">Vollständiger Import</button>
+                    <button type="button" class="btn btn-primary" data-bundle-action="export">Vollständiger Export</button>
+                </div>
+            </div>
+            <ul class="navbar-nav ms-auto mb-2 mb-lg-0">
+                <li class="nav-item">
+                    <a class="nav-link {% if active_page == 'search_create' %}active{% endif %}" href="{{ url_for('index') }}"
+                       {% if active_page == 'search_create' %}aria-current="page"{% endif %}>Suche anlegen</a>
+                </li>
+                <li class="nav-item">
+                    <a class="nav-link {% if active_page == 'search_results' %}active{% endif %}"
+                       href="{{ url_for('searches') }}" {% if active_page == 'search_results' %}aria-current="page"{% endif %}>
+                        Suchen verwalten
+                    </a>
+                </li>
+                <li class="nav-item">
+                    <a class="nav-link {% if active_page == 'indexing' %}active{% endif %}"
+                       href="{{ url_for('indexing_page') }}" {% if active_page == 'indexing' %}aria-current="page"{% endif %}>
+                        Index
+                    </a>
+                </li>
+                <li class="nav-item">
+                    <a class="nav-link {% if active_page == 'stammdaten' %}active{% endif %}" href="{{ url_for('stammdaten') }}"
+                       {% if active_page == 'stammdaten' %}aria-current="page"{% endif %}>Stammdaten</a>
+                </li>
+                <li class="nav-item">
+                    <a class="nav-link {% if active_page == 'data_quality' %}active{% endif %}" href="{{ url_for('data_quality') }}"
+                       {% if active_page == 'data_quality' %}aria-current="page"{% endif %}>Datenqualität</a>
+                </li>
+                <li class="nav-item">
+                    <a class="nav-link {% if active_page == 'debug' %}active{% endif %}" href="{{ url_for('debug_page') }}"
+                       {% if active_page == 'debug' %}aria-current="page"{% endif %}>Debugging</a>
+                </li>
+                <li class="nav-item">
+                    <a class="nav-link {% if active_page == 'settings' %}active{% endif %}" href="{{ url_for('settings') }}"
+                       {% if active_page == 'settings' %}aria-current="page"{% endif %}>Einstellungen</a>
+                </li>
+            </ul>
+        </div>
+    </div>
+</nav>
+<main class="container py-4">
+    <div class="d-flex flex-wrap justify-content-between align-items-center mb-4 gap-2">
+        <div>
+            <h1 class="mb-0">Suchen verwalten</h1>
+            <p class="text-muted mb-0">Starten und überwachen Sie gespeicherte Suchen, analysieren Sie Ergebnisse nach Schulen und Dimensionen und pflegen Sie Bewertungen manuell nach.</p>
+        </div>
+        <div class="text-end">
+            <a href="{{ url_for('index') }}" class="btn btn-outline-primary">Neue Suche anlegen</a>
+        </div>
+    </div>
+
+    <div class="row g-4">
+        <div class="col-lg-4">
+            <div class="card mb-4">
+                <div class="card-header d-flex justify-content-between align-items-center">
+                    <h2 class="h5 mb-0">Gespeicherte Suchen</h2>
+                    <span class="badge bg-secondary" id="definition-count">0</span>
+                </div>
+                <div class="table-responsive" style="max-height: 420px; overflow-y: auto;">
+                    <table class="table table-sm table-hover mb-0" id="definitions-table">
+                        <thead class="table-light">
+                        <tr>
+                            <th scope="col">Kategorie</th>
+                            <th scope="col">Name</th>
+                            <th scope="col" class="text-end">Status</th>
+                        </tr>
+                        </thead>
+                        <tbody></tbody>
+                    </table>
+                </div>
+            </div>
+
+            <div class="card">
+                <div class="card-header d-flex justify-content-between align-items-center">
+                    <h2 class="h6 mb-0">Läufe</h2>
+                    <span class="badge bg-secondary" id="run-count">0</span>
+                </div>
+                <div class="table-responsive" style="max-height: 260px; overflow-y: auto;">
+                    <table class="table table-sm table-hover mb-0" id="runs-table">
+                        <thead class="table-light">
+                        <tr>
+                            <th scope="col">Start</th>
+                            <th scope="col">Status</th>
+                            <th scope="col" class="text-end">Treffer</th>
+                        </tr>
+                        </thead>
+                        <tbody></tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+
+        <div class="col-lg-8">
+            <div class="card mb-4" id="definition-detail-card">
+                <div class="card-header d-flex flex-wrap justify-content-between align-items-center gap-3">
+                    <div>
+                        <h2 class="h5 mb-1" id="detail-title">Keine Suche ausgewählt</h2>
+                        <p class="text-muted mb-0" id="detail-subtitle">Wählen Sie eine Suche links aus der Liste aus.</p>
+                    </div>
+                    <div class="btn-group" role="group">
+                        <button type="button" class="btn btn-outline-primary" id="action-start" disabled>Suche starten</button>
+                        <button type="button" class="btn btn-outline-warning" id="action-cancel" disabled>Suche abbrechen</button>
+                        <button type="button" class="btn btn-outline-info" id="action-edit" disabled>Bearbeiten</button>
+                        <button type="button" class="btn btn-outline-secondary" id="action-duplicate" disabled>Duplizieren</button>
+                        <button type="button" class="btn btn-outline-danger" id="action-delete" disabled>Löschen</button>
+                    </div>
+                </div>
+                <div class="card-body">
+                    <dl class="row mb-0 small">
+                        <dt class="col-sm-3">Kategorie</dt>
+                        <dd class="col-sm-9" id="detail-category">–</dd>
+                        <dt class="col-sm-3">Beschreibung</dt>
+                        <dd class="col-sm-9" id="detail-description">–</dd>
+                        <dt class="col-sm-3">Keywords</dt>
+                        <dd class="col-sm-9" id="detail-keywords">–</dd>
+                        <dt class="col-sm-3">Parallelität</dt>
+                        <dd class="col-sm-9" id="detail-concurrency">–</dd>
+                        <dt class="col-sm-3">Schulen</dt>
+                        <dd class="col-sm-9" id="detail-schools">–</dd>
+                        <dt class="col-sm-3">Letzter Lauf</dt>
+                        <dd class="col-sm-9" id="detail-last-run">–</dd>
+                        <dt class="col-sm-3">Status</dt>
+                        <dd class="col-sm-9" id="detail-status">–</dd>
+                        <dt class="col-sm-3">Letzte Fehlermeldung</dt>
+                        <dd class="col-sm-9" id="detail-error">–</dd>
+                    </dl>
+                </div>
+            </div>
+
+            <div class="card mb-4 d-none" id="progress-card">
+                <div class="card-header d-flex justify-content-between align-items-center">
+                    <h2 class="h6 mb-0">Laufstatus</h2>
+                    <span class="text-muted small" id="progress-updated">–</span>
+                </div>
+                <div class="card-body">
+                    <div class="progress mb-2" style="height: 12px;">
+                        <div class="progress-bar" role="progressbar" id="progress-bar" style="width: 0%;"></div>
+                    </div>
+                    <div class="status-line" id="progress-summary">–</div>
+                    <button class="btn btn-link px-0" type="button" data-bs-toggle="collapse" data-bs-target="#progress-details"
+                            aria-expanded="false" aria-controls="progress-details">Detaillierter Status</button>
+                    <div class="collapse" id="progress-details">
+                        <div class="card card-body mt-2" id="progress-messages" style="max-height: 200px; overflow-y: auto;"></div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="card d-none" id="results-card">
+                <div class="card-header d-flex flex-wrap justify-content-between align-items-center gap-2">
+                    <h2 class="h6 mb-0">Ergebnisse</h2>
+                    <div class="btn-group" role="group" id="results-view-buttons">
+                        <button type="button" class="btn btn-outline-primary active" data-view="schools">Suchergebnisse für Schulen anzeigen</button>
+                        <button type="button" class="btn btn-outline-primary" data-view="dimensions">Suchergebnisse für Dimensionen anzeigen</button>
+                        <button type="button" class="btn btn-outline-primary" data-view="keywords">Suchergebnisse für Stichwörter anzeigen</button>
+                        <button type="button" class="btn btn-outline-primary" data-view="logs">Suchlog anzeigen</button>
+                    </div>
+                </div>
+                <div class="card-body">
+                    <div id="results-summary" class="small text-muted mb-3">Keine Ergebnisse geladen.</div>
+                    <div id="results-container">
+                        <div id="view-schools" class="results-container"></div>
+                        <div id="view-dimensions" class="results-container d-none"></div>
+                        <div id="view-keywords" class="results-container d-none"></div>
+                        <div id="view-logs" class="results-container d-none"></div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</main>
+
+{% include '_data_management_modals.html' %}
+
+<div class="modal fade" id="modal-edit-result" tabindex="-1" aria-labelledby="modalEditResultLabel" aria-hidden="true">
+    <div class="modal-dialog modal-lg">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title" id="modalEditResultLabel">Suchergebnis bearbeiten</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Schließen"></button>
+            </div>
+            <div class="modal-body">
+                <input type="hidden" id="edit-result-id">
+                <div class="mb-3">
+                    <label class="form-label" for="edit-target-url">Gefundene URL</label>
+                    <input type="url" class="form-control" id="edit-target-url">
+                </div>
+                <div class="mb-3">
+                    <label class="form-label" for="edit-keyword">Suchstichwort</label>
+                    <input type="text" class="form-control" id="edit-keyword">
+                </div>
+                <div class="mb-3">
+                    <label class="form-label">Dimensionen</label>
+                    <div class="table-responsive">
+                        <table class="table table-sm align-middle mb-0">
+                            <thead class="table-light">
+                            <tr>
+                                <th>Dimension</th>
+                                <th style="width: 120px;">Wert (0–5)</th>
+                                <th style="width: 120px;">Sicherheit (0–1)</th>
+                            </tr>
+                            </thead>
+                            <tbody id="edit-dimensions-body"></tbody>
+                        </table>
+                    </div>
+                </div>
+                <div class="mb-0">
+                    <label class="form-label" for="edit-note">Notiz (optional)</label>
+                    <textarea class="form-control" id="edit-note" rows="2"></textarea>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Abbrechen</button>
+                <button type="button" class="btn btn-primary" id="edit-save">Speichern</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"
+        integrity="sha384-HoA0FmB07pCg0M8N7TqyXMR9E7QPFhK9l6t84uLQ+W8sELpAo0P5PLf4KJIp4jK" crossorigin="anonymous"></script>
+<script>
+    (function () {
+        const definitionsTable = document.querySelector('#definitions-table tbody');
+        const runsTable = document.querySelector('#runs-table tbody');
+        const definitionCount = document.getElementById('definition-count');
+        const runCount = document.getElementById('run-count');
+        const detailTitle = document.getElementById('detail-title');
+        const detailSubtitle = document.getElementById('detail-subtitle');
+        const detailCategory = document.getElementById('detail-category');
+        const detailDescription = document.getElementById('detail-description');
+        const detailKeywords = document.getElementById('detail-keywords');
+        const detailConcurrency = document.getElementById('detail-concurrency');
+        const detailSchools = document.getElementById('detail-schools');
+        const detailLastRun = document.getElementById('detail-last-run');
+        const detailStatus = document.getElementById('detail-status');
+        const detailError = document.getElementById('detail-error');
+        const actionStart = document.getElementById('action-start');
+        const actionCancel = document.getElementById('action-cancel');
+        const actionDuplicate = document.getElementById('action-duplicate');
+        const actionDelete = document.getElementById('action-delete');
+        const actionEdit = document.getElementById('action-edit');
+        const progressCard = document.getElementById('progress-card');
+        const progressBar = document.getElementById('progress-bar');
+        const progressSummary = document.getElementById('progress-summary');
+        const progressMessages = document.getElementById('progress-messages');
+        const progressUpdated = document.getElementById('progress-updated');
+        const progressDetails = document.getElementById('progress-details');
+        const progressDetailsToggle = document.querySelector('[data-bs-target="#progress-details"]');
+        const resultsCard = document.getElementById('results-card');
+        const resultsSummary = document.getElementById('results-summary');
+        const viewButtons = document.querySelectorAll('#results-view-buttons button');
+        const viewSchools = document.getElementById('view-schools');
+        const viewDimensions = document.getElementById('view-dimensions');
+        const viewKeywords = document.getElementById('view-keywords');
+        const viewLogs = document.getElementById('view-logs');
+        const bootstrapLib = (typeof window !== 'undefined' && window.bootstrap && typeof window.bootstrap.Modal === 'function') ? window.bootstrap : null;
+        const editModalElement = document.getElementById('modal-edit-result');
+        const editModal = bootstrapLib && editModalElement ? new bootstrapLib.Modal(editModalElement) : null;
+        const editDimensionsBody = document.getElementById('edit-dimensions-body');
+        const editResultId = document.getElementById('edit-result-id');
+        const editTargetUrl = document.getElementById('edit-target-url');
+        const editKeyword = document.getElementById('edit-keyword');
+        const editNote = document.getElementById('edit-note');
+
+        const dimensions = {{ search_dimensions|tojson }};
+        const initialDefinitions = {{ definitions|tojson }};
+        const initialRuns = {{ runs|tojson }};
+        const initialJobs = {{ active_jobs|tojson }};
+        const editBaseUrl = '{{ url_for('index') }}';
+
+        const state = {
+            definitions: initialDefinitions || [],
+            runs: initialRuns || [],
+            jobs: initialJobs || {},
+            selectedDefinitionId: null,
+            selectedRunId: null,
+            pollTimer: null,
+            resultsCache: {}
+        };
+
+        function escapeSelector(value) {
+            if (typeof value !== 'string') {
+                value = value == null ? '' : String(value);
+            }
+            if (window.CSS && typeof window.CSS.escape === 'function') {
+                return window.CSS.escape(value);
+            }
+            return value.replace(/[^a-zA-Z0-9_\-]/g, '\\$&');
+        }
+
+        function escapeHtml(value) {
+            if (value === null || value === undefined) {
+                return '';
+            }
+            return String(value)
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;')
+                .replace(/'/g, '&#39;');
+        }
+
+        function formatNumber(value, decimals = 2) {
+            if (value === null || value === undefined || value === '') {
+                return '–';
+            }
+            const num = Number(value);
+            if (!Number.isFinite(num)) {
+                return '–';
+            }
+            return num.toFixed(decimals);
+        }
+
+        if (progressDetails && progressDetailsToggle && !bootstrapLib) {
+            progressDetailsToggle.addEventListener('click', event => {
+                event.preventDefault();
+                const isOpen = progressDetails.classList.contains('show');
+                progressDetails.classList.toggle('show', !isOpen);
+                progressDetails.classList.toggle('d-none', isOpen);
+            });
+        }
+
+        function setActiveView(view) {
+            viewButtons.forEach(btn => {
+                const active = btn.dataset.view === view;
+                btn.classList.toggle('active', active);
+            });
+            viewSchools.classList.toggle('d-none', view !== 'schools');
+            viewDimensions.classList.toggle('d-none', view !== 'dimensions');
+            viewKeywords.classList.toggle('d-none', view !== 'keywords');
+            if (viewLogs) {
+                viewLogs.classList.toggle('d-none', view !== 'logs');
+            }
+        }
+
+        viewButtons.forEach(btn => btn.addEventListener('click', () => setActiveView(btn.dataset.view)));
+
+        function renderDefinitions() {
+            definitionsTable.innerHTML = '';
+            state.definitions.forEach(definition => {
+                const tr = document.createElement('tr');
+                tr.className = 'definition-row';
+                tr.dataset.id = definition.id;
+                if (definition.id === state.selectedDefinitionId) {
+                    tr.classList.add('active');
+                }
+                tr.innerHTML = `
+                    <td>${definition.category || '–'}</td>
+                    <td>${definition.name || '–'}</td>
+                    <td class="text-end">${definition.status || '–'}</td>
+                `;
+                tr.addEventListener('click', () => selectDefinition(definition.id));
+                definitionsTable.appendChild(tr);
+            });
+            definitionCount.textContent = state.definitions.length.toString();
+        }
+
+        function renderRuns() {
+            runsTable.innerHTML = '';
+            const filtered = state.selectedDefinitionId
+                ? state.runs.filter(run => run.definition_id === state.selectedDefinitionId)
+                : state.runs;
+            filtered.forEach(run => {
+                const tr = document.createElement('tr');
+                tr.className = 'run-row';
+                tr.dataset.id = run.id;
+                if (run.id === state.selectedRunId) {
+                    tr.classList.add('active');
+                }
+                tr.innerHTML = `
+                    <td>${run.started_at || '–'}</td>
+                    <td>${run.status || '–'}</td>
+                    <td class="text-end">${run.results || 0}</td>
+                `;
+                tr.addEventListener('click', () => selectRun(run.id));
+                runsTable.appendChild(tr);
+            });
+            runCount.textContent = filtered.length.toString();
+        }
+
+        function formatList(values) {
+            if (!values || !values.length) return '–';
+            return values.join(', ');
+        }
+
+        function selectDefinition(definitionId) {
+            state.selectedDefinitionId = definitionId;
+            const definition = state.definitions.find(item => item.id === definitionId);
+            if (!definition) {
+                resetDetails();
+                return;
+            }
+            detailTitle.textContent = definition.name || 'Unbenannte Suche';
+            detailSubtitle.textContent = definition.description || 'Keine Beschreibung hinterlegt.';
+            detailCategory.textContent = definition.category || '–';
+            detailDescription.textContent = definition.description || '–';
+            detailKeywords.textContent = formatList(definition.keywords || []);
+            detailConcurrency.textContent = definition.concurrency ? `${definition.concurrency} Threads` : '–';
+            detailSchools.textContent = definition.school_ids && definition.school_ids.length
+                ? `${definition.school_ids.length} Schulen`
+                : 'Alle aktiven Schulen';
+            detailLastRun.textContent = definition.last_run_at || '–';
+            detailStatus.textContent = definition.status || 'neu';
+            detailError.textContent = definition.last_error || '–';
+
+            actionStart.disabled = false;
+            actionDuplicate.disabled = false;
+            actionDelete.disabled = false;
+            if (actionEdit) {
+                actionEdit.disabled = false;
+            }
+
+            const activeJob = Object.values(state.jobs).find(job => job.definition_id === definitionId && !job.completed);
+            if (activeJob) {
+                actionCancel.disabled = false;
+                state.selectedRunId = activeJob.job_id;
+                showProgress(activeJob.job_id);
+            } else {
+                actionCancel.disabled = true;
+                progressCard.classList.add('d-none');
+                clearPoll();
+            }
+
+            if (definition.last_run_id) {
+                state.selectedRunId = definition.last_run_id;
+                loadResults(definition.last_run_id);
+            } else {
+                resultsCard.classList.add('d-none');
+            }
+
+            renderDefinitions();
+            renderRuns();
+        }
+
+        function selectRun(runId) {
+            state.selectedRunId = runId;
+            renderRuns();
+            if (runId) {
+                loadResults(runId);
+            }
+        }
+
+        function resetDetails() {
+            detailTitle.textContent = 'Keine Suche ausgewählt';
+            detailSubtitle.textContent = 'Wählen Sie eine Suche links aus der Liste aus.';
+            detailCategory.textContent = '–';
+            detailDescription.textContent = '–';
+            detailKeywords.textContent = '–';
+            detailConcurrency.textContent = '–';
+            detailSchools.textContent = '–';
+            detailLastRun.textContent = '–';
+            detailStatus.textContent = '–';
+            detailError.textContent = '–';
+            actionStart.disabled = actionCancel.disabled = actionDuplicate.disabled = actionDelete.disabled = true;
+            if (actionEdit) {
+                actionEdit.disabled = true;
+            }
+            progressCard.classList.add('d-none');
+            resultsCard.classList.add('d-none');
+            clearPoll();
+            state.selectedRunId = null;
+        }
+
+        function clearPoll() {
+            if (state.pollTimer) {
+                clearInterval(state.pollTimer);
+                state.pollTimer = null;
+            }
+        }
+
+        function showProgress(jobId) {
+            fetch(`${jobStatusUrl(jobId)}`)
+                .then(response => response.json())
+                .then(data => {
+                    const job = data.job || {};
+                    renderJob(job);
+                    if (!job.completed) {
+                        schedulePoll(job.job_id);
+                    } else {
+                        fetchData();
+                    }
+                })
+                .catch(() => progressCard.classList.add('d-none'));
+        }
+
+        function renderJob(job) {
+            progressCard.classList.remove('d-none');
+            const percent = job.progress_percent || 0;
+            progressBar.style.width = `${percent}%`;
+            progressBar.textContent = `${percent}%`;
+            const total = job.total_tasks || 0;
+            const processed = job.processed_tasks || 0;
+            const concurrencyLabel = job.concurrency ? ` Parallelität: ${job.concurrency}.` : '';
+            progressSummary.textContent = `${processed} von ${total} Schulen verarbeitet. Treffer: ${job.results || 0}.${concurrencyLabel}`;
+            progressUpdated.textContent = new Date().toLocaleTimeString('de-DE');
+            progressMessages.innerHTML = '';
+            (job.messages || []).slice(-50).forEach(message => {
+                const p = document.createElement('p');
+                p.className = 'mb-1';
+                p.textContent = message;
+                progressMessages.appendChild(p);
+            });
+            if (job.current_school || job.current_keyword || job.current_url) {
+                const info = document.createElement('div');
+                info.className = 'mt-2 text-muted small';
+                info.innerHTML = `
+                    <div>Aktuelle Schule: ${job.current_school || '–'}</div>
+                    <div>Keyword: ${job.current_keyword || '–'}</div>
+                    <div>URL: ${job.current_url ? `<a href="${job.current_url}" target="_blank" rel="noopener">${job.current_url}</a>` : '–'}</div>
+                `;
+                progressMessages.appendChild(info);
+            }
+        }
+
+        function schedulePoll(jobId) {
+            clearPoll();
+            state.pollTimer = setInterval(() => {
+                fetch(`${jobStatusUrl(jobId)}`)
+                    .then(response => response.json())
+                    .then(data => {
+                        const job = data.job || {};
+                        renderJob(job);
+                        if (job.completed) {
+                            clearPoll();
+                            fetchData();
+                        }
+                    })
+                    .catch(() => clearPoll());
+            }, 4000);
+        }
+
+        function jobStatusUrl(jobId) {
+            return `{{ url_for('search_job_status', job_id='__ID__') }}`.replace('__ID__', encodeURIComponent(jobId));
+        }
+
+        function loadResults(runId) {
+            if (!runId) return;
+            if (state.resultsCache[runId]) {
+                renderResults(state.resultsCache[runId]);
+                return;
+            }
+            fetch(`{{ url_for('search_run_results', run_id='__ID__') }}`.replace('__ID__', encodeURIComponent(runId)))
+                .then(response => response.json())
+                .then(data => {
+                    state.resultsCache[runId] = data;
+                    renderResults(data);
+                })
+                .catch(() => {
+                    resultsCard.classList.add('d-none');
+                });
+        }
+
+        function renderResults(data) {
+            if (!data) {
+                resultsCard.classList.add('d-none');
+                return;
+            }
+            const rawResults = Array.isArray(data.results) ? data.results : [];
+            const aggregated = Array.isArray(data.aggregated_schools) ? data.aggregated_schools : [];
+            const schoolsWithoutHits = Array.isArray(data.schools_without_hits) ? data.schools_without_hits : [];
+            const totalSelected = Number(data.total_selected_schools || 0);
+            const totalResults = Number(data.total_results || rawResults.length || 0);
+            const filteredResults = Number(data.filtered_results || rawResults.length || 0);
+            const hitSchools = aggregated.length;
+
+            const summaryParts = [];
+            if (data.message) {
+                summaryParts.push(data.message);
+            }
+            if (totalSelected) {
+                summaryParts.push(`${hitSchools} von ${totalSelected} Schulen mit Treffern.`);
+            } else if (hitSchools) {
+                summaryParts.push(`${hitSchools} Schulen mit Treffern.`);
+            }
+            if (schoolsWithoutHits.length) {
+                summaryParts.push(`${schoolsWithoutHits.length} Schulen ohne Treffer.`);
+            }
+            if (totalResults) {
+                if (filteredResults !== totalResults) {
+                    summaryParts.push(`${filteredResults} von ${totalResults} Einzelergebnissen angezeigt.`);
+                } else {
+                    summaryParts.push(`${totalResults} Einzelergebnisse insgesamt.`);
+                }
+            } else if (!hitSchools) {
+                summaryParts.push('Keine Ergebnisse für diese Suche gefunden.');
+            }
+            if (!summaryParts.length) {
+                summaryParts.push('Ergebnisse geladen.');
+            }
+
+            resultsCard.classList.remove('d-none');
+            resultsSummary.textContent = summaryParts.join(' ');
+
+            renderAggregatedSchoolResults(aggregated, rawResults, schoolsWithoutHits, totalSelected);
+            renderDimensionResults(data.dimension_matrix || []);
+            renderKeywordResults(data.keyword_summary || []);
+            renderLogResults(data.logs || []);
+            setActiveView('schools');
+        }
+
+        function renderAggregatedSchoolResults(aggregated, rawResults, schoolsWithoutHits, totalSelected) {
+            const resultsBySchool = new Map();
+            (Array.isArray(rawResults) ? rawResults : []).forEach(entry => {
+                const key = String(entry.school_id || '');
+                if (!resultsBySchool.has(key)) {
+                    resultsBySchool.set(key, []);
+                }
+                resultsBySchool.get(key).push(entry);
+            });
+
+            if (!Array.isArray(aggregated) || !aggregated.length) {
+                if (rawResults.length) {
+                    aggregated = rawResults.map(entry => ({
+                        school_id: entry.school_id,
+                        school_name: entry.school_name,
+                        school_city: entry.school_city,
+                        school_homepage: entry.school_homepage,
+                        total_hits: 1,
+                        dimensions: Array.isArray(entry.dimensions) ? entry.dimensions.map(dim => ({
+                            dimension: dim.dimension,
+                            average_value: dim.value,
+                            average_confidence: dim.confidence,
+                            count: 1
+                        })) : [],
+                        result_ids: entry.id ? [entry.id] : []
+                    }));
+                } else {
+                    viewSchools.innerHTML = '<div class="alert alert-info">Keine Ergebnisse für diese Suche gefunden.</div>';
+                    if (schoolsWithoutHits.length) {
+                        appendNoHitList(schoolsWithoutHits, totalSelected);
+                    }
+                    return;
+                }
+            }
+
+            const table = document.createElement('table');
+            table.className = 'table table-sm table-hover align-middle results-table';
+            table.innerHTML = `
+                <thead class="table-light">
+                    <tr>
+                        <th scope="col" style="width: 40%;">Schule</th>
+                        <th scope="col" style="width: 15%;">Treffer</th>
+                        <th scope="col" style="width: 35%;">Dimensionen (Ø)</th>
+                        <th scope="col" class="text-end" style="width: 10%;">Aktionen</th>
+                    </tr>
+                </thead>
+                <tbody></tbody>
+            `;
+            const tbody = table.querySelector('tbody');
+
+            aggregated.forEach(item => {
+                const schoolId = String(item.school_id || '');
+                const entries = resultsBySchool.get(schoolId) || [];
+                const totalHits = Number(item.total_hits || entries.length || 0);
+                const tr = document.createElement('tr');
+                tr.dataset.schoolId = schoolId;
+                const homepage = item.school_homepage
+                    ? `<a href="${item.school_homepage}" target="_blank" rel="noopener">${item.school_homepage}</a>`
+                    : '<span class="text-muted">Keine Homepage</span>';
+                const dimensions = Array.isArray(item.dimensions) && item.dimensions.length
+                    ? item.dimensions.map(dim => `<span class="badge bg-primary-subtle text-primary-emphasis badge-dimension">${dim.dimension || '–'}: ⌀${Number(dim.average_value || 0).toFixed(2)} (n=${dim.count || 0})</span>`).join(' ')
+                    : '<span class="text-muted">Keine Bewertungen</span>';
+                const actions = entries.length
+                    ? `<button type="button" class="btn btn-sm btn-outline-primary" data-action="toggle-details" data-school="${schoolId}" data-count="${entries.length}">Details (${entries.length})</button>`
+                    : '<span class="text-muted small">Keine Details</span>';
+                tr.innerHTML = `
+                    <td>
+                        <div><strong>${item.school_name || 'Unbekannte Schule'}</strong></div>
+                        <div class="text-muted small">${item.school_city || 'Ort unbekannt'}</div>
+                        <div class="small">${homepage}</div>
+                        <div class="small text-muted">ID: ${schoolId || '–'}</div>
+                    </td>
+                    <td>${totalHits}</td>
+                    <td>${dimensions}</td>
+                    <td class="text-end">${actions}</td>
+                `;
+                tbody.appendChild(tr);
+
+                const detailRow = document.createElement('tr');
+                detailRow.className = 'detail-row d-none';
+                detailRow.dataset.schoolId = schoolId;
+                const detailCell = document.createElement('td');
+                detailCell.colSpan = 4;
+                detailCell.appendChild(buildDetailTable(entries));
+                detailRow.appendChild(detailCell);
+                tbody.appendChild(detailRow);
+            });
+
+            viewSchools.innerHTML = '';
+            viewSchools.appendChild(table);
+
+            const summaryBlock = document.createElement('div');
+            summaryBlock.className = 'mt-3 small text-muted';
+            if (totalSelected) {
+                summaryBlock.textContent = `Treffer bei ${aggregated.length} von ${totalSelected} ausgewählten Schulen.`;
+            } else {
+                summaryBlock.textContent = `Treffer bei ${aggregated.length} Schulen.`;
+            }
+            viewSchools.appendChild(summaryBlock);
+
+            if (schoolsWithoutHits.length) {
+                appendNoHitList(schoolsWithoutHits, totalSelected);
+            }
+
+            viewSchools.querySelectorAll('button[data-action="toggle-details"]').forEach(button => {
+                button.addEventListener('click', () => {
+                    const schoolId = button.dataset.school;
+                    const targetRow = viewSchools.querySelector(`tr.detail-row[data-school-id="${escapeSelector(schoolId)}"]`);
+                    if (!targetRow) return;
+                    const count = Number(button.dataset.count || targetRow.querySelectorAll('tbody tr').length || 0);
+                    const isHidden = targetRow.classList.contains('d-none');
+                    if (isHidden) {
+                        targetRow.classList.remove('d-none');
+                        button.textContent = `Details verbergen (${count})`;
+                    } else {
+                        targetRow.classList.add('d-none');
+                        button.textContent = `Details (${count})`;
+                    }
+                });
+            });
+
+            viewSchools.querySelectorAll('button[data-action="edit"]').forEach(btn => btn.addEventListener('click', () => openEditModal(btn.dataset.id)));
+            viewSchools.querySelectorAll('button[data-action="delete"]').forEach(btn => btn.addEventListener('click', () => deleteResult(btn.dataset.id)));
+        }
+
+        function buildDetailTable(entries) {
+            const wrapper = document.createElement('div');
+            wrapper.className = 'bg-light border rounded p-2';
+            if (!Array.isArray(entries) || !entries.length) {
+                wrapper.innerHTML = '<div class="text-muted small mb-0">Keine Einzelergebnisse vorhanden.</div>';
+                return wrapper;
+            }
+            const table = document.createElement('table');
+            table.className = 'table table-sm mb-0 align-middle';
+            table.innerHTML = `
+                <thead class="table-light">
+                    <tr>
+                        <th scope="col" style="width: 45%;">Gefundene URL</th>
+                        <th scope="col" style="width: 35%;">Dimensionen</th>
+                        <th scope="col" style="width: 10%;">Stichwort</th>
+                        <th scope="col" class="text-end" style="width: 10%;">Aktionen</th>
+                    </tr>
+                </thead>
+                <tbody></tbody>
+            `;
+            const tbody = table.querySelector('tbody');
+            entries.forEach(entry => {
+                const row = document.createElement('tr');
+                const url = entry.target_url
+                    ? `<a href="${entry.target_url}" target="_blank" rel="noopener">${entry.target_url}</a>`
+                    : '<span class="text-muted">–</span>';
+                const dimensions = Array.isArray(entry.dimensions) && entry.dimensions.length
+                    ? entry.dimensions.map(dim => `<span class="badge bg-primary-subtle text-primary-emphasis badge-dimension">${dim.dimension || '–'}: ${dim.value ?? '–'} (${(dim.confidence ?? 0).toFixed(2)})</span>`).join(' ')
+                    : '<span class="text-muted">Keine Dimensionen</span>';
+                row.innerHTML = `
+                    <td>${url}</td>
+                    <td>${dimensions}</td>
+                    <td>${entry.keyword || '–'}</td>
+                    <td class="text-end">
+                        <button type="button" class="btn btn-sm btn-outline-secondary" data-action="edit" data-id="${entry.id}">Bearbeiten</button>
+                        <button type="button" class="btn btn-sm btn-outline-danger" data-action="delete" data-id="${entry.id}">Löschen</button>
+                    </td>
+                `;
+                tbody.appendChild(row);
+            });
+            wrapper.appendChild(table);
+            return wrapper;
+        }
+
+        function appendNoHitList(schoolsWithoutHits, totalSelected) {
+            const container = document.createElement('div');
+            container.className = 'alert alert-warning mt-3';
+            const title = document.createElement('p');
+            title.className = 'mb-2';
+            const count = schoolsWithoutHits.length;
+            if (totalSelected) {
+                title.textContent = `${count} von ${totalSelected} Schulen ohne Treffer.`;
+            } else {
+                title.textContent = `${count} Schulen ohne Treffer.`;
+            }
+            container.appendChild(title);
+            const details = document.createElement('details');
+            details.className = 'small';
+            const summary = document.createElement('summary');
+            summary.textContent = 'Liste anzeigen';
+            details.appendChild(summary);
+            const list = document.createElement('ul');
+            list.className = 'mt-2 mb-0';
+            schoolsWithoutHits.forEach(item => {
+                const li = document.createElement('li');
+                li.innerHTML = `<strong>${item.school_name || 'Unbekannte Schule'}</strong> (${item.school_city || 'Ort unbekannt'})${item.school_homepage ? ` – <a href="${item.school_homepage}" target="_blank" rel="noopener">${item.school_homepage}</a>` : ''}`;
+                list.appendChild(li);
+            });
+            details.appendChild(list);
+            container.appendChild(details);
+            viewSchools.appendChild(container);
+        }
+
+        function renderDimensionResults(matrix) {
+            const table = document.createElement('table');
+            table.className = 'table table-sm table-hover align-middle results-table table-nowrap';
+            table.innerHTML = `
+                <thead class="table-light">
+                    <tr>
+                        <th scope="col">Dimension</th>
+                        <th scope="col" class="text-center">Wert&nbsp;1</th>
+                        <th scope="col" class="text-center">Wert&nbsp;2</th>
+                        <th scope="col" class="text-center">Wert&nbsp;3</th>
+                        <th scope="col" class="text-center">Wert&nbsp;4</th>
+                        <th scope="col" class="text-center">Wert&nbsp;5</th>
+                    </tr>
+                </thead>
+                <tbody></tbody>
+            `;
+            const tbody = table.querySelector('tbody');
+            matrix.forEach(entry => {
+                const tr = document.createElement('tr');
+                const total = entry.total || 0;
+                tr.innerHTML = `<td><strong>${entry.dimension}</strong><div class="text-muted small">${total} Bewertungen gesamt</div></td>`;
+                const valuesByScore = new Map();
+                entry.values.forEach(bucket => {
+                    valuesByScore.set(Number(bucket.value), bucket);
+                });
+                for (let score = 1; score <= 5; score++) {
+                    const bucket = valuesByScore.get(score);
+                    const count = bucket ? bucket.count : 0;
+                    const percentage = total ? ((count / total) * 100).toFixed(1) : '0.0';
+                    const hasEntries = !!(bucket && Array.isArray(bucket.entries) && bucket.entries.length);
+                    const cell = document.createElement('td');
+                    cell.className = 'text-center';
+                    cell.innerHTML = `
+                        <div><strong>${count}</strong> Seiten</div>
+                        <div class="text-muted small">${percentage}%</div>
+                        ${hasEntries ? `<button type="button" class="btn btn-sm btn-outline-primary mt-1" data-dimension="${entry.dimension}" data-score="${score}">Details</button>` : '<div class="text-muted small mt-1">Keine Details</div>'}
+                    `;
+                    if (hasEntries) {
+                        cell.querySelector('button').addEventListener('click', () => showDimensionDetails(entry.dimension, score));
+                    }
+                    tr.appendChild(cell);
+                }
+                tbody.appendChild(tr);
+            });
+            viewDimensions.innerHTML = '';
+            viewDimensions.appendChild(table);
+        }
+
+        function showDimensionDetails(dimension, score) {
+            const list = document.createElement('div');
+            list.className = 'mt-3';
+            const matrix = state.resultsCache[state.selectedRunId]?.dimension_matrix || [];
+            const dimensionEntry = matrix.find(item => item.dimension === dimension);
+            const bucket = dimensionEntry?.values?.find(item => Number(item.value) === Number(score));
+            if (!bucket || !Array.isArray(bucket.entries) || !bucket.entries.length) {
+                viewDimensions.innerHTML = `<div class="alert alert-info">Keine Detaildaten für ${dimension} (Wert ${score}) vorhanden.</div>`;
+                return;
+            }
+            bucket.entries.forEach(item => {
+                const div = document.createElement('div');
+                div.className = 'border rounded p-2 mb-2';
+                div.innerHTML = `
+                    <div><strong>${item.school_name || 'Unbekannte Schule'}</strong> (${item.school_city || 'Ort unbekannt'})</div>
+                    <div class="small">URL: ${item.target_url ? `<a href="${item.target_url}" target="_blank" rel="noopener">${item.target_url}</a>` : '–'}</div>
+                    <div class="small">Wert: ${bucket.value}, Sicherheit: ${(item.confidence ?? 0).toFixed(2)}</div>
+                    <div class="small text-muted">Stichwort: ${item.keyword || '–'}</div>
+                    <div class="mt-2 text-end">
+                        <button type="button" class="btn btn-sm btn-outline-secondary me-2" data-action="edit" data-id="${item.result_id}">Bearbeiten</button>
+                        <button type="button" class="btn btn-sm btn-outline-danger" data-action="delete" data-id="${item.result_id}">Löschen</button>
+                    </div>
+                `;
+                list.appendChild(div);
+            });
+            viewDimensions.innerHTML = `
+                <div class="d-flex justify-content-between align-items-center">
+                    <h3 class="h6 mb-0">${dimension} – Wert ${bucket.value}</h3>
+                    <button class="btn btn-sm btn-outline-secondary" id="dimension-back">Zurück zur Übersicht</button>
+                </div>
+            `;
+            viewDimensions.appendChild(list);
+            viewDimensions.querySelectorAll('button[data-action="edit"]').forEach(btn => btn.addEventListener('click', () => openEditModal(btn.dataset.id)));
+            viewDimensions.querySelectorAll('button[data-action="delete"]').forEach(btn => btn.addEventListener('click', () => deleteResult(btn.dataset.id)));
+            const backButton = document.getElementById('dimension-back');
+            if (backButton) {
+                backButton.addEventListener('click', () => renderDimensionResults(matrix));
+            }
+        }
+
+        function renderKeywordResults(summary) {
+            const table = document.createElement('table');
+            table.className = 'table table-sm table-hover align-middle results-table';
+            table.innerHTML = `
+                <thead class="table-light">
+                    <tr>
+                        <th scope="col">Stichwort</th>
+                        <th scope="col" class="text-end">Treffer</th>
+                    </tr>
+                </thead>
+                <tbody></tbody>
+            `;
+            const tbody = table.querySelector('tbody');
+            summary.forEach(item => {
+                const tr = document.createElement('tr');
+                tr.innerHTML = `
+                    <td>${item.keyword || '–'}</td>
+                    <td class="text-end">${item.count || 0}</td>
+                `;
+                tbody.appendChild(tr);
+            });
+            viewKeywords.innerHTML = '';
+            viewKeywords.appendChild(table);
+        }
+
+        function renderLogResults(logEntries) {
+            if (!viewLogs) {
+                return;
+            }
+            viewLogs.innerHTML = '';
+            if (!Array.isArray(logEntries) || !logEntries.length) {
+                viewLogs.innerHTML = '<p class="text-muted mb-0">Keine Logeinträge vorhanden.</p>';
+                return;
+            }
+            const table = document.createElement('table');
+            table.className = 'table table-sm table-hover align-middle results-table';
+            table.innerHTML = `
+                <thead class="table-light">
+                    <tr>
+                        <th scope="col">Suchstring an Google</th>
+                        <th scope="col">Ergebnisliste von Google</th>
+                        <th scope="col">Ausgaben LLM</th>
+                    </tr>
+                </thead>
+                <tbody></tbody>
+            `;
+            const tbody = table.querySelector('tbody');
+            logEntries.forEach(entry => {
+                const tr = document.createElement('tr');
+
+                const queryCell = document.createElement('td');
+                const queryParts = [];
+                if (entry.query) {
+                    queryParts.push(`<code>${escapeHtml(entry.query)}</code>`);
+                }
+                const metaParts = [];
+                if (entry.school_name) {
+                    metaParts.push(escapeHtml(entry.school_name));
+                }
+                if (entry.school_city) {
+                    metaParts.push(escapeHtml(entry.school_city));
+                }
+                if (entry.keyword) {
+                    metaParts.push(`Keyword: ${escapeHtml(entry.keyword)}`);
+                }
+                if (metaParts.length) {
+                    queryParts.push(`<div class="text-muted small">${metaParts.join(' • ')}</div>`);
+                }
+                if (entry.created_at) {
+                    queryParts.push(`<div class="text-muted small">${escapeHtml(entry.created_at)}</div>`);
+                }
+                if (entry.message) {
+                    queryParts.push(`<div class="small text-warning">${escapeHtml(entry.message)}</div>`);
+                }
+                queryCell.innerHTML = queryParts.join('') || '–';
+
+                const googleCell = document.createElement('td');
+                const resultsList = Array.isArray(entry.google_results) ? entry.google_results : [];
+                if (resultsList.length) {
+                    const list = document.createElement('ol');
+                    list.className = 'mb-0 ps-3 small';
+                    resultsList.forEach(result => {
+                        const li = document.createElement('li');
+                        const segments = [];
+                        if (result.title) {
+                            segments.push(`<div class="fw-semibold">${escapeHtml(result.title)}</div>`);
+                        }
+                        if (result.link) {
+                            const safeUrl = escapeHtml(result.link);
+                            segments.push(`<div><a href="${safeUrl}" target="_blank" rel="noreferrer">${safeUrl}</a></div>`);
+                        }
+                        if (result.snippet) {
+                            segments.push(`<div class="text-muted">${escapeHtml(result.snippet)}</div>`);
+                        }
+                        if (!segments.length) {
+                            segments.push('<div class="text-muted">–</div>');
+                        }
+                        li.innerHTML = segments.join('');
+                        list.appendChild(li);
+                    });
+                    googleCell.appendChild(list);
+                } else {
+                    googleCell.innerHTML = '<span class="text-muted">Keine Ergebnisse</span>';
+                }
+
+                const llmCell = document.createElement('td');
+                const outputs = Array.isArray(entry.llm_outputs) ? entry.llm_outputs : [];
+                if (outputs.length) {
+                    const container = document.createElement('div');
+                    container.className = 'd-flex flex-column gap-2';
+                    outputs.forEach(output => {
+                        const block = document.createElement('div');
+                        block.className = 'border rounded p-2';
+                        const headerParts = [];
+                        if (output.target_url) {
+                            const safeTarget = escapeHtml(output.target_url);
+                            headerParts.push(`<a href="${safeTarget}" target="_blank" rel="noreferrer">${safeTarget}</a>`);
+                        }
+                        const avgValue = formatNumber(output.average_value, 2);
+                        if (avgValue !== '–') {
+                            headerParts.push(`<span class="badge bg-primary-subtle text-primary-emphasis ms-1">Ø ${avgValue}</span>`);
+                        }
+                        const avgConfidence = formatNumber(output.average_confidence, 2);
+                        if (avgConfidence !== '–') {
+                            headerParts.push(`<span class="badge bg-secondary-subtle text-secondary-emphasis ms-1">Sicherheit ${avgConfidence}</span>`);
+                        }
+                        const headerHtml = headerParts.filter(Boolean).join(' ') || '–';
+                        const dims = Array.isArray(output.dimensions) ? output.dimensions : [];
+                        let bodyHtml = '';
+                        if (dims.length) {
+                            const dimItems = dims
+                                .map(dim => {
+                                    const label = escapeHtml(dim.dimension || '–');
+                                    const valueText = formatNumber(dim.value, 0);
+                                    const confidenceText = formatNumber(dim.confidence, 2);
+                                    return `<li>${label}: ${valueText} (Sicherheit ${confidenceText})</li>`;
+                                })
+                                .join('');
+                            bodyHtml = `<ul class="small mb-0 ps-3">${dimItems}</ul>`;
+                        } else {
+                            bodyHtml = '<div class="small text-muted mb-0">Keine Bewertungen.</div>';
+                        }
+                        block.innerHTML = `<div class="small fw-semibold">${headerHtml}</div>${bodyHtml}`;
+                        container.appendChild(block);
+                    });
+                    llmCell.appendChild(container);
+                } else {
+                    llmCell.innerHTML = '<span class="text-muted">Keine Auswertung</span>';
+                }
+
+                tr.appendChild(queryCell);
+                tr.appendChild(googleCell);
+                tr.appendChild(llmCell);
+                tbody.appendChild(tr);
+            });
+            viewLogs.appendChild(table);
+        }
+
+        function openEditModal(resultId) {
+            const runId = state.selectedRunId;
+            if (!runId || !state.resultsCache[runId]) return;
+            const data = state.resultsCache[runId];
+            const result = (data.results || []).find(entry => String(entry.id) === String(resultId));
+            if (!result) return;
+            editResultId.value = result.id;
+            editTargetUrl.value = result.target_url || '';
+            editKeyword.value = result.keyword || '';
+            editNote.value = result.manual_note || '';
+            editDimensionsBody.innerHTML = '';
+            dimensions.forEach(dimension => {
+                const current = (result.dimensions || []).find(item => item.dimension === dimension) || { value: 0, confidence: 0 };
+                const tr = document.createElement('tr');
+                tr.innerHTML = `
+                    <td>${dimension}</td>
+                    <td><input type="number" class="form-control form-control-sm" min="0" max="5" value="${current.value ?? 0}" data-dimension="${dimension}" data-field="value"></td>
+                    <td><input type="number" class="form-control form-control-sm" min="0" max="1" step="0.01" value="${(current.confidence ?? 0).toFixed(2)}" data-dimension="${dimension}" data-field="confidence"></td>
+                `;
+                editDimensionsBody.appendChild(tr);
+            });
+            if (editModal) {
+                editModal.show();
+            } else {
+                window.alert('Bearbeitung ohne Dialogunterstützung nicht verfügbar. Bitte Änderungen manuell notieren.');
+            }
+        }
+
+        document.getElementById('edit-save').addEventListener('click', () => {
+            const resultId = editResultId.value;
+            if (!resultId) return;
+            const dimensionsPayload = Array.from(editDimensionsBody.querySelectorAll('tr')).map(row => {
+                const dimension = row.querySelector('td').textContent;
+                const valueInput = row.querySelector('[data-field="value"]');
+                const confidenceInput = row.querySelector('[data-field="confidence"]');
+                return {
+                    dimension,
+                    value: Number(valueInput.value),
+                    confidence: Number(confidenceInput.value)
+                };
+            });
+            const payload = {
+                target_url: editTargetUrl.value.trim(),
+                keyword: editKeyword.value.trim(),
+                manual_note: editNote.value.trim(),
+                dimensions: dimensionsPayload
+            };
+            fetch(`{{ url_for('update_search_result_route', result_id=0) }}`.replace('0', encodeURIComponent(resultId)), {
+                method: 'PATCH',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            })
+                .then(response => response.json())
+                .then(() => {
+                    editModal?.hide();
+                    state.resultsCache[state.selectedRunId] = null;
+                    loadResults(state.selectedRunId);
+                })
+                .catch(() => {
+                    editModal?.hide();
+                });
+        });
+
+        function deleteResult(resultId) {
+            if (!confirm('Dieses Suchergebnis wirklich löschen?')) {
+                return;
+            }
+            fetch(`{{ url_for('delete_search_result_route', result_id=0) }}`.replace('0', encodeURIComponent(resultId)), {
+                method: 'DELETE'
+            })
+                .then(() => {
+                    state.resultsCache[state.selectedRunId] = null;
+                    loadResults(state.selectedRunId);
+                })
+                .catch(() => {});
+        }
+
+        actionStart.addEventListener('click', () => {
+            if (!state.selectedDefinitionId) return;
+            fetch(`{{ url_for('start_search_run', definition_id='__ID__') }}`.replace('__ID__', encodeURIComponent(state.selectedDefinitionId)), {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({})
+            })
+                .then(response => response.json())
+                .then(data => {
+                    if (data.job_id) {
+                        state.selectedRunId = data.job_id;
+                        actionCancel.disabled = false;
+                        fetchData();
+                        showProgress(data.job_id);
+                    }
+                });
+        });
+
+        if (actionEdit) {
+            actionEdit.addEventListener('click', () => {
+                if (!state.selectedDefinitionId) return;
+                window.location.href = `${editBaseUrl}?definition=${encodeURIComponent(state.selectedDefinitionId)}`;
+            });
+        }
+
+        actionCancel.addEventListener('click', () => {
+            if (!state.selectedRunId) return;
+            fetch(`{{ url_for('cancel_search_job', job_id='__ID__') }}`.replace('__ID__', encodeURIComponent(state.selectedRunId)), {
+                method: 'POST'
+            })
+                .then(() => fetchData());
+        });
+
+        actionDuplicate.addEventListener('click', () => {
+            if (!state.selectedDefinitionId) return;
+            fetch(`{{ url_for('duplicate_search_definition', definition_id='__ID__') }}`.replace('__ID__', encodeURIComponent(state.selectedDefinitionId)), {
+                method: 'POST'
+            })
+                .then(response => response.json())
+                .then(() => fetchData());
+        });
+
+        actionDelete.addEventListener('click', () => {
+            if (!state.selectedDefinitionId) return;
+            if (!confirm('Diese Suche und alle zugehörigen Ergebnisse löschen?')) return;
+            fetch(`{{ url_for('delete_search_definition_route', definition_id='__ID__') }}`.replace('__ID__', encodeURIComponent(state.selectedDefinitionId)), {
+                method: 'DELETE'
+            })
+                .then(() => {
+                    state.selectedDefinitionId = null;
+                    fetchData();
+                });
+        });
+
+        function fetchData() {
+            fetch('{{ url_for('searches_data') }}')
+                .then(response => response.json())
+                .then(data => {
+                    state.definitions = data.definitions || [];
+                    state.runs = data.runs || [];
+                    state.jobs = data.jobs || {};
+                    renderDefinitions();
+                    renderRuns();
+                    if (state.selectedDefinitionId) {
+                        selectDefinition(state.selectedDefinitionId);
+                    } else if (state.definitions.length) {
+                        selectDefinition(state.definitions[0].id);
+                    } else {
+                        resetDetails();
+                    }
+                });
+        }
+
+        renderDefinitions();
+        renderRuns();
+        if (state.definitions.length) {
+            selectDefinition(state.definitions[0].id);
+        }
+    })();
+</script>
+</body>
+</html>

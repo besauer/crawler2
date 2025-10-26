@@ -1,0 +1,258 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+    <meta charset="UTF-8">
+    <title>Debugging – Schul-Webseiten Crawler</title>
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Ctext y='14' font-size='14'%3E%F0%9F%94%8D%3C/text%3E%3C/svg%3E">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css"
+          integrity="sha384-QWTKZyjpPEjISv5WaRU9OFeRpok6YctnYmDr5pNlyT2bRjXh0JMhjY6hW+ALEwIH"
+          crossorigin="anonymous">
+    <style>
+        body { padding-top: 0; }
+        .log-table-wrapper { max-height: 480px; overflow-y: auto; }
+        .log-table td { vertical-align: top; }
+        .log-message { white-space: pre-wrap; word-break: break-word; }
+        details summary { cursor: pointer; }
+        .navbar-nav .nav-link { white-space: nowrap; }
+        @media (min-width: 992px) {
+            .navbar-nav { flex-wrap: nowrap; gap: 0.75rem; }
+        }
+    </style>
+</head>
+<body>
+<nav class="navbar navbar-expand-lg navbar-light bg-light border-bottom">
+    <div class="container">
+        <div class="d-flex align-items-center w-100">
+            <div class="d-flex align-items-center">
+                <a class="navbar-brand me-3" href="{{ url_for('index') }}">Schul-Crawler</a>
+                <div class="d-none d-lg-flex align-items-center gap-2">
+                    <button type="button" class="btn btn-sm btn-outline-secondary" data-bundle-action="import">Import</button>
+                    <button type="button" class="btn btn-sm btn-primary" data-bundle-action="export">Export</button>
+                </div>
+            </div>
+            <button class="navbar-toggler ms-auto" type="button" data-bs-toggle="collapse" data-bs-target="#mainNav"
+                    aria-controls="mainNav" aria-expanded="false" aria-label="Navigation umschalten">
+                <span class="navbar-toggler-icon"></span>
+            </button>
+        </div>
+        <div class="collapse navbar-collapse" id="mainNav">
+            <div class="d-lg-none py-3 border-top">
+                <div class="d-grid gap-2 mb-2">
+                    <button type="button" class="btn btn-outline-secondary" data-bundle-action="import">Vollständiger Import</button>
+                    <button type="button" class="btn btn-primary" data-bundle-action="export">Vollständiger Export</button>
+                </div>
+            </div>
+            <ul class="navbar-nav ms-auto mb-2 mb-lg-0">
+                <li class="nav-item">
+                    <a class="nav-link {% if active_page == 'search_create' %}active{% endif %}"
+                       {% if active_page == 'search_create' %}aria-current="page"{% endif %}
+                       href="{{ url_for('index') }}">Suche anlegen</a>
+                </li>
+                <li class="nav-item">
+                    <a class="nav-link {% if active_page == 'search_results' %}active{% endif %}"
+                       {% if active_page == 'search_results' %}aria-current="page"{% endif %}
+                       href="{{ url_for('searches') }}">Suchen verwalten</a>
+                </li>
+                <li class="nav-item">
+                    <a class="nav-link {% if active_page == 'indexing' %}active{% endif %}"
+                       {% if active_page == 'indexing' %}aria-current="page"{% endif %}
+                       href="{{ url_for('indexing_page') }}">Index</a>
+                </li>
+                <li class="nav-item">
+                    <a class="nav-link {% if active_page == 'stammdaten' %}active{% endif %}"
+                       {% if active_page == 'stammdaten' %}aria-current="page"{% endif %}
+                       href="{{ url_for('stammdaten') }}">Stammdaten</a>
+                </li>
+                <li class="nav-item">
+                    <a class="nav-link {% if active_page == 'data_quality' %}active{% endif %}"
+                       {% if active_page == 'data_quality' %}aria-current="page"{% endif %}
+                       href="{{ url_for('data_quality') }}">Datenqualität</a>
+                </li>
+                <li class="nav-item">
+                    <a class="nav-link {% if active_page == 'debug' %}active{% endif %}"
+                       {% if active_page == 'debug' %}aria-current="page"{% endif %}
+                       href="{{ url_for('debug_page') }}">Debugging</a>
+                </li>
+                <li class="nav-item">
+                    <a class="nav-link {% if active_page == 'settings' %}active{% endif %}"
+                       {% if active_page == 'settings' %}aria-current="page"{% endif %}
+                       href="{{ url_for('settings') }}">Einstellungen</a>
+                </li>
+            </ul>
+        </div>
+    </div>
+</nav>
+<main class="container py-4">
+    <div class="d-flex flex-column flex-lg-row justify-content-between align-items-lg-center gap-3 mb-4">
+        <div>
+            <h1 class="mb-1">Debugging &amp; Fehlerprotokolle</h1>
+            <p class="text-muted mb-0">Hier sehen Sie alle Fehler, die während des Betriebs erfasst wurden. Nutzen Sie die Exportfunktion, um die Protokolle zu teilen.</p>
+        </div>
+        <div class="text-end small text-muted">
+            <div id="last-updated">Stand: –</div>
+        </div>
+    </div>
+
+    <div class="d-flex flex-wrap gap-2 mb-3">
+        <button type="button" class="btn btn-outline-primary" id="reload-logs">Neu laden</button>
+        <button type="button" class="btn btn-outline-secondary" id="export-logs">Exportieren</button>
+        <span class="badge bg-secondary align-self-center" id="log-count">0 Einträge</span>
+    </div>
+
+    <div id="debug-status" class="alert alert-info d-none" role="alert"></div>
+
+    <div class="log-table-wrapper border rounded" id="logs-container"></div>
+</main>
+
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"
+        integrity="sha384-HoA0FmB07pCg0M8N7TqyXMR9E7QPFhK9l6t84uLQ+W8sELpAo0P5PLf4KJIp4jK" crossorigin="anonymous"></script>
+<script>
+    (function () {
+        const initialLogs = {{ initial_logs|tojson|default('[]', true) }};
+        const logsContainer = document.getElementById('logs-container');
+        const reloadButton = document.getElementById('reload-logs');
+        const exportButton = document.getElementById('export-logs');
+        const statusBox = document.getElementById('debug-status');
+        const lastUpdated = document.getElementById('last-updated');
+        const logCount = document.getElementById('log-count');
+        const exportUrl = '{{ url_for('debug_export') }}';
+
+        function escapeHtml(value) {
+            return value ? String(value).replace(/[&<>"]+/g, (match) => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;'}[match])) : '';
+        }
+
+        async function readJson(response) {
+            const contentType = response.headers ? (response.headers.get('Content-Type') || '') : '';
+            if (contentType.includes('application/json')) {
+                return response.json();
+            }
+            const text = await response.text();
+            if (!text) {
+                return {};
+            }
+            try {
+                return JSON.parse(text);
+            } catch (error) {
+                return { error: text.trim() };
+            }
+        }
+
+        function formatTimestamp(value) {
+            if (!value) return '–';
+            const date = new Date(value);
+            if (Number.isNaN(date.getTime())) {
+                return value;
+            }
+            return date.toLocaleString('de-DE', { hour12: false });
+        }
+
+        function renderDetailsCell(log) {
+            const container = document.createElement('details');
+            container.className = 'small';
+            const summary = document.createElement('summary');
+            summary.textContent = 'Details anzeigen';
+            container.appendChild(summary);
+
+            if (log.details) {
+                const pre = document.createElement('pre');
+                pre.className = 'mb-2';
+                try {
+                    pre.textContent = JSON.stringify(log.details, null, 2);
+                } catch (error) {
+                    pre.textContent = String(log.details);
+                }
+                container.appendChild(pre);
+            }
+
+            if (log.stack) {
+                const stackPre = document.createElement('pre');
+                stackPre.className = 'mb-0 text-muted';
+                stackPre.textContent = log.stack;
+                container.appendChild(stackPre);
+            }
+
+            if (!log.details && !log.stack) {
+                const empty = document.createElement('div');
+                empty.className = 'text-muted';
+                empty.textContent = 'Keine weiteren Details vorhanden.';
+                container.appendChild(empty);
+            }
+
+            return container;
+        }
+
+        function renderLogs(logs) {
+            logsContainer.innerHTML = '';
+            if (!logs || !logs.length) {
+                logsContainer.innerHTML = '<div class="p-3 text-muted">Keine Fehler protokolliert.</div>';
+                logCount.textContent = '0 Einträge';
+                return;
+            }
+            logCount.textContent = `${logs.length} ${logs.length === 1 ? 'Eintrag' : 'Einträge'}`;
+            const table = document.createElement('table');
+            table.className = 'table table-sm table-striped table-hover align-middle log-table mb-0';
+            table.innerHTML = `
+                <thead class="table-light">
+                    <tr>
+                        <th scope="col" style="width: 15%;">Zeitpunkt</th>
+                        <th scope="col" style="width: 15%;">Kategorie</th>
+                        <th scope="col" style="width: 30%;">Nachricht</th>
+                        <th scope="col" style="width: 40%;">Details</th>
+                    </tr>
+                </thead>
+                <tbody></tbody>
+            `;
+            const tbody = table.querySelector('tbody');
+            logs.forEach((log) => {
+                const row = document.createElement('tr');
+                const timeCell = document.createElement('td');
+                timeCell.textContent = formatTimestamp(log.timestamp || log.created_at);
+                const categoryCell = document.createElement('td');
+                const badge = document.createElement('span');
+                badge.className = 'badge bg-secondary-subtle text-secondary-emphasis';
+                badge.textContent = log.category || 'Allgemein';
+                categoryCell.appendChild(badge);
+                const messageCell = document.createElement('td');
+                messageCell.className = 'log-message';
+                messageCell.textContent = log.message || '–';
+                const detailCell = document.createElement('td');
+                detailCell.appendChild(renderDetailsCell(log));
+                row.append(timeCell, categoryCell, messageCell, detailCell);
+                tbody.appendChild(row);
+            });
+            logsContainer.appendChild(table);
+        }
+
+        async function fetchLogs() {
+            statusBox.className = 'alert alert-info d-none';
+            statusBox.textContent = '';
+            try {
+                const response = await fetch('{{ url_for('debug_logs') }}?limit=500');
+                const data = await readJson(response);
+                if (!response.ok) {
+                    throw new Error(data.error || `Fehler beim Laden (Status ${response.status})`);
+                }
+                renderLogs(data.logs || []);
+                lastUpdated.textContent = `Stand: ${formatTimestamp(new Date().toISOString())}`;
+            } catch (error) {
+                statusBox.classList.remove('d-none');
+                statusBox.className = 'alert alert-danger';
+                statusBox.textContent = error && error.message ? error.message : 'Fehler beim Laden der Protokolle.';
+            }
+        }
+
+        reloadButton.addEventListener('click', fetchLogs);
+        exportButton.addEventListener('click', () => {
+            window.location.href = exportUrl;
+        });
+
+        renderLogs(initialLogs);
+        if (initialLogs && initialLogs.length) {
+            lastUpdated.textContent = `Stand: ${formatTimestamp(new Date().toISOString())}`;
+        }
+    })();
+</script>
+
+{% include '_data_management_modals.html' %}
+</body>
+</html>

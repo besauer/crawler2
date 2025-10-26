@@ -1,0 +1,1618 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+    <meta charset="UTF-8">
+    <title>Datenqualität der Schul-URLs</title>
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Ctext y='14' font-size='14'%3E%F0%9F%94%8D%3C/text%3E%3C/svg%3E">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css"
+          integrity="sha384-QWTKZyjpPEjISv5WaRU9OFeRpok6YctnYmDr5pNlyT2bRjXh0JMhjY6hW+ALEwIH"
+          crossorigin="anonymous">
+    <style>
+        body { padding-top: 0; }
+        .status-badge { font-size: 0.9rem; }
+        .data-quality-table {
+            max-height: 60vh;
+            overflow-y: auto;
+        }
+        .data-quality-grid {
+            white-space: nowrap;
+            width: max-content;
+            min-width: 100%;
+        }
+        .data-quality-grid thead th,
+        .data-quality-grid tbody td {
+            vertical-align: middle;
+        }
+        .data-quality-grid.compact-rows thead th,
+        .data-quality-grid.compact-rows tbody td {
+            padding-top: 0.35rem;
+            padding-bottom: 0.35rem;
+        }
+        .data-quality-wrapper {
+            overflow-x: auto;
+        }
+        .quality-note { font-size: 0.85rem; }
+        .history-entry { border-left: 3px solid #0d6efd; padding-left: 0.75rem; margin-bottom: 1rem; }
+        .history-entry h6 { font-size: 1rem; margin-bottom: 0.25rem; }
+        .history-entry time { font-size: 0.8rem; color: #6c757d; }
+        .offcanvas-lg { --bs-offcanvas-width: min(700px, 90vw); }
+        .status-cell { white-space: nowrap; }
+        .status-cell .quality-note { display: inline-block; margin-left: 0.5rem; }
+        .school-cell { white-space: normal; }
+        .school-name { white-space: normal; word-break: break-word; }
+        .school-url { font-size: 0.9rem; display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem; }
+        .school-url span { display: block; }
+        .school-url a { display: inline-block; }
+        .site-scope-badge { cursor: pointer; border: none; }
+        .site-scope-badge:focus { outline: none; box-shadow: 0 0 0 0.25rem rgba(13, 110, 253, 0.25); }
+        .site-scope-badge.text-bg-warning { color: #212529; }
+        .school-status { margin-top: 0.25rem; }
+        .school-meta { color: #6c757d; }
+        .school-meta strong { color: inherit; font-weight: 600; }
+        .navbar-nav .nav-link { white-space: nowrap; }
+        .students-cell { text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
+        .sortable { cursor: pointer; user-select: none; }
+        .sortable:focus { outline: none; box-shadow: 0 0 0 0.25rem rgba(13, 110, 253, 0.25); }
+        .sortable .sort-indicator { margin-left: 0.35rem; font-size: 0.75rem; opacity: 0.6; }
+        .sortable.active .sort-indicator { opacity: 1; }
+        @media (min-width: 992px) {
+            .navbar-nav { flex-wrap: nowrap; gap: 0.75rem; }
+        }
+    </style>
+</head>
+<body>
+<nav class="navbar navbar-expand-lg navbar-light bg-light border-bottom">
+    <div class="container">
+        <div class="d-flex align-items-center w-100">
+            <div class="d-flex align-items-center">
+                <a class="navbar-brand me-3" href="{{ url_for('index') }}">Schul-Crawler</a>
+                <div class="d-none d-lg-flex align-items-center gap-2">
+                    <button type="button" class="btn btn-sm btn-outline-secondary" data-bundle-action="import">Import</button>
+                    <button type="button" class="btn btn-sm btn-primary" data-bundle-action="export">Export</button>
+                </div>
+            </div>
+            <button class="navbar-toggler ms-auto" type="button" data-bs-toggle="collapse" data-bs-target="#mainNav"
+                    aria-controls="mainNav" aria-expanded="false" aria-label="Navigation umschalten">
+                <span class="navbar-toggler-icon"></span>
+            </button>
+        </div>
+        <div class="collapse navbar-collapse" id="mainNav">
+            <div class="d-lg-none py-3 border-top">
+                <div class="d-grid gap-2 mb-2">
+                    <button type="button" class="btn btn-outline-secondary" data-bundle-action="import">Vollständiger Import</button>
+                    <button type="button" class="btn btn-primary" data-bundle-action="export">Vollständiger Export</button>
+                </div>
+            </div>
+            <ul class="navbar-nav ms-auto mb-2 mb-lg-0">
+                <li class="nav-item">
+                    <a class="nav-link {% if active_page == 'search_create' %}active{% endif %}"
+                       {% if active_page == 'search_create' %}aria-current="page"{% endif %}
+                       href="{{ url_for('index') }}">Suche anlegen</a>
+                </li>
+                <li class="nav-item">
+                    <a class="nav-link {% if active_page == 'search_results' %}active{% endif %}"
+                       {% if active_page == 'search_results' %}aria-current="page"{% endif %}
+                       href="{{ url_for('searches') }}">Suchen verwalten</a>
+                </li>
+                <li class="nav-item">
+                    <a class="nav-link {% if active_page == 'indexing' %}active{% endif %}"
+                       {% if active_page == 'indexing' %}aria-current="page"{% endif %}
+                       href="{{ url_for('indexing_page') }}">Index</a>
+                </li>
+                <li class="nav-item">
+                    <a class="nav-link {% if active_page == 'stammdaten' %}active{% endif %}"
+                       {% if active_page == 'stammdaten' %}aria-current="page"{% endif %}
+                       href="{{ url_for('stammdaten') }}">Stammdaten</a>
+                </li>
+                <li class="nav-item">
+                    <a class="nav-link {% if active_page == 'data_quality' %}active{% endif %}"
+                       {% if active_page == 'data_quality' %}aria-current="page"{% endif %}
+                       href="{{ url_for('data_quality') }}">Datenqualität</a>
+                </li>
+                <li class="nav-item">
+                    <a class="nav-link {% if active_page == 'debug' %}active{% endif %}"
+                       {% if active_page == 'debug' %}aria-current="page"{% endif %}
+                       href="{{ url_for('debug_page') }}">Debugging</a>
+                </li>
+                <li class="nav-item">
+                    <a class="nav-link {% if active_page == 'settings' %}active{% endif %}"
+                       {% if active_page == 'settings' %}aria-current="page"{% endif %}
+                       href="{{ url_for('settings') }}">Einstellungen</a>
+                </li>
+            </ul>
+        </div>
+    </div>
+</nav>
+<main class="container py-4">
+    <div class="d-flex justify-content-between align-items-center mb-3">
+        <div>
+            <h1 class="h3 mb-1">Datenqualität der Schul-URLs</h1>
+            <p class="text-muted mb-0">Prüfen und korrigieren Sie die hinterlegten Webseiten der Schulen. Automatische
+                Analysen nutzen zuerst die Zielseite und bei Bedarf Suchergebnisse, bevor eine KI eine Empfehlung
+                ausspricht.</p>
+        </div>
+        <div class="d-flex gap-2">
+            <a class="btn btn-outline-secondary" href="{{ url_for('export_data_quality') }}">Exportieren</a>
+            <button class="btn btn-outline-primary" id="refresh-table">Aktualisieren</button>
+        </div>
+    </div>
+
+    {% if not openai_present %}
+        <div class="alert alert-warning" role="alert">
+            <strong>OpenAI-Schlüssel fehlt.</strong> Bitte hinterlegen Sie den API-Schlüssel unter
+            <a class="alert-link" href="{{ url_for('settings') }}">Einstellungen → API-Schlüssel</a>, damit die
+            Analysen ausgeführt werden können.
+        </div>
+    {% endif %}
+    {% if not google_configured %}
+        <div class="alert alert-info" role="alert">
+            <strong>Google Search API nicht konfiguriert.</strong> Ohne API-Key und Suchmaschinen-ID kann die zweite
+            Prüfphase keine alternativen URLs vorschlagen. Hinterlegen Sie die Zugangsdaten unter
+            <a class="alert-link" href="{{ url_for('settings') }}">Einstellungen → Datenqualität</a>.
+        </div>
+    {% endif %}
+
+    <div class="card mb-4">
+        <div class="card-body">
+            <div class="d-flex flex-column flex-lg-row gap-3 align-items-lg-center justify-content-between">
+                <div class="flex-grow-1">
+                    <h2 class="h5 mb-2">Prüfung steuern</h2>
+                    <p class="text-muted mb-0">Ausgewählte Schulen werden asynchron geprüft. Während der Lauf aktiv ist,
+                        erhalten Sie Live-Statusmeldungen sowie eine Übersicht der gefundenen Vorschläge.</p>
+                </div>
+                <div class="d-flex flex-wrap gap-2">
+                    <button type="button" class="btn btn-outline-secondary btn-sm" id="select-all">Alle auswählen</button>
+                    <button type="button" class="btn btn-outline-secondary btn-sm" id="select-visible">Alle angezeigten auswählen</button>
+                    <button type="button" class="btn btn-outline-secondary btn-sm" id="select-none">Keine auswählen</button>
+                    <button type="button" class="btn btn-outline-primary" id="start-quality-check">Prüfung starten</button>
+                    <button type="button" class="btn btn-outline-warning" id="start-site-scope">Auftrittstyp prüfen</button>
+                    <button type="button" class="btn btn-outline-secondary" id="bulk-site-scope">Auftrittstyp ändern</button>
+                    <button type="button" class="btn btn-outline-info" id="start-google-search">Google-Suche (100 Treffer)</button>
+                    <button type="button" class="btn btn-outline-success" id="accept-invalid">„Falsch“-Vorschläge übernehmen</button>
+                    <button type="button" class="btn btn-outline-danger" id="cancel-quality-check" disabled>Abbrechen</button>
+                </div>
+            </div>
+            <div class="mt-3 d-flex flex-wrap align-items-center gap-2">
+                <span class="text-muted small text-uppercase fw-semibold">Sichtbarkeitsfilter</span>
+                <div class="btn-group btn-group-sm" role="group" id="visibility-filter-group">
+                    <button type="button" class="btn btn-outline-secondary active" data-filter-status="all">Alle</button>
+                    <button type="button" class="btn btn-outline-secondary" data-filter-status="ok">OK</button>
+                    <button type="button" class="btn btn-outline-secondary" data-filter-status="invalid">Falsch</button>
+                    <button type="button" class="btn btn-outline-secondary" data-filter-status="corrected">Richtiger Wert</button>
+                </div>
+            </div>
+            <div class="mt-2 d-flex flex-wrap align-items-center gap-2">
+                <span class="text-muted small text-uppercase fw-semibold">Auftrittstyp</span>
+                <div class="btn-group btn-group-sm" role="group" id="scope-filter-group">
+                    <button type="button" class="btn btn-outline-secondary active" data-filter-scope="all">Alle</button>
+                    <button type="button" class="btn btn-outline-secondary" data-filter-scope="exclusive">Exklusive Webseiten</button>
+                    <button type="button" class="btn btn-outline-secondary" data-filter-scope="shared">Geteilte Auftritte</button>
+                    <button type="button" class="btn btn-outline-secondary" data-filter-scope="unknown">Unklar</button>
+                </div>
+            </div>
+            <div class="mt-3" id="progress-container" hidden>
+                <div class="d-flex justify-content-between mb-1">
+                    <span id="progress-label" class="fw-semibold">Prüfung läuft …</span>
+                    <span id="progress-percent">0%</span>
+                </div>
+                <div class="progress" role="progressbar" aria-valuemin="0" aria-valuemax="100">
+                    <div class="progress-bar" id="progress-bar" style="width: 0%"></div>
+                </div>
+                <p class="mt-2 mb-0 text-muted" id="progress-summary"></p>
+                <ul class="small mt-2 mb-0" id="progress-messages"></ul>
+            </div>
+            <div class="mt-3" id="progress-results-section" hidden>
+                <h3 class="h6 mb-2">Ergebnisse der aktuellen Prüfung</h3>
+                <div class="table-responsive">
+                    <table class="table table-sm table-striped mb-0">
+                        <thead class="table-light">
+                        <tr>
+                            <th>Schule</th>
+                            <th>Status</th>
+                            <th>Empfehlung</th>
+                        </tr>
+                        </thead>
+                        <tbody id="progress-results-body">
+                        <tr>
+                            <td colspan="3" class="text-muted">Noch keine Ergebnisse.</td>
+                        </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="card">
+        <div class="card-body">
+            <div class="d-flex flex-column flex-lg-row align-items-lg-center justify-content-between gap-2 mb-3">
+                <div>
+                    <h2 class="h5 mb-0">Stammdaten</h2>
+                    <div class="text-muted small">
+                        Modelle: {{ data_quality_settings.model }} • Treffer pro Lauf: {{ data_quality_settings.batch_size }} •
+                        Treffer je Suche: {{ data_quality_settings.max_search_results }} • Schwelle: {{ '%.2f'|format(data_quality_settings.confidence_threshold) }}
+                    </div>
+                </div>
+                <div class="btn-group btn-group-sm" role="group">
+                    <button class="btn btn-outline-secondary" id="toggle-density" data-mode="compact">Kompakte Zeilen</button>
+                </div>
+            </div>
+            <div class="table-responsive data-quality-table data-quality-wrapper">
+                <table class="table table-hover align-middle data-quality-grid" id="schools-table">
+                    <thead class="table-light">
+                    <tr>
+                        <th>Aktionen</th>
+                        <th><input type="checkbox" class="form-check-input" id="select-master"></th>
+                        <th>Schule</th>
+                        <th class="text-end sortable" data-sort-key="students" tabindex="0" role="button" aria-label="Nach Anzahl der Schüler sortieren">Schüler/-innen insgesamt<span class="sort-indicator" aria-hidden="true">↕</span></th>
+                        <th>Vorschlag</th>
+                        <th>Letzte Prüfung</th>
+                    </tr>
+                    </thead>
+                    <tbody id="schools-body">
+                    {% for record in records %}
+                        {% set scope_value = (record.site_scope or site_scope_unknown) %}
+                        {% set scope_label = record.site_scope_label or site_scope_labels.get(scope_value, site_scope_labels[site_scope_unknown]) %}
+                        {% set scope_class = site_scope_classes.get(scope_value, site_scope_classes[site_scope_unknown]) %}
+                        {% set scope_reason = record.site_scope_reason or record.quality.site_scope_reason or '' %}
+                        <tr data-school-id="{{ record.schul_id }}" data-status="{{ record.status }}" data-school-label="{{ record.schulname|default('')|e }}" data-has-suggestion="{{ '1' if record.quality.suggested_url else '' }}" data-suggested-url="{{ record.quality.suggested_url|default('')|e }}" data-correction-applied="{{ '1' if record.correction_applied else '' }}" data-site-scope="{{ scope_value }}" data-site-scope-reason="{{ scope_reason|e }}" data-students="{{ record.schueler_gesamt_numeric if record.schueler_gesamt_numeric is not none else '' }}">
+                            <td class="text-nowrap">
+                                <div class="dropdown">
+                                    <button class="btn btn-sm btn-outline-primary dropdown-toggle" type="button" data-bs-toggle="dropdown" aria-expanded="false">
+                                        Aktionen
+                                    </button>
+                                    <ul class="dropdown-menu">
+                                        <li><button type="button" class="dropdown-item" data-action="details">Details ansehen</button></li>
+                                        <li><button type="button" class="dropdown-item" data-action="accept" {% if not record.quality.suggested_url %}disabled{% endif %}>Vorschlag übernehmen</button></li>
+                                        <li><button type="button" class="dropdown-item" data-action="edit">URL ändern</button></li>
+                                        <li><hr class="dropdown-divider"></li>
+                                        <li><button type="button" class="dropdown-item" data-action="mark-ok">Als korrekt markieren</button></li>
+                                        <li><button type="button" class="dropdown-item" data-action="ignore">Ignorieren</button></li>
+                                        <li><button type="button" class="dropdown-item" data-action="recheck">Erneut prüfen</button></li>
+                                    </ul>
+                                </div>
+                            </td>
+                            <td><input type="checkbox" class="form-check-input record-checkbox" value="{{ record.schul_id }}"></td>
+                            <td class="school-cell">
+                                <div class="school-url">
+                                    {% if record.homepage %}
+                                        <a href="{{ record.homepage }}" target="_blank" rel="noopener">{{ record.homepage|break_every(40) }}</a>
+                                    {% else %}
+                                        <span class="text-muted">—</span>
+                                    {% endif %}
+                                    <button type="button" class="badge rounded-pill site-scope-badge {{ scope_class }}" data-site-scope="{{ scope_value }}" data-school-id="{{ record.schul_id }}" data-scope-reason="{{ scope_reason|e }}" title="{{ scope_reason|e }}">{{ scope_label }}</button>
+                                </div>
+                                <div class="school-status">
+                                    <span class="badge bg-secondary status-badge" data-status="{{ record.status }}">{{ record.status_label }}</span>
+                                    {% if record.correction_applied %}
+                                        <span class="badge bg-success-subtle text-success border border-success-subtle ms-1">Richtiger Wert übernommen</span>
+                                    {% endif %}
+                                    {% if record.quality.manual_note %}
+                                        <span class="text-muted quality-note d-block">{{ record.quality.manual_note }}</span>
+                                    {% endif %}
+                                </div>
+                                <div class="fw-semibold school-name mt-1">{{ record.schulname|break_every(40) }}</div>
+                                <div class="school-meta">Ort: {{ record.ort }}</div>
+                                <div class="school-meta small">ID: {{ record.schul_id }}</div>
+                            </td>
+                            <td class="text-nowrap text-end students-cell">
+                                {% if record.schueler_gesamt_numeric is not none %}
+                                    {{ '{:,}'.format(record.schueler_gesamt_numeric).replace(',', '.') }}
+                                {% elif record.schueler_gesamt is not none %}
+                                    {{ record.schueler_gesamt }}
+                                {% else %}
+                                    <span class="text-muted">–</span>
+                                {% endif %}
+                            </td>
+                            <td class="text-nowrap">
+                                {% if record.quality.suggested_url %}
+                                    <a href="{{ record.quality.suggested_url }}" target="_blank" rel="noopener">{{ record.quality.suggested_url|break_every(40) }}</a>
+                                    {% if record.quality.suggested_confidence %}
+                                        <div class="text-muted quality-note">Sicherheit: {{ '%.2f'|format(record.quality.suggested_confidence) }}</div>
+                                    {% endif %}
+                                {% else %}
+                                    <span class="text-muted">—</span>
+                                {% endif %}
+                            </td>
+                            <td class="text-nowrap">
+                                {% if record.quality.last_checked %}
+                                    <time datetime="{{ record.quality.last_checked }}">{{ record.quality.last_checked }}</time>
+                                {% else %}
+                                    <span class="text-muted">Noch nicht geprüft</span>
+                                {% endif %}
+                            </td>
+                        </tr>
+                    {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+</main>
+
+<div class="modal fade" id="editUrlModal" tabindex="-1" aria-labelledby="editUrlLabel" aria-hidden="true">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <form id="edit-url-form">
+                <div class="modal-header">
+                    <h5 class="modal-title" id="editUrlLabel">URL anpassen</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Schließen"></button>
+                </div>
+                <div class="modal-body">
+                    <input type="hidden" id="edit-url-school-id">
+                    <div class="mb-3">
+                        <label for="edit-url-input" class="form-label">Neue URL</label>
+                        <input type="url" class="form-control" id="edit-url-input" required placeholder="https://…">
+                        <div class="form-text">Die URL wird in den Stammdaten gespeichert (außer bei aktiviertem Dry-Run).</div>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Abbrechen</button>
+                    <button type="submit" class="btn btn-primary">Speichern</button>
+                </div>
+            </form>
+        </div>
+    </div>
+</div>
+
+<div class="modal fade" id="siteScopeModal" tabindex="-1" aria-labelledby="siteScopeLabel" aria-hidden="true">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <form id="site-scope-form">
+                <div class="modal-header">
+                    <h5 class="modal-title" id="siteScopeLabel">Auftrittstyp anpassen</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Schließen"></button>
+                </div>
+                <div class="modal-body">
+                    <input type="hidden" id="site-scope-school-id">
+                    <div class="mb-3">
+                        <label class="form-label">Auftrittstyp auswählen</label>
+                        <div class="form-check">
+                            <input class="form-check-input" type="radio" name="site_scope_choice" id="scopeExclusive" value="exclusive">
+                            <label class="form-check-label" for="scopeExclusive">Exklusive Webseite</label>
+                        </div>
+                        <div class="form-check">
+                            <input class="form-check-input" type="radio" name="site_scope_choice" id="scopeShared" value="shared">
+                            <label class="form-check-label" for="scopeShared">Geteilter Auftritt</label>
+                        </div>
+                        <div class="form-check">
+                            <input class="form-check-input" type="radio" name="site_scope_choice" id="scopeUnknown" value="unknown">
+                            <label class="form-check-label" for="scopeUnknown">Unklar</label>
+                        </div>
+                    </div>
+                    <div class="mb-3">
+                        <label for="site-scope-reason" class="form-label">Begründung (optional)</label>
+                        <textarea class="form-control" id="site-scope-reason" rows="3" placeholder="Begründung für die manuelle Entscheidung"></textarea>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Abbrechen</button>
+                    <button type="submit" class="btn btn-primary">Speichern</button>
+                </div>
+            </form>
+        </div>
+    </div>
+</div>
+
+<div class="modal fade" id="bulkSiteScopeModal" tabindex="-1" aria-labelledby="bulkSiteScopeLabel" aria-hidden="true">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <form id="bulk-site-scope-form">
+                <div class="modal-header">
+                    <h5 class="modal-title" id="bulkSiteScopeLabel">Auftrittstyp für Auswahl ändern</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Schließen"></button>
+                </div>
+                <div class="modal-body">
+                    <input type="hidden" id="bulk-site-scope-ids">
+                    <p class="text-muted">Auftrittstyp für <span id="bulk-site-scope-count">0</span> Schulen setzen.</p>
+                    <div class="mb-3">
+                        <label class="form-label">Auftrittstyp auswählen</label>
+                        <div class="form-check">
+                            <input class="form-check-input" type="radio" name="bulk_site_scope_choice" id="bulkScopeExclusive" value="exclusive" checked>
+                            <label class="form-check-label" for="bulkScopeExclusive">Exklusive Webseite</label>
+                        </div>
+                        <div class="form-check">
+                            <input class="form-check-input" type="radio" name="bulk_site_scope_choice" id="bulkScopeShared" value="shared">
+                            <label class="form-check-label" for="bulkScopeShared">Geteilter Auftritt</label>
+                        </div>
+                        <div class="form-check">
+                            <input class="form-check-input" type="radio" name="bulk_site_scope_choice" id="bulkScopeUnknown" value="unknown">
+                            <label class="form-check-label" for="bulkScopeUnknown">Unklar</label>
+                        </div>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Abbrechen</button>
+                    <button type="submit" class="btn btn-primary">Speichern</button>
+                </div>
+            </form>
+        </div>
+    </div>
+</div>
+
+<div class="offcanvas offcanvas-end offcanvas-lg" tabindex="-1" id="detailsPanel" aria-labelledby="detailsLabel">
+    <div class="offcanvas-header">
+        <div>
+            <h5 class="offcanvas-title" id="detailsLabel">Prüfhistorie</h5>
+            <div class="text-muted small" id="detailsSub"></div>
+        </div>
+        <button type="button" class="btn-close" data-bs-dismiss="offcanvas" aria-label="Schließen"></button>
+    </div>
+    <div class="offcanvas-body">
+        <div id="detailsContent" class="small text-muted">Keine Daten geladen.</div>
+    </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"
+        integrity="sha384-YvpcrYf0tY3lHB60NNkmXc5s9fDVZLESaAA55NDzOxhy9GkcIdslK1eN7N6jIeHz"
+        crossorigin="anonymous"></script>
+<script>
+    (function () {
+        const selectMaster = document.getElementById('select-master');
+        const selectAllBtn = document.getElementById('select-all');
+        const selectNoneBtn = document.getElementById('select-none');
+        const startBtn = document.getElementById('start-quality-check');
+        const cancelBtn = document.getElementById('cancel-quality-check');
+        const refreshBtn = document.getElementById('refresh-table');
+        const progressContainer = document.getElementById('progress-container');
+        const progressBar = document.getElementById('progress-bar');
+        const progressPercent = document.getElementById('progress-percent');
+        const progressSummary = document.getElementById('progress-summary');
+        const progressLabel = document.getElementById('progress-label');
+        const progressMessages = document.getElementById('progress-messages');
+        const tableBody = document.getElementById('schools-body');
+        const editModalEl = document.getElementById('editUrlModal');
+        const editModal = editModalEl && window.bootstrap && window.bootstrap.Modal ? new window.bootstrap.Modal(editModalEl) : null;
+        const editForm = document.getElementById('edit-url-form');
+        const editInput = document.getElementById('edit-url-input');
+        const editSchoolId = document.getElementById('edit-url-school-id');
+        const siteScopeModalEl = document.getElementById('siteScopeModal');
+        const siteScopeModal = siteScopeModalEl && window.bootstrap && window.bootstrap.Modal ? new window.bootstrap.Modal(siteScopeModalEl) : null;
+        const siteScopeForm = document.getElementById('site-scope-form');
+        const siteScopeSchoolId = document.getElementById('site-scope-school-id');
+        const siteScopeReasonInput = document.getElementById('site-scope-reason');
+        const siteScopeChoices = Array.from(document.querySelectorAll('input[name="site_scope_choice"]'));
+        const bulkSiteScopeBtn = document.getElementById('bulk-site-scope');
+        const bulkScopeModalEl = document.getElementById('bulkSiteScopeModal');
+        const bulkScopeModal = bulkScopeModalEl && window.bootstrap && window.bootstrap.Modal ? new window.bootstrap.Modal(bulkScopeModalEl) : null;
+        const bulkScopeForm = document.getElementById('bulk-site-scope-form');
+        const bulkScopeChoices = Array.from(document.querySelectorAll('input[name="bulk_site_scope_choice"]'));
+        const bulkScopeCount = document.getElementById('bulk-site-scope-count');
+        const bulkScopeIdsField = document.getElementById('bulk-site-scope-ids');
+        const detailsPanelEl = document.getElementById('detailsPanel');
+        const detailsPanel = detailsPanelEl && window.bootstrap && window.bootstrap.Offcanvas ? new window.bootstrap.Offcanvas(detailsPanelEl) : null;
+        const detailsContent = document.getElementById('detailsContent');
+        const detailsSub = document.getElementById('detailsSub');
+        const progressResultsSection = document.getElementById('progress-results-section');
+        const progressResultsBody = document.getElementById('progress-results-body');
+        const selectVisibleBtn = document.getElementById('select-visible');
+        const siteScopeBtn = document.getElementById('start-site-scope');
+        const bulkSiteScopeUrl = "{{ url_for('bulk_update_site_scope') }}";
+        const googleBtn = document.getElementById('start-google-search');
+        const acceptInvalidBtn = document.getElementById('accept-invalid');
+        const bulkAcceptUrl = "{{ url_for('bulk_accept_data_quality') }}";
+        const jobsEndpoint = "{{ url_for('data_quality_job_list') }}";
+        const statusLabels = {{ status_labels|tojson }};
+        const siteScopeLabels = {{ site_scope_labels|tojson }};
+        const siteScopeClasses = {{ site_scope_classes|tojson }};
+        const siteScopeUnknown = {{ site_scope_unknown|tojson }};
+        const SITE_SCOPE_EXCLUSIVE = 'exclusive';
+        const SITE_SCOPE_SHARED = 'shared';
+        const SITE_SCOPE_UNKNOWN = siteScopeUnknown || 'unknown';
+        const filterButtons = document.querySelectorAll('[data-filter-status]');
+        const scopeButtons = document.querySelectorAll('[data-filter-scope]');
+
+        let currentJobId = null;
+        let pollTimer = null;
+        const messageBuffer = [];
+        const recordIndex = new Map();
+        let currentStatusFilter = 'all';
+        let currentScopeFilter = 'all';
+        let baseRecords = [];
+        let currentRecords = [];
+        let currentSortKey = null;
+        let currentSortDirection = 'asc';
+        let pendingBulkScopeIds = [];
+
+        function escapeHtml(value) {
+            return (value == null ? '' : String(value)).replace(/[&<>"']/g, (char) => {
+                switch (char) {
+                    case '&': return '&amp;';
+                    case '<': return '&lt;';
+                    case '>': return '&gt;';
+                    case '"': return '&quot;';
+                    case "'": return '&#39;';
+                    default: return char;
+                }
+            });
+        }
+
+        function chunkText(value, interval = 40) {
+            const text = value == null ? '' : String(value);
+            if (!text) {
+                return '';
+            }
+            const chunks = [];
+            for (let index = 0; index < text.length; index += interval) {
+                const piece = text.slice(index, index + interval);
+                chunks.push(`<span class="d-block">${escapeHtml(piece)}</span>`);
+            }
+            return chunks.join('');
+        }
+
+        function formatSchoolName(value) {
+            return chunkText(value, 40);
+        }
+
+        function formatUrl(value) {
+            return chunkText(value, 40);
+        }
+
+        function parseStudents(value) {
+            if (value == null || value === '') {
+                return null;
+            }
+            if (typeof value === 'number') {
+                return Number.isFinite(value) ? Math.round(value) : null;
+            }
+            const text = String(value).trim();
+            if (!text) {
+                return null;
+            }
+            const normalised = text
+                .replace(/[\u202f\u00a0\s]/g, '')
+                .replace(/\./g, '')
+                .replace(/,/g, '.');
+            const parsed = Number(normalised);
+            if (!Number.isFinite(parsed)) {
+                return null;
+            }
+            return Math.round(parsed);
+        }
+
+        function formatStudentsDisplay(rawValue, numericValue) {
+            if (numericValue != null && !Number.isNaN(numericValue)) {
+                return escapeHtml(new Intl.NumberFormat('de-DE').format(numericValue));
+            }
+            if (rawValue == null || rawValue === '') {
+                return '<span class="text-muted">–</span>';
+            }
+            return escapeHtml(String(rawValue));
+        }
+
+        function normalizeScope(value) {
+            const text = (value == null ? '' : String(value)).toLowerCase();
+            if (!text) {
+                return SITE_SCOPE_UNKNOWN;
+            }
+            if (text === SITE_SCOPE_EXCLUSIVE || text.includes('exklus')) {
+                return SITE_SCOPE_EXCLUSIVE;
+            }
+            if (text === SITE_SCOPE_SHARED || text.includes('teil') || text.includes('shared') || text.includes('gemeinsam')) {
+                return SITE_SCOPE_SHARED;
+            }
+            if (text === SITE_SCOPE_UNKNOWN || text.includes('unklar')) {
+                return SITE_SCOPE_UNKNOWN;
+            }
+            return SITE_SCOPE_UNKNOWN;
+        }
+
+        function buildScopeBadge(record, scopeValue, scopeReason) {
+            const label = siteScopeLabels[scopeValue] || siteScopeLabels[SITE_SCOPE_UNKNOWN];
+            const cssClass = siteScopeClasses[scopeValue] || siteScopeClasses[SITE_SCOPE_UNKNOWN];
+            const schoolId = record?.schul_id ? escapeHtml(record.schul_id) : '';
+            const reasonText = scopeReason ? escapeHtml(scopeReason) : '';
+            const titleAttr = reasonText ? ` title="${reasonText}"` : '';
+            return `<button type="button" class="badge rounded-pill site-scope-badge ${escapeHtml(cssClass)}" data-site-scope="${escapeHtml(scopeValue)}" data-school-id="${schoolId}" data-scope-reason="${reasonText}"${titleAttr}>${escapeHtml(label)}</button>`;
+        }
+
+        function getSortValue(record, key) {
+            if (!record || typeof record !== 'object') {
+                return null;
+            }
+            switch (key) {
+                case 'students': {
+                    const source = record.schueler_gesamt_numeric != null
+                        ? record.schueler_gesamt_numeric
+                        : record.schueler_gesamt;
+                    return parseStudents(source);
+                }
+                default:
+                    return null;
+            }
+        }
+
+        function sortRecords(records) {
+            if (!Array.isArray(records) || !currentSortKey) {
+                return records;
+            }
+            const direction = currentSortDirection === 'desc' ? -1 : 1;
+            const key = currentSortKey;
+            records.sort((a, b) => {
+                const valueA = getSortValue(a, key);
+                const valueB = getSortValue(b, key);
+                if (valueA == null && valueB == null) {
+                    return 0;
+                }
+                if (valueA == null) {
+                    return 1;
+                }
+                if (valueB == null) {
+                    return -1;
+                }
+                if (valueA < valueB) {
+                    return -1 * direction;
+                }
+                if (valueA > valueB) {
+                    return 1 * direction;
+                }
+                return 0;
+            });
+            return records;
+        }
+
+        function updateSortIndicators() {
+            document.querySelectorAll('[data-sort-key]').forEach(header => {
+                const indicator = header.querySelector('.sort-indicator');
+                if (header.dataset.sortKey === currentSortKey) {
+                    header.classList.add('active');
+                    header.classList.toggle('asc', currentSortDirection === 'asc');
+                    header.classList.toggle('desc', currentSortDirection === 'desc');
+                    if (indicator) {
+                        indicator.textContent = currentSortDirection === 'desc' ? '↓' : '↑';
+                    }
+                } else {
+                    header.classList.remove('active', 'asc', 'desc');
+                    if (indicator) {
+                        indicator.textContent = '↕';
+                    }
+                }
+            });
+        }
+
+        function setSort(key) {
+            if (!key) {
+                return;
+            }
+            if (currentSortKey === key) {
+                currentSortDirection = currentSortDirection === 'asc' ? 'desc' : 'asc';
+            } else {
+                currentSortKey = key;
+                currentSortDirection = 'desc';
+            }
+            updateTable();
+        }
+
+        function getSelectedIds() {
+            return Array.from(document.querySelectorAll('.record-checkbox:checked')).map(cb => cb.value).filter(Boolean);
+        }
+
+        function getAllRows() {
+            return Array.from(document.querySelectorAll('#schools-body tr[data-school-id]'));
+        }
+
+        function getVisibleRows() {
+            return getAllRows().filter(row => !row.classList.contains('d-none'));
+        }
+
+        function setCheckboxesForRows(rows, state) {
+            rows.forEach(row => {
+                const checkbox = row.querySelector('.record-checkbox');
+                if (checkbox) {
+                    checkbox.checked = state;
+                }
+            });
+            applyVisibilityFilters();
+        }
+
+        function setAllCheckboxes(state) {
+            setCheckboxesForRows(getAllRows(), state);
+            if (selectMaster) {
+                selectMaster.checked = state;
+                selectMaster.indeterminate = false;
+            }
+        }
+
+        function syncMasterCheckbox() {
+            const visibleRows = getVisibleRows();
+            if (!visibleRows.length) {
+                if (selectMaster) {
+                    selectMaster.checked = false;
+                    selectMaster.indeterminate = false;
+                }
+                return;
+            }
+            const checkboxes = visibleRows
+                .map(row => row.querySelector('.record-checkbox'))
+                .filter(cb => cb);
+            if (!checkboxes.length) {
+                if (selectMaster) {
+                    selectMaster.checked = false;
+                    selectMaster.indeterminate = false;
+                }
+                return;
+            }
+            const checked = checkboxes.filter(cb => cb.checked);
+            if (checked.length === 0) {
+                selectMaster.checked = false;
+                selectMaster.indeterminate = false;
+            } else if (checked.length === checkboxes.length) {
+                selectMaster.checked = true;
+                selectMaster.indeterminate = false;
+            } else {
+                selectMaster.indeterminate = true;
+            }
+        }
+
+        function rebuildRecordIndexFromDom() {
+            recordIndex.clear();
+            document.querySelectorAll('#schools-body tr[data-school-id]').forEach(row => {
+                const id = row.dataset.schoolId;
+                if (!id) {
+                    return;
+                }
+                const name = row.dataset.schoolLabel || row.querySelector('.school-name')?.textContent?.trim() || '';
+                const homepage = row.querySelector('.school-url a')?.href || '';
+                const studentsValue = row.dataset.students ? Number(row.dataset.students) : null;
+                recordIndex.set(id, {
+                    schul_id: id,
+                    schulname: name,
+                    homepage,
+                    status: row.dataset.status || '',
+                    suggested_url: row.dataset.suggestedUrl || '',
+                    site_scope: row.dataset.siteScope || SITE_SCOPE_UNKNOWN,
+                    schueler_gesamt_numeric: Number.isFinite(studentsValue) ? studentsValue : null,
+                });
+            });
+        }
+
+        function updateTable(records) {
+            if (!tableBody) {
+                return;
+            }
+            if (Array.isArray(records)) {
+                baseRecords = records.slice();
+            }
+            const source = Array.isArray(baseRecords) ? baseRecords.slice() : [];
+            sortRecords(source);
+            currentRecords = source;
+            tableBody.innerHTML = '';
+            recordIndex.clear();
+            currentRecords.forEach(record => {
+                const row = document.createElement('tr');
+                const schoolId = record?.schul_id ?? '';
+                row.dataset.schoolId = schoolId;
+                row.dataset.status = record?.status ?? '';
+                row.dataset.schoolLabel = record?.schulname ?? '';
+                const suggestionUrl = record?.quality?.suggested_url ? String(record.quality.suggested_url) : '';
+                const suggestionConfidence = record?.quality?.suggested_confidence;
+                const suggestionConfidenceText = suggestionConfidence != null && !Number.isNaN(Number(suggestionConfidence))
+                    ? `<div class="text-muted quality-note">Sicherheit: ${Number(suggestionConfidence).toFixed(2)}</div>`
+                    : '';
+                const suggestionHtml = suggestionUrl
+                    ? `<a href="${escapeHtml(suggestionUrl)}" target="_blank" rel="noopener">${formatUrl(suggestionUrl)}</a>${suggestionConfidenceText}`
+                    : '<span class="text-muted">—</span>';
+                const homepage = record?.homepage ? String(record.homepage) : '';
+                const scopeValue = normalizeScope(record?.site_scope ?? record?.quality?.site_scope);
+                const scopeReason = record?.site_scope_reason || record?.quality?.site_scope_reason || '';
+                const scopeBadge = buildScopeBadge(record, scopeValue, scopeReason);
+                const homepageHtml = (homepage
+                    ? `<a href="${escapeHtml(homepage)}" target="_blank" rel="noopener">${formatUrl(homepage)}</a>`
+                    : '<span class="text-muted">—</span>') + scopeBadge;
+                const manualNoteText = record?.quality?.manual_note ? escapeHtml(record.quality.manual_note) : '';
+                const manualNote = manualNoteText ? `<span class="text-muted quality-note d-block">${manualNoteText}</span>` : '';
+                const lastChecked = record?.quality?.last_checked
+                    ? `<time datetime="${escapeHtml(record.quality.last_checked)}">${escapeHtml(record.quality.last_checked)}</time>`
+                    : '<span class="text-muted">Noch nicht geprüft</span>';
+                const statusBadge = `<span class="badge bg-secondary status-badge" data-status="${escapeHtml(record.status)}">${escapeHtml(record.status_label)}</span>`;
+                const correctionBadge = (record?.quality?.correction_applied ?? record?.correction_applied)
+                    ? '<span class="badge bg-success-subtle text-success border border-success-subtle ms-1">Richtiger Wert übernommen</span>'
+                    : '';
+                const inlineStatus = `<div class="school-status">${statusBadge}${correctionBadge}${manualNote}</div>`;
+                const rawStudents = record?.schueler_gesamt != null ? record.schueler_gesamt : record?.schueler_gesamt_numeric;
+                const studentsNumeric = parseStudents(
+                    record?.schueler_gesamt_numeric != null ? record.schueler_gesamt_numeric : rawStudents
+                );
+                const studentsDisplay = formatStudentsDisplay(rawStudents, studentsNumeric);
+
+                row.dataset.hasSuggestion = suggestionUrl ? '1' : '';
+                row.dataset.suggestedUrl = suggestionUrl;
+                row.dataset.correctionApplied = record?.quality?.correction_applied || record?.correction_applied ? '1' : '';
+                row.dataset.siteScope = scopeValue;
+                row.dataset.siteScopeReason = scopeReason;
+                row.dataset.students = studentsNumeric != null ? String(studentsNumeric) : '';
+
+                row.innerHTML = `
+                    <td class="text-nowrap">
+                        <div class="dropdown">
+                            <button class="btn btn-sm btn-outline-primary dropdown-toggle" type="button" data-bs-toggle="dropdown" aria-expanded="false">
+                                Aktionen
+                            </button>
+                            <ul class="dropdown-menu">
+                                <li><button type="button" class="dropdown-item" data-action="details">Details ansehen</button></li>
+                                <li><button type="button" class="dropdown-item" data-action="accept" ${suggestionUrl ? '' : 'disabled'}>Vorschlag übernehmen</button></li>
+                                <li><button type="button" class="dropdown-item" data-action="edit">URL ändern</button></li>
+                                <li><hr class="dropdown-divider"></li>
+                                <li><button type="button" class="dropdown-item" data-action="mark-ok">Als korrekt markieren</button></li>
+                                <li><button type="button" class="dropdown-item" data-action="ignore">Ignorieren</button></li>
+                                <li><button type="button" class="dropdown-item" data-action="recheck">Erneut prüfen</button></li>
+                            </ul>
+                        </div>
+                    </td>
+                    <td><input type="checkbox" class="form-check-input record-checkbox" value="${escapeHtml(schoolId)}"></td>
+                    <td class="school-cell"><div class="school-url">${homepageHtml}</div>${inlineStatus}<div class="fw-semibold school-name mt-1">${formatSchoolName(record.schulname || '')}</div><div class="school-meta">Ort: ${escapeHtml(record.ort || '')}</div><div class="school-meta small">ID: ${escapeHtml(schoolId)}</div></td>
+                    <td class="text-nowrap text-end students-cell">${studentsDisplay}</td>
+                    <td class="text-nowrap">${suggestionHtml}</td>
+                    <td class="text-nowrap">${lastChecked}</td>
+                `;
+                const indexedRecord = Object.assign({}, record);
+                if (studentsNumeric != null && indexedRecord.schueler_gesamt_numeric == null) {
+                    indexedRecord.schueler_gesamt_numeric = studentsNumeric;
+                }
+                recordIndex.set(schoolId, indexedRecord);
+                tableBody.appendChild(row);
+            });
+            applyVisibilityFilters();
+            updateSortIndicators();
+        }
+
+        function applyVisibilityFilters() {
+            getAllRows().forEach(row => {
+                const status = (row.dataset.status || '').toLowerCase();
+                const corrected = row.dataset.correctionApplied === '1';
+                const scopeRaw = (row.dataset.siteScope || '').toLowerCase();
+                const scope = scopeRaw || siteScopeUnknown;
+                let visible = true;
+                if (currentStatusFilter === 'ok') {
+                    visible = status === 'ok';
+                } else if (currentStatusFilter === 'invalid') {
+                    visible = status === 'invalid';
+                } else if (currentStatusFilter === 'corrected') {
+                    visible = corrected;
+                }
+                if (visible && currentScopeFilter !== 'all') {
+                    if (currentScopeFilter === SITE_SCOPE_EXCLUSIVE || currentScopeFilter === 'exclusive') {
+                        visible = scope === SITE_SCOPE_EXCLUSIVE;
+                    } else if (currentScopeFilter === SITE_SCOPE_SHARED || currentScopeFilter === 'shared') {
+                        visible = scope === SITE_SCOPE_SHARED;
+                    } else if (currentScopeFilter === SITE_SCOPE_UNKNOWN || currentScopeFilter === 'unknown') {
+                        visible = scope === SITE_SCOPE_UNKNOWN;
+                    }
+                }
+                row.classList.toggle('d-none', !visible);
+            });
+            filterButtons.forEach(button => {
+                const value = (button.dataset.filterStatus || 'all').toLowerCase();
+                button.classList.toggle('active', value === currentStatusFilter);
+            });
+            scopeButtons.forEach(button => {
+                const value = (button.dataset.filterScope || 'all').toLowerCase();
+                button.classList.toggle('active', value === currentScopeFilter);
+            });
+            syncMasterCheckbox();
+        }
+
+        function setStatusFilter(value) {
+            currentStatusFilter = (value || 'all').toLowerCase();
+            applyVisibilityFilters();
+        }
+
+        function setScopeFilter(value) {
+            currentScopeFilter = (value || 'all').toLowerCase();
+            applyVisibilityFilters();
+        }
+
+        function performBulkAccept(ids) {
+            const payload = Array.isArray(ids) && ids.length ? { school_ids: ids } : {};
+            return fetch(bulkAcceptUrl, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            }).then(resp => resp.json()).then(data => {
+                if (data.records) {
+                    updateTable(data.records);
+                }
+                if (data.summary) {
+                    const summary = data.summary || {};
+                    appendMessage(`Übernommen: ${summary.applied || 0}, ohne Vorschlag: ${summary.skipped || 0}, Fehler: ${summary.failed || 0}.`);
+                    if (summary.dry_run) {
+                        appendMessage('Hinweis: Dry-Run aktiv – Stammdaten wurden nicht geändert.');
+                    }
+                }
+                if (data.error) {
+                    appendMessage(data.error);
+                }
+                return data;
+            }).catch(() => {
+                appendMessage('Automatische Übernahme fehlgeschlagen.');
+            });
+        }
+
+        function renderProgressResults(results) {
+            if (!progressResultsBody || !progressResultsSection) {
+                return;
+            }
+            const entries = Array.isArray(results) ? results.filter(item => item && typeof item === 'object') : [];
+            progressResultsBody.innerHTML = '';
+            if (!entries.length) {
+                const empty = document.createElement('tr');
+                empty.innerHTML = '<td colspan="3" class="text-muted">Noch keine Ergebnisse.</td>';
+                progressResultsBody.appendChild(empty);
+                progressResultsSection.hidden = true;
+                return;
+            }
+            progressResultsSection.hidden = false;
+            entries.forEach(result => {
+                const tr = document.createElement('tr');
+                const record = recordIndex.get(result.schul_id || '') || {};
+                const label = result.school_name || record.schulname || result.schul_id || '—';
+                const schoolCell = document.createElement('td');
+                const originalUrl = result.original_url || record.homepage || '';
+                schoolCell.innerHTML = `<div class="fw-semibold">${escapeHtml(label)}</div><div class="small text-muted">ID: ${escapeHtml(result.schul_id || '')}</div>`;
+                if (originalUrl) {
+                    schoolCell.innerHTML += `<div class="small"><a href="${escapeHtml(originalUrl)}" target="_blank" rel="noopener">${formatUrl(originalUrl)}</a></div>`;
+                }
+                tr.appendChild(schoolCell);
+
+                const statusCell = document.createElement('td');
+                const statusKey = (result.status || '').toString();
+                const statusLabel = result.status_label || statusLabels[statusKey] || statusKey || '—';
+                const confidence = result.confidence != null && !Number.isNaN(Number(result.confidence))
+                    ? `<div class="small text-muted">Bewertung: ${Number(result.confidence).toFixed(2)}</div>`
+                    : '';
+                const scopeValue = normalizeScope(result.site_scope || result.siteScope);
+                const scopeLabel = result.site_scope_label || siteScopeLabels[scopeValue] || siteScopeLabels[SITE_SCOPE_UNKNOWN];
+                statusCell.innerHTML = `<span class="badge bg-secondary">${escapeHtml(statusLabel)}</span>${confidence}<div class="small text-muted">${escapeHtml(scopeLabel)}</div>`;
+                tr.appendChild(statusCell);
+
+                const suggestionCell = document.createElement('td');
+                if (result.suggested_url) {
+                    const confidenceSuggestion = result.suggested_confidence != null && !Number.isNaN(Number(result.suggested_confidence))
+                        ? `<div class="small text-muted">Sicherheit: ${Number(result.suggested_confidence).toFixed(2)}</div>`
+                        : '';
+                    const reason = result.suggested_reason ? `<div class="small text-muted">${escapeHtml(result.suggested_reason)}</div>` : '';
+                    suggestionCell.innerHTML = `<a href="${escapeHtml(result.suggested_url)}" target="_blank" rel="noopener">${formatUrl(result.suggested_url)}</a>${confidenceSuggestion}${reason}`;
+                } else {
+                    suggestionCell.innerHTML = '<span class="text-muted">—</span>';
+                }
+                tr.appendChild(suggestionCell);
+
+                progressResultsBody.appendChild(tr);
+            });
+        }
+
+        const densityToggle = document.getElementById('toggle-density');
+        const tableEl = document.getElementById('schools-table');
+
+        if (densityToggle && tableEl) {
+            densityToggle.addEventListener('click', () => {
+                tableEl.classList.toggle('compact-rows');
+                const compact = tableEl.classList.contains('compact-rows');
+                densityToggle.dataset.mode = compact ? 'normal' : 'compact';
+                densityToggle.textContent = compact ? 'Normale Zeilen' : 'Kompakte Zeilen';
+            });
+        }
+
+        function refreshData() {
+            fetch('{{ url_for('data_quality_data') }}').then(resp => resp.json()).then(data => {
+                if (data.records) {
+                    updateTable(data.records);
+                }
+            }).catch(() => {
+                // ignore errors silently
+            });
+        }
+
+        function renderMessageBuffer() {
+            if (!progressMessages) return;
+            progressMessages.innerHTML = '';
+            messageBuffer.slice(-10).forEach(msg => {
+                const li = document.createElement('li');
+                li.textContent = msg;
+                progressMessages.appendChild(li);
+            });
+        }
+
+        function clearMessageBuffer() {
+            messageBuffer.length = 0;
+            renderMessageBuffer();
+        }
+
+        function setMessagesFromStatus(messages) {
+            if (!Array.isArray(messages)) {
+                clearMessageBuffer();
+                return;
+            }
+            messageBuffer.length = 0;
+            messages.forEach(msg => {
+                if (msg != null && msg !== '') {
+                    messageBuffer.push(String(msg));
+                }
+            });
+            if (messageBuffer.length > 50) {
+                messageBuffer.splice(0, messageBuffer.length - 50);
+            }
+            renderMessageBuffer();
+        }
+
+        function resetProgress() {
+            currentJobId = null;
+            if (cancelBtn) {
+                cancelBtn.disabled = true;
+            }
+            progressContainer.hidden = true;
+            progressBar.style.width = '0%';
+            progressPercent.textContent = '0%';
+            progressSummary.textContent = '';
+            progressLabel.textContent = 'Prüfung läuft …';
+            clearMessageBuffer();
+            renderProgressResults([]);
+            if (pollTimer) {
+                clearInterval(pollTimer);
+                pollTimer = null;
+            }
+        }
+
+        function appendMessage(text) {
+            if (text == null || text === '') return;
+            messageBuffer.push(String(text));
+            if (messageBuffer.length > 50) {
+                messageBuffer.splice(0, messageBuffer.length - 50);
+            }
+            renderMessageBuffer();
+        }
+
+        function applyStatus(status) {
+            if (!status) {
+                return;
+            }
+            progressContainer.hidden = false;
+            const percent = Number(status.progress_percent) || 0;
+            const processed = Number(status.processed) || 0;
+            const total = Number(status.total) || 0;
+            progressBar.style.width = `${percent}%`;
+            progressPercent.textContent = `${percent}%`;
+            progressSummary.textContent = `${processed} von ${total} Datensätzen geprüft.`;
+            if (status.current_school) {
+                progressLabel.textContent = `Aktuell: ${status.current_school}`;
+            } else if (status.completed) {
+                progressLabel.textContent = 'Prüfung abgeschlossen';
+            } else {
+                progressLabel.textContent = 'Prüfung läuft …';
+            }
+            if (cancelBtn) {
+                cancelBtn.disabled = Boolean(status.completed);
+            }
+            setMessagesFromStatus(status.messages || []);
+            if (Array.isArray(status.results)) {
+                renderProgressResults(status.results);
+            }
+        }
+
+        function pollStatus() {
+            if (!currentJobId) return;
+            fetch(`{{ url_for('data_quality_status', job_id='__JOB__') }}`.replace('__JOB__', currentJobId))
+                .then(resp => resp.json())
+                .then(status => {
+                    if (status.error) {
+                        appendMessage(status.error);
+                        resetProgress();
+                        refreshData();
+                        return;
+                    }
+                    applyStatus(status);
+                    if (status.completed) {
+                        resetProgress();
+                        refreshData();
+                    }
+                })
+                .catch(() => {
+                    appendMessage('Status konnte nicht abgefragt werden.');
+                });
+        }
+
+        function resumeActiveJob() {
+            if (!jobsEndpoint) {
+                return;
+            }
+            fetch(jobsEndpoint)
+                .then(resp => resp.json())
+                .then(data => {
+                    const jobs = Array.isArray(data.jobs) ? data.jobs : [];
+                    const activeJobs = jobs.filter(job => job && job.completed === false);
+                    if (!activeJobs.length) {
+                        return;
+                    }
+                    activeJobs.sort((a, b) => {
+                        const aTs = Date.parse(a.started_at || '') || 0;
+                        const bTs = Date.parse(b.started_at || '') || 0;
+                        return bTs - aTs;
+                    });
+                    const job = activeJobs[0];
+                    currentJobId = job.job_id;
+                    applyStatus(job);
+                    if (pollTimer) {
+                        clearInterval(pollTimer);
+                    }
+                    pollTimer = setInterval(pollStatus, 4000);
+                    pollStatus();
+                })
+                .catch(() => {
+                    // ignore errors silently
+                });
+        }
+
+        function sendQualityCheckRequest(ids, options = {}) {
+            if (!ids.length) {
+                appendMessage('Bitte wählen Sie mindestens eine Schule aus.');
+                return Promise.resolve();
+            }
+            renderProgressResults([]);
+            const payload = { school_ids: ids };
+            const mode = options.mode ? String(options.mode) : '';
+            if (mode) {
+                payload.mode = mode;
+            }
+            return fetch('{{ url_for('start_data_quality_job') }}', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            }).then(resp => resp.json()).then(data => {
+                if (data.error) {
+                    appendMessage(data.error);
+                    const handledError = new Error(data.error);
+                    handledError.handled = true;
+                    return Promise.reject(handledError);
+                }
+                currentJobId = data.job_id;
+                cancelBtn.disabled = false;
+                progressContainer.hidden = false;
+                clearMessageBuffer();
+                progressLabel.textContent = options.progressLabel || 'Prüfung läuft …';
+                pollStatus();
+                if (pollTimer) {
+                    clearInterval(pollTimer);
+                }
+                pollTimer = setInterval(pollStatus, 4000);
+                return data;
+            }).catch(error => {
+                if (!error || !error.handled) {
+                    appendMessage('Job konnte nicht gestartet werden.');
+                }
+                throw error;
+            });
+        }
+
+        function startQualityWorkflow() {
+            const ids = getSelectedIds();
+            startBtn.disabled = true;
+            sendQualityCheckRequest(ids).finally(() => {
+                startBtn.disabled = false;
+            });
+        }
+
+        function startSiteScopeWorkflow() {
+            if (!siteScopeBtn) return;
+            const ids = getSelectedIds();
+            siteScopeBtn.disabled = true;
+            sendQualityCheckRequest(ids, {
+                mode: 'site_scope',
+                progressLabel: 'Auftrittstyp wird geprüft …',
+            }).finally(() => {
+                siteScopeBtn.disabled = false;
+            });
+        }
+
+        function startGoogleWorkflow() {
+            if (!googleBtn) return;
+            const ids = getSelectedIds();
+            googleBtn.disabled = true;
+            sendQualityCheckRequest(ids, {
+                mode: 'google_search',
+                progressLabel: 'Google-Suche läuft …',
+            }).finally(() => {
+                googleBtn.disabled = false;
+            });
+        }
+
+        function cancelJob() {
+            if (!currentJobId) return;
+            fetch(`{{ url_for('cancel_data_quality_job', job_id='__JOB__') }}`.replace('__JOB__', currentJobId), {
+                method: 'POST'
+            }).finally(() => {
+                appendMessage('Prüfung wird abgebrochen …');
+            });
+        }
+
+        function openEditModal(schoolId, currentUrl) {
+            if (!editModal) return;
+            editSchoolId.value = schoolId;
+            editInput.value = currentUrl || '';
+            editModal.show();
+            setTimeout(() => editInput.focus(), 150);
+        }
+
+        function openSiteScopeEditor(schoolId, scopeValue, reason) {
+            if (!schoolId) return;
+            const normalized = normalizeScope(scopeValue);
+            if (siteScopeModal && siteScopeForm) {
+                siteScopeSchoolId.value = schoolId;
+                siteScopeReasonInput.value = reason || '';
+                let matched = false;
+                siteScopeChoices.forEach(radio => {
+                    const isMatch = normalizeScope(radio.value) === normalized;
+                    radio.checked = isMatch;
+                    if (isMatch) {
+                        matched = true;
+                    }
+                });
+                if (!matched) {
+                    const fallback = siteScopeChoices.find(radio => normalizeScope(radio.value) === SITE_SCOPE_UNKNOWN);
+                    if (fallback) {
+                        fallback.checked = true;
+                    }
+                }
+                siteScopeModal.show();
+            } else {
+                const nextScope = normalized === SITE_SCOPE_EXCLUSIVE
+                    ? SITE_SCOPE_SHARED
+                    : normalized === SITE_SCOPE_SHARED
+                        ? SITE_SCOPE_UNKNOWN
+                        : SITE_SCOPE_EXCLUSIVE;
+                updateSiteScopeValue(schoolId, nextScope, reason || '');
+            }
+        }
+
+        function openDetails(schoolId, schoolName) {
+            fetch(`{{ url_for('data_quality_details', school_id='__ID__') }}`.replace('__ID__', schoolId))
+                .then(resp => resp.json())
+                .then(data => {
+                    if (data.error) {
+                        detailsContent.textContent = data.error;
+                    } else {
+                        detailsSub.textContent = `${schoolName || 'Schule'} • ID ${schoolId}`;
+                        const history = Array.isArray(data.history) ? data.history : [];
+                        if (!history.length) {
+                            detailsContent.textContent = 'Keine Historie vorhanden.';
+                        } else {
+                            detailsContent.innerHTML = history.map(entry => {
+                                const ts = entry.timestamp ? `<time datetime="${entry.timestamp}">${entry.timestamp}</time>` : '';
+                                const stage = entry.stage ? `<strong>${entry.stage}</strong>` : '';
+                                const detail = entry.detail ? `<p class="mb-1">${entry.detail}</p>` : '';
+                                const reason = entry.reason ? `<p class="mb-1">${entry.reason}</p>` : '';
+                                const signals = Array.isArray(entry.signals) && entry.signals.length
+                                    ? `<ul class="mb-1">${entry.signals.map(sig => `<li>${sig}</li>`).join('')}</ul>`
+                                    : '';
+                                return `<div class="history-entry">${stage} ${ts}${detail}${reason}${signals}</div>`;
+                            }).join('');
+                        }
+                    }
+                    if (detailsPanel) {
+                        detailsPanel.show();
+                    }
+                }).catch(() => {
+                    detailsContent.textContent = 'Details konnten nicht geladen werden.';
+                    if (detailsPanel) {
+                        detailsPanel.show();
+                    }
+                });
+        }
+
+        function triggerAction(schoolId, action, payload = {}) {
+            const body = Object.assign({ action }, payload);
+            return fetch(`{{ url_for('manage_data_quality_record', school_id='__ID__') }}`.replace('__ID__', schoolId), {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(body)
+            }).then(resp => resp.json()).then(data => {
+                if (data.records) {
+                    updateTable(data.records);
+                }
+                if (data.job_id) {
+                    currentJobId = data.job_id;
+                    cancelBtn.disabled = false;
+                    progressContainer.hidden = false;
+                    clearMessageBuffer();
+                    pollStatus();
+                    if (pollTimer) {
+                        clearInterval(pollTimer);
+                    }
+                    pollTimer = setInterval(pollStatus, 4000);
+                }
+                if (data.error) {
+                    appendMessage(data.error);
+                }
+                return data;
+            }).catch(() => {
+                appendMessage('Aktion fehlgeschlagen.');
+                return null;
+            });
+        }
+
+        function updateSiteScopeValue(schoolId, scopeValue, reason) {
+            return triggerAction(schoolId, 'update_site_scope', {
+                site_scope: scopeValue,
+                reason: reason || ''
+            });
+        }
+
+        function openBulkScopeDialog(ids) {
+            if (!Array.isArray(ids) || !ids.length) {
+                appendMessage('Bitte wählen Sie mindestens eine Schule aus.');
+                if (bulkScopeIdsField) {
+                    bulkScopeIdsField.value = '';
+                }
+                return;
+            }
+            pendingBulkScopeIds = ids.slice();
+            if (bulkScopeCount) {
+                bulkScopeCount.textContent = String(ids.length);
+            }
+            if (bulkScopeIdsField) {
+                bulkScopeIdsField.value = ids.join(',');
+            }
+            if (bulkScopeModal) {
+                let hasChecked = false;
+                bulkScopeChoices.forEach(radio => {
+                    if (radio.checked) {
+                        hasChecked = true;
+                    }
+                });
+                if (!hasChecked) {
+                    const fallback = bulkScopeChoices[0];
+                    if (fallback) {
+                        fallback.checked = true;
+                    }
+                }
+                bulkScopeModal.show();
+            } else {
+                const fallbackChoice = window.prompt('Auftrittstyp (exclusive/shared/unknown):', 'exclusive');
+                if (!fallbackChoice) {
+                    pendingBulkScopeIds = [];
+                    return;
+                }
+                submitBulkScope(ids, fallbackChoice);
+            }
+        }
+
+        function readIdsFromField() {
+            if (!bulkScopeIdsField) {
+                return [];
+            }
+            return bulkScopeIdsField.value
+                .split(',')
+                .map(value => value.trim())
+                .filter(Boolean);
+        }
+
+        function submitBulkScope(ids, scopeValue, reason) {
+            let targetIds = Array.isArray(ids) ? ids.filter(Boolean) : [];
+            if (!targetIds.length) {
+                targetIds = readIdsFromField();
+            }
+            if (!targetIds.length) {
+                targetIds = getSelectedIds();
+            }
+            if (!targetIds.length) {
+                appendMessage('Bitte wählen Sie mindestens eine Schule aus.');
+                return Promise.resolve(null);
+            }
+            const normalised = normalizeScope(scopeValue || SITE_SCOPE_UNKNOWN);
+            const payload = {
+                school_ids: targetIds,
+                site_scope: normalised,
+            };
+            if (typeof reason === 'string' && reason.trim()) {
+                payload.reason = reason.trim();
+            }
+            return fetch(bulkSiteScopeUrl, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            }).then(resp => resp.json()).then(data => {
+                if (!data) {
+                    return null;
+                }
+                if (data.error) {
+                    appendMessage(data.error);
+                }
+                if (data.message) {
+                    appendMessage(data.message);
+                }
+                if (data.summary && typeof data.summary.updated === 'number') {
+                    const updatedCount = Number(data.summary.updated) || 0;
+                    const totalCount = Number(data.summary.processed || data.summary.requested || targetIds.length) || targetIds.length;
+                    if (updatedCount > 0) {
+                        const note = updatedCount === 1
+                            ? '1 Schule aktualisiert.'
+                            : `${updatedCount} Schulen aktualisiert.`;
+                        appendMessage(`Auftrittstyp gesetzt: ${note}`);
+                    } else if (totalCount > 0) {
+                        appendMessage('Keine Datensätze wurden geändert.');
+                    }
+                    if (typeof data.summary.skipped === 'number' && data.summary.skipped > 0) {
+                        const skippedCount = Number(data.summary.skipped);
+                        appendMessage(`${skippedCount} Schule${skippedCount === 1 ? '' : 'n'} übersprungen.`);
+                    }
+                }
+                if (Array.isArray(data.records)) {
+                    updateTable(data.records);
+                }
+                return data;
+            }).catch(() => {
+                appendMessage('Sammelaktualisierung des Auftrittstyps fehlgeschlagen.');
+                return null;
+            }).finally(() => {
+                pendingBulkScopeIds = [];
+                if (bulkScopeIdsField) {
+                    bulkScopeIdsField.value = '';
+                }
+            });
+        }
+
+        selectAllBtn?.addEventListener('click', () => setAllCheckboxes(true));
+        selectVisibleBtn?.addEventListener('click', () => setCheckboxesForRows(getVisibleRows(), true));
+        selectNoneBtn?.addEventListener('click', () => setAllCheckboxes(false));
+        selectMaster?.addEventListener('change', event => setCheckboxesForRows(getVisibleRows(), event.target.checked));
+        startBtn?.addEventListener('click', startQualityWorkflow);
+        siteScopeBtn?.addEventListener('click', startSiteScopeWorkflow);
+        bulkSiteScopeBtn?.addEventListener('click', () => openBulkScopeDialog(getSelectedIds()));
+        googleBtn?.addEventListener('click', startGoogleWorkflow);
+        cancelBtn?.addEventListener('click', cancelJob);
+        refreshBtn?.addEventListener('click', refreshData);
+        filterButtons.forEach(button => {
+            button.addEventListener('click', () => setStatusFilter(button.dataset.filterStatus || 'all'));
+        });
+        scopeButtons.forEach(button => {
+            button.addEventListener('click', () => setScopeFilter(button.dataset.filterScope || 'all'));
+        });
+        document.querySelectorAll('[data-sort-key]').forEach(header => {
+            header.addEventListener('click', () => setSort(header.dataset.sortKey || ''));
+            header.addEventListener('keydown', event => {
+                if (event.key === 'Enter' || event.key === ' ') {
+                    event.preventDefault();
+                    setSort(header.dataset.sortKey || '');
+                }
+            });
+        });
+        siteScopeForm?.addEventListener('submit', event => {
+            event.preventDefault();
+            const schoolId = siteScopeSchoolId?.value || '';
+            if (!schoolId) {
+                if (siteScopeModal) {
+                    siteScopeModal.hide();
+                }
+                return;
+            }
+            const selected = siteScopeChoices.find(radio => radio.checked);
+            const scopeValue = normalizeScope(selected ? selected.value : SITE_SCOPE_UNKNOWN);
+            const reason = siteScopeReasonInput?.value || '';
+            updateSiteScopeValue(schoolId, scopeValue, reason).finally(() => {
+                if (siteScopeModal) {
+                    siteScopeModal.hide();
+                }
+            });
+        });
+
+        bulkScopeForm?.addEventListener('submit', event => {
+            event.preventDefault();
+            let ids = pendingBulkScopeIds.slice();
+            if (!ids.length) {
+                ids = readIdsFromField();
+            }
+            if (!ids.length) {
+                ids = getSelectedIds();
+            }
+            if (!ids.length) {
+                appendMessage('Bitte wählen Sie mindestens eine Schule aus.');
+                if (bulkScopeModal) {
+                    bulkScopeModal.hide();
+                }
+                return;
+            }
+            const selected = bulkScopeChoices.find(radio => radio.checked);
+            const scopeValue = normalizeScope(selected ? selected.value : SITE_SCOPE_UNKNOWN);
+            submitBulkScope(ids, scopeValue).finally(() => {
+                if (bulkScopeModal) {
+                    bulkScopeModal.hide();
+                }
+            });
+        });
+
+        if (bulkScopeModalEl && window.bootstrap && window.bootstrap.Modal) {
+            bulkScopeModalEl.addEventListener('hidden.bs.modal', () => {
+                pendingBulkScopeIds = [];
+                if (bulkScopeIdsField) {
+                    bulkScopeIdsField.value = '';
+                }
+            });
+        }
+
+        acceptInvalidBtn?.addEventListener('click', () => {
+            acceptInvalidBtn.disabled = true;
+            performBulkAccept(null).finally(() => {
+                acceptInvalidBtn.disabled = false;
+            });
+        });
+
+        tableBody?.addEventListener('change', event => {
+            if (event.target.classList.contains('record-checkbox')) {
+                syncMasterCheckbox();
+            }
+        });
+
+        tableBody?.addEventListener('click', event => {
+            const badge = event.target.closest('.site-scope-badge');
+            if (!badge) {
+                return;
+            }
+            event.preventDefault();
+            if (typeof event.stopImmediatePropagation === 'function') {
+                event.stopImmediatePropagation();
+            }
+            const schoolId = badge.dataset.schoolId || '';
+            const scopeValue = badge.dataset.siteScope || SITE_SCOPE_UNKNOWN;
+            const reason = badge.dataset.scopeReason || '';
+            openSiteScopeEditor(schoolId, scopeValue, reason);
+            return;
+        });
+
+        tableBody?.addEventListener('click', event => {
+            const button = event.target.closest('button[data-action]');
+            if (!button || button.disabled) return;
+            const row = button.closest('tr');
+            if (!row) return;
+            const schoolId = row.dataset.schoolId;
+            const homepage = row.querySelector('.school-url a')?.href || '';
+            const schoolName = row.dataset.schoolLabel || row.querySelector('.school-name')?.textContent?.trim() || '';
+            const action = button.dataset.action;
+            if (action === 'details') {
+                openDetails(schoolId, schoolName);
+            } else if (action === 'accept') {
+                triggerAction(schoolId, 'accept_suggestion');
+            } else if (action === 'edit') {
+                openEditModal(schoolId, homepage);
+            } else if (action === 'mark-ok') {
+                triggerAction(schoolId, 'mark_ok');
+            } else if (action === 'ignore') {
+                triggerAction(schoolId, 'ignore');
+            } else if (action === 'recheck') {
+                triggerAction(schoolId, 'recheck');
+            }
+        });
+
+        editForm?.addEventListener('submit', event => {
+            event.preventDefault();
+            const id = editSchoolId.value;
+            const url = editInput.value.trim();
+            if (!id || !url) return;
+            triggerAction(id, 'update_url', { url });
+            editModal?.hide();
+        });
+
+        document.addEventListener('visibilitychange', () => {
+            if (document.visibilityState === 'visible' && currentJobId) {
+                pollStatus();
+            }
+        });
+
+        window.addEventListener('beforeunload', () => {
+            if (pollTimer) {
+                clearInterval(pollTimer);
+            }
+        });
+
+        const initialRecords = {{ records|tojson }};
+        if (Array.isArray(initialRecords)) {
+            updateTable(initialRecords);
+        } else {
+            rebuildRecordIndexFromDom();
+            applyVisibilityFilters();
+            updateSortIndicators();
+        }
+        resumeActiveJob();
+    })();
+</script>
+{% include '_data_management_modals.html' %}
+</body>
+</html>
