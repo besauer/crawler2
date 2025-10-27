@@ -1,0 +1,674 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+    <meta charset="UTF-8">
+    <title>Schul-Webseiten Crawler</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css"
+          integrity="sha384-QWTKZyjpPEjISv5WaRU9OFeRpok6YctnYmDr5pNlyT2bRjXh0JMhjY6hW+ALEwIH"
+          crossorigin="anonymous">
+    <style>
+        body { padding-top: 0; }
+        textarea { min-height: 120px; }
+        .results-table td { vertical-align: top; }
+    </style>
+</head>
+<body>
+<nav class="navbar navbar-expand-lg navbar-light bg-light border-bottom">
+    <div class="container">
+        <a class="navbar-brand" href="{{ url_for('index') }}">Schul-Crawler</a>
+        <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#mainNav"
+                aria-controls="mainNav" aria-expanded="false" aria-label="Navigation umschalten">
+            <span class="navbar-toggler-icon"></span>
+        </button>
+        <div class="collapse navbar-collapse" id="mainNav">
+            <ul class="navbar-nav ms-auto mb-2 mb-lg-0">
+                <li class="nav-item">
+                    <a class="nav-link {% if active_page == 'search' %}active{% endif %}"
+                       {% if active_page == 'search' %}aria-current="page"{% endif %}
+                       href="{{ url_for('index') }}">Suche</a>
+                </li>
+                <li class="nav-item">
+                    <a class="nav-link {% if active_page == 'stammdaten' %}active{% endif %}"
+                       {% if active_page == 'stammdaten' %}aria-current="page"{% endif %}
+                       href="{{ url_for('stammdaten') }}">Stammdaten</a>
+                </li>
+            </ul>
+        </div>
+    </div>
+</nav>
+<main class="container py-4">
+    <h1 class="mb-4">Crawler für Schul-Webseiten</h1>
+    <p class="text-muted">Durchsuchen Sie eine Website systematisch nach bestimmten Stichwörtern. Die Anwendung
+        respektiert standardmäßig <code>robots.txt</code> und bleibt innerhalb der Startdomain; bei Bedarf kann die
+        robots-Regel im Formular deaktiviert werden.</p>
+
+    <p class="text-muted small">
+        {% if stammdaten_records %}
+            {{ stammdaten_records|length }} Schulen in den Stammdaten verfügbar.
+        {% else %}
+            Keine Stammdaten importiert.
+        {% endif %}
+    </p>
+
+    {% if error %}
+        <div class="alert alert-danger" role="alert">{{ error }}</div>
+    {% endif %}
+
+    <form method="post" class="mb-4">
+        <div class="mb-3">
+            <label class="form-label">Schulen aus den Stammdaten auswählen</label>
+            {% if not stammdaten_records %}
+                <div class="alert alert-warning" role="alert">
+                    Bitte importieren Sie zuerst eine Excel-Datei mit Stammdaten.
+                </div>
+            {% else %}
+                <div class="d-flex flex-wrap gap-2 mb-2">
+                    <button type="button" class="btn btn-outline-primary btn-sm" id="select-all">Alle auswählen</button>
+                    <button type="button" class="btn btn-outline-secondary btn-sm" id="select-none">Keine auswählen</button>
+                </div>
+                <div class="row g-2 mb-3">
+                    {% for field in stammdaten_fields %}
+                        <div class="col-md-4">
+                            <label class="form-label mb-1">{{ field.label }}</label>
+                            <div class="input-group input-group-sm">
+                                <input type="text" class="form-control filter-input" id="filter-{{ field.key }}" placeholder="Wert enthält ..." data-field="{{ field.key }}">
+                                <button type="button" class="btn btn-outline-primary filter-select" data-field="{{ field.key }}">Auswählen</button>
+                            </div>
+                        </div>
+                    {% endfor %}
+                </div>
+                <div class="form-text mb-2">Ausgewählte Schulen: <span id="selection-count">0</span></div>
+                <div class="table-responsive" style="max-height: 320px; overflow-y: auto;">
+                    <table class="table table-sm table-hover align-middle mb-0">
+                        <thead class="table-light">
+                        <tr>
+                            <th scope="col" style="width: 60px;">Auswahl</th>
+                            <th scope="col">Schul&nbsp;ID</th>
+                            <th scope="col">Träger</th>
+                            <th scope="col">Name</th>
+                            <th scope="col">Ort</th>
+                            <th scope="col">Anzahl Schüler</th>
+                            <th scope="col">Anzahl Klassen</th>
+                            <th scope="col">Homepage</th>
+                        </tr>
+                        </thead>
+                        <tbody>
+                        {% for record in stammdaten_records %}
+                            <tr>
+                                <td>
+                                    <div class="form-check m-0">
+                                        <input class="form-check-input school-checkbox" type="checkbox" value="{{ record.homepage }}" id="school-{{ loop.index }}" name="start_urls"
+                                               {% if record.homepage in selected_homepages %}checked{% endif %}
+                                               {% for field in stammdaten_fields %}
+                                                   data-{{ field.key|replace('_', '-') }}="{{ record[field.key]|default('', true) }}"
+                                               {% endfor %}>
+                                        <label class="form-check-label small" for="school-{{ loop.index }}">&nbsp;</label>
+                                    </div>
+                                </td>
+                                <td>{{ record.schul_id or "–" }}</td>
+                                <td>{{ record.traeger or "–" }}</td>
+                                <td>{{ record.name or "–" }}</td>
+                                <td>{{ record.ort or "–" }}</td>
+                                <td>{{ record.anzahl_schueler if record.anzahl_schueler is not none else "–" }}</td>
+                                <td>{{ record.anzahl_klassen if record.anzahl_klassen is not none else "–" }}</td>
+                                <td>
+                                    {% if record.homepage %}
+                                        <a href="{{ record.homepage }}" target="_blank" rel="noopener">{{ record.homepage }}</a>
+                                    {% else %}
+                                        –
+                                    {% endif %}
+                                </td>
+                            </tr>
+                        {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+            {% endif %}
+        </div>
+        <div class="mb-3">
+            <label for="keywords" class="form-label">Suchstichwörter (ein Wort pro Zeile)</label>
+            <textarea class="form-control" id="keywords" name="keywords" required>{{ keywords_input }}</textarea>
+        </div>
+        <div class="mb-3">
+            <label for="max_pages" class="form-label">Maximale Seitenanzahl pro Start-URL</label>
+            <input type="number" class="form-control" id="max_pages" name="max_pages" min="1"
+                   value="{{ max_pages }}">
+            <div class="form-text">Begrenzt die Anzahl der Seiten, die pro Start-URL analysiert werden (Standard: {{ max_pages }}).</div>
+        </div>
+        <div class="mb-3">
+            <label for="concurrency" class="form-label">Parallele Seitenabrufe</label>
+            <input type="number" class="form-control" id="concurrency" name="concurrency" min="1" max="{{ max_concurrency }}"
+                   value="{{ concurrency }}">
+            <div class="form-text">Anzahl der Seiten, die gleichzeitig geladen werden (maximal {{ max_concurrency }}).</div>
+        </div>
+        <div class="form-check form-switch mb-3">
+            <input class="form-check-input" type="checkbox" role="switch" id="respect_robots" name="respect_robots"
+                   {% if respect_robots %}checked{% endif %}>
+            <label class="form-check-label" for="respect_robots">robots.txt respektieren</label>
+            <div class="form-text">Wenn deaktiviert, werden auch Seiten durchsucht, die in <code>robots.txt</code> gesperrt sind.</div>
+        </div>
+        <div class="row g-3 mb-3">
+            <div class="col-md-6">
+                <label for="start_date" class="form-label">Veröffentlichungsdatum ab (optional)</label>
+                <input type="date" class="form-control" id="start_date" name="start_date" value="{{ start_date_input }}">
+                <div class="form-text">Seiten ohne Datum werden ausgelassen, außer der Startseite.</div>
+            </div>
+            <div class="col-md-6">
+                <label for="end_date" class="form-label">Veröffentlichungsdatum bis (optional)</label>
+                <input type="date" class="form-control" id="end_date" name="end_date" value="{{ end_date_input }}">
+            </div>
+        </div>
+        <button type="submit" class="btn btn-primary" {% if not stammdaten_records %}disabled{% endif %}>Crawler starten</button>
+    </form>
+
+    <div id="progress-section" class="mb-4" {% if not job_id %}style="display:none"{% endif %}>
+        <h2>Fortschritt</h2>
+        <p class="mb-1"><strong>Status:</strong> <span id="status-text">Wird vorbereitet ...</span></p>
+        <p class="mb-1">Such-URLs: <span id="start-progress">0/0</span></p>
+        <p class="mb-1">Gefundene URLs: <span id="found-count">0</span></p>
+        <p class="mb-1">Aktuelle Seite: <span id="current-page">–</span></p>
+        <p class="mb-3">Warteschlange: <span id="queue-length">0</span> Seiten</p>
+        <div class="progress" role="progressbar" aria-valuemin="0" aria-valuemax="100">
+            <div id="progress-bar" class="progress-bar progress-bar-striped progress-bar-animated"
+                 style="width: 0%;">0%</div>
+        </div>
+        <div class="d-flex gap-2 flex-wrap mt-3">
+            <button type="button" class="btn btn-outline-danger" id="cancel-button">Suche abbrechen</button>
+            <button type="button" class="btn btn-outline-secondary" id="save-button" disabled>Suche speichern</button>
+        </div>
+        <div id="action-status" class="small text-muted mt-2"></div>
+        <div class="mt-3">
+            <h3 class="h5">Zuletzt geprüfte Seiten</h3>
+            <ul id="recent-pages" class="list-unstyled small mb-0">
+            </ul>
+        </div>
+    </div>
+
+    <div id="results-container" class="mb-4" style="display:none;">
+        <h2>Gefundene Seiten</h2>
+        <div class="table-responsive">
+            <table class="table table-striped results-table" id="results-table">
+                <thead>
+                <tr>
+                    <th>Ursprungs-URL</th>
+                    <th>Gefundene URL</th>
+                </tr>
+                </thead>
+                <tbody>
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <div id="no-results-alert" class="alert alert-info" role="alert" style="display:none;">
+        Keine Treffer für die angegebenen Stichwörter gefunden.
+    </div>
+
+    <div class="mb-3">
+        <button type="button" class="btn btn-secondary" id="load-saved-searches">Alte Suchen anzeigen</button>
+    </div>
+    <div id="saved-searches-section" style="display:none;">
+        <h2>Gespeicherte Suchläufe</h2>
+        <div id="saved-searches-empty" class="alert alert-secondary" role="alert" style="display:none;">
+            Es wurden noch keine Suchläufe gespeichert.
+        </div>
+        <div class="accordion" id="saved-searches-accordion"></div>
+    </div>
+</main>
+
+<script>
+    (function () {
+        const schoolCheckboxes = Array.from(document.querySelectorAll('.school-checkbox'));
+        const selectionCount = document.getElementById('selection-count');
+        const selectAllButton = document.getElementById('select-all');
+        const selectNoneButton = document.getElementById('select-none');
+        const filterButtons = document.querySelectorAll('.filter-select');
+        const filterInputs = document.querySelectorAll('.filter-input');
+
+        function updateSelectionCount() {
+            if (!selectionCount) {
+                return;
+            }
+            const count = schoolCheckboxes.filter(cb => cb.checked).length;
+            selectionCount.textContent = count.toString();
+        }
+
+        function toDatasetKey(field) {
+            return field.replace(/_([a-z])/g, (_, letter) => letter.toUpperCase());
+        }
+
+        if (selectionCount) {
+            updateSelectionCount();
+            schoolCheckboxes.forEach(cb => {
+                cb.addEventListener('change', updateSelectionCount);
+            });
+        }
+
+        if (selectAllButton) {
+            selectAllButton.addEventListener('click', () => {
+                schoolCheckboxes.forEach(cb => {
+                    cb.checked = true;
+                });
+                updateSelectionCount();
+            });
+        }
+
+        if (selectNoneButton) {
+            selectNoneButton.addEventListener('click', () => {
+                schoolCheckboxes.forEach(cb => {
+                    cb.checked = false;
+                });
+                updateSelectionCount();
+            });
+        }
+
+        filterButtons.forEach(button => {
+            button.addEventListener('click', () => {
+                const field = button.dataset.field;
+                if (!field) {
+                    return;
+                }
+                const input = document.querySelector(`#filter-${field}`);
+                if (!input) {
+                    return;
+                }
+                const needle = input.value.trim().toLowerCase();
+                if (!needle) {
+                    return;
+                }
+                const datasetKey = toDatasetKey(field);
+                schoolCheckboxes.forEach(cb => {
+                    const value = (cb.dataset[datasetKey] || '').toLowerCase();
+                    if (value.includes(needle)) {
+                        cb.checked = true;
+                    }
+                });
+                updateSelectionCount();
+            });
+        });
+
+        filterInputs.forEach(input => {
+            input.addEventListener('keydown', event => {
+                if (event.key === 'Enter') {
+                    event.preventDefault();
+                    const field = input.dataset.field;
+                    if (!field) {
+                        return;
+                    }
+                    const button = document.querySelector(`.filter-select[data-field="${field}"]`);
+                    if (button) {
+                        button.click();
+                    }
+                }
+            });
+        });
+    })();
+</script>
+
+{% if job_id %}
+<script>
+    const jobId = "{{ job_id }}";
+    const statusUrl = `/status/${jobId}`;
+    const progressSection = document.getElementById("progress-section");
+    const statusText = document.getElementById("status-text");
+    const startProgress = document.getElementById("start-progress");
+    const foundCount = document.getElementById("found-count");
+    const currentPage = document.getElementById("current-page");
+    const queueLength = document.getElementById("queue-length");
+    const progressBar = document.getElementById("progress-bar");
+    const resultsContainer = document.getElementById("results-container");
+    const resultsTableBody = document.querySelector("#results-table tbody");
+    const noResultsAlert = document.getElementById("no-results-alert");
+    const recentPagesList = document.getElementById("recent-pages");
+    const cancelButton = document.getElementById("cancel-button");
+    const saveButton = document.getElementById("save-button");
+    const actionStatus = document.getElementById("action-status");
+
+    progressSection.style.display = "";
+
+    let pollInterval = null;
+
+    function translateStatus(status, errorMessage) {
+        switch (status) {
+            case "running":
+                return "Crawler läuft";
+            case "finished":
+                return "Suche abgeschlossen";
+            case "cancelling":
+                return "Abbruch wird vorbereitet";
+            case "cancelled":
+                return "Suche abgebrochen";
+            case "error":
+                return errorMessage ? `Fehler: ${errorMessage}` : "Fehler während der Suche";
+            default:
+                return "Wird vorbereitet ...";
+        }
+    }
+
+    function renderResults(results) {
+        resultsTableBody.innerHTML = "";
+        results.forEach(result => {
+            const row = document.createElement("tr");
+            const sourceCell = document.createElement("td");
+            const targetCell = document.createElement("td");
+
+            const sourceLink = document.createElement("a");
+            sourceLink.href = result.source_url;
+            sourceLink.textContent = result.source_url;
+            sourceLink.target = "_blank";
+            sourceLink.rel = "noopener";
+
+            const targetLink = document.createElement("a");
+            targetLink.href = result.target_url;
+            targetLink.textContent = result.target_url;
+            targetLink.target = "_blank";
+            targetLink.rel = "noopener";
+
+            sourceCell.appendChild(sourceLink);
+            targetCell.appendChild(targetLink);
+
+            row.appendChild(sourceCell);
+            row.appendChild(targetCell);
+
+            resultsTableBody.appendChild(row);
+        });
+
+        if (results.length > 0) {
+            resultsContainer.style.display = "";
+            noResultsAlert.style.display = "none";
+        }
+    }
+
+    function updateStatus() {
+        fetch(statusUrl)
+            .then(response => response.json())
+            .then(data => {
+                if (data.error && !data.status) {
+                    statusText.textContent = data.error;
+                    clearInterval(pollInterval);
+                    pollInterval = null;
+                    return;
+                }
+
+                statusText.textContent = translateStatus(data.status, data.error);
+                startProgress.textContent = `${data.processed_start_urls}/${data.total_start_urls}`;
+                foundCount.textContent = data.found_count;
+                currentPage.textContent = data.current_page || "–";
+                queueLength.textContent = data.queue_length ?? 0;
+
+                const percent = data.progress_percent || 0;
+                progressBar.style.width = `${percent}%`;
+                progressBar.textContent = `${percent}%`;
+                progressBar.setAttribute("aria-valuenow", percent);
+
+                if (cancelButton) {
+                    if (data.completed || data.status === "error") {
+                        cancelButton.disabled = true;
+                    } else {
+                        cancelButton.disabled = data.status === "cancelling";
+                    }
+                }
+
+                if (saveButton) {
+                    saveButton.disabled = !data.completed || data.status === "error";
+                }
+
+                if (Array.isArray(data.results)) {
+                    renderResults(data.results);
+                }
+
+                if (Array.isArray(data.recent_pages)) {
+                    recentPagesList.innerHTML = "";
+                    data.recent_pages.slice().reverse().forEach(pageUrl => {
+                        const listItem = document.createElement("li");
+                        const link = document.createElement("a");
+                        link.href = pageUrl;
+                        link.textContent = pageUrl;
+                        link.target = "_blank";
+                        link.rel = "noopener";
+                        listItem.appendChild(link);
+                        recentPagesList.appendChild(listItem);
+                    });
+                    if (data.recent_pages.length === 0) {
+                        const emptyItem = document.createElement("li");
+                        emptyItem.textContent = "Noch keine Seiten geprüft.";
+                        recentPagesList.appendChild(emptyItem);
+                    }
+                }
+
+                if (data.completed) {
+                    clearInterval(pollInterval);
+                    pollInterval = null;
+                    if ((data.results || []).length === 0 && !data.error) {
+                        noResultsAlert.style.display = "";
+                    }
+                    progressBar.classList.remove("progress-bar-animated");
+                }
+            })
+            .catch(() => {
+                statusText.textContent = "Fortschritt konnte nicht abgerufen werden.";
+            });
+    }
+
+    pollInterval = setInterval(updateStatus, 1500);
+    updateStatus();
+
+    if (cancelButton) {
+        cancelButton.addEventListener("click", () => {
+            cancelButton.disabled = true;
+            actionStatus.textContent = "Suche wird abgebrochen ...";
+            fetch(`/cancel/${jobId}`, {method: "POST"})
+                .then(response => response.json())
+                .then(data => {
+                    actionStatus.textContent = data.error ? data.error : "Abbruchsignal gesendet.";
+                })
+                .catch(() => {
+                    actionStatus.textContent = "Abbruch konnte nicht ausgelöst werden.";
+                });
+        });
+    }
+
+    if (saveButton) {
+        saveButton.addEventListener("click", () => {
+            saveButton.disabled = true;
+            actionStatus.textContent = "Suche wird gespeichert ...";
+            fetch(`/save-search/${jobId}`, {method: "POST"})
+                .then(response => response.json())
+                .then(data => {
+                    if (data.error) {
+                        actionStatus.textContent = data.error;
+                        saveButton.disabled = false;
+                    } else {
+                        actionStatus.textContent = "Suche wurde gespeichert.";
+                    }
+                })
+                .catch(() => {
+                    actionStatus.textContent = "Speichern fehlgeschlagen.";
+                    saveButton.disabled = false;
+                });
+        });
+    }
+</script>
+{% endif %}
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"
+        integrity="sha384-YvpcrYf0tY3lHB60NNkmXc5s9fDVZLESaAA55NDzOxhy9GkcIdslK1eN7N6jIeHz"
+        crossorigin="anonymous"></script>
+<script>
+    const savedSearchesButton = document.getElementById("load-saved-searches");
+    const savedSearchesSection = document.getElementById("saved-searches-section");
+    const savedSearchesEmpty = document.getElementById("saved-searches-empty");
+    const savedSearchesAccordion = document.getElementById("saved-searches-accordion");
+
+    function renderSavedSearches(searches) {
+        savedSearchesAccordion.innerHTML = "";
+        if (!Array.isArray(searches) || searches.length === 0) {
+            savedSearchesEmpty.style.display = "";
+            savedSearchesSection.style.display = "";
+            return;
+        }
+        savedSearchesEmpty.style.display = "none";
+        searches
+            .slice()
+            .reverse()
+            .forEach((entry, index) => {
+                const itemId = `saved-search-${index}`;
+                const headerId = `${itemId}-heading`;
+                const collapseId = `${itemId}-collapse`;
+                const accordionItem = document.createElement("div");
+                accordionItem.className = "accordion-item";
+
+                const header = document.createElement("h2");
+                header.className = "accordion-header";
+                header.id = headerId;
+
+                const button = document.createElement("button");
+                button.className = "accordion-button collapsed";
+                button.type = "button";
+                button.setAttribute("data-bs-toggle", "collapse");
+                button.setAttribute("data-bs-target", `#${collapseId}`);
+                button.setAttribute("aria-expanded", "false");
+                button.setAttribute("aria-controls", collapseId);
+                const keywords = Array.isArray(entry.keywords) ? entry.keywords.join(", ") : "";
+                button.textContent = `${entry.saved_at || "Unbekanntes Datum"} – ${keywords}`;
+                header.appendChild(button);
+                accordionItem.appendChild(header);
+
+                const collapse = document.createElement("div");
+                collapse.id = collapseId;
+                collapse.className = "accordion-collapse collapse";
+                collapse.setAttribute("aria-labelledby", headerId);
+                collapse.setAttribute("data-bs-parent", "#saved-searches-accordion");
+
+                const body = document.createElement("div");
+                body.className = "accordion-body";
+
+                const startUrlsP = document.createElement("p");
+                startUrlsP.className = "mb-2";
+                const startLabel = document.createElement("strong");
+                startLabel.textContent = "Start-URLs: ";
+                startUrlsP.appendChild(startLabel);
+                startUrlsP.append(document.createTextNode((Array.isArray(entry.start_urls) && entry.start_urls.length > 0) ? entry.start_urls.join(", ") : "–"));
+                body.appendChild(startUrlsP);
+
+                const rangeP = document.createElement("p");
+                rangeP.className = "mb-2";
+                const rangeLabel = document.createElement("strong");
+                rangeLabel.textContent = "Zeitraum: ";
+                rangeP.appendChild(rangeLabel);
+                rangeP.append(document.createTextNode(`${entry.start_date || "–"} bis ${entry.end_date || "–"}`));
+                body.appendChild(rangeP);
+
+                const concurrencyP = document.createElement("p");
+                concurrencyP.className = "mb-2";
+                const concurrencyLabel = document.createElement("strong");
+                concurrencyLabel.textContent = "Parallele Abrufe: ";
+                concurrencyP.appendChild(concurrencyLabel);
+                const concurrencyValue = typeof entry.concurrency === "number" ? entry.concurrency : null;
+                concurrencyP.append(document.createTextNode(concurrencyValue ? String(concurrencyValue) : "–"));
+                body.appendChild(concurrencyP);
+
+                const robotsP = document.createElement("p");
+                robotsP.className = "mb-2";
+                const robotsLabel = document.createElement("strong");
+                robotsLabel.textContent = "robots.txt respektiert: ";
+                robotsP.appendChild(robotsLabel);
+                const robotsValue = entry.respect_robots === false ? "Nein" : "Ja";
+                robotsP.append(document.createTextNode(robotsValue));
+                body.appendChild(robotsP);
+
+                const statusP = document.createElement("p");
+                statusP.className = "mb-3";
+                const statusLabel = document.createElement("strong");
+                statusLabel.textContent = "Status: ";
+                statusP.appendChild(statusLabel);
+                statusP.append(document.createTextNode(entry.status || "–"));
+                statusP.append(document.createTextNode(" • "));
+                const hitsLabel = document.createElement("strong");
+                hitsLabel.textContent = "Treffer: ";
+                statusP.appendChild(hitsLabel);
+                const resultCount = typeof entry.result_count === "number" ? entry.result_count : Array.isArray(entry.results) ? entry.results.length : 0;
+                statusP.append(document.createTextNode(String(resultCount)));
+                body.appendChild(statusP);
+
+                const tableWrapper = document.createElement("div");
+                tableWrapper.className = "table-responsive";
+                const table = document.createElement("table");
+                table.className = "table table-sm";
+                const thead = document.createElement("thead");
+                const headerRow = document.createElement("tr");
+                ["Ursprungs-URL", "Gefundene URL", "Stichwörter"].forEach(text => {
+                    const th = document.createElement("th");
+                    th.textContent = text;
+                    headerRow.appendChild(th);
+                });
+                thead.appendChild(headerRow);
+                table.appendChild(thead);
+
+                const tbody = document.createElement("tbody");
+                (entry.results || []).forEach(result => {
+                    const row = document.createElement("tr");
+
+                    const sourceCell = document.createElement("td");
+                    const sourceUrl = typeof result.source_url === "string" ? result.source_url : "";
+                    if (sourceUrl) {
+                        const sourceLink = document.createElement("a");
+                        sourceLink.href = sourceUrl;
+                        sourceLink.textContent = sourceUrl;
+                        sourceLink.target = "_blank";
+                        sourceLink.rel = "noopener";
+                        sourceCell.appendChild(sourceLink);
+                    } else {
+                        sourceCell.textContent = "–";
+                    }
+                    row.appendChild(sourceCell);
+
+                    const targetCell = document.createElement("td");
+                    const targetUrl = typeof result.target_url === "string" ? result.target_url : "";
+                    if (targetUrl) {
+                        const targetLink = document.createElement("a");
+                        targetLink.href = targetUrl;
+                        targetLink.textContent = targetUrl;
+                        targetLink.target = "_blank";
+                        targetLink.rel = "noopener";
+                        targetCell.appendChild(targetLink);
+                    } else {
+                        targetCell.textContent = "–";
+                    }
+                    row.appendChild(targetCell);
+
+                    const keywordsCell = document.createElement("td");
+                    const matched = Array.isArray(result.matched_keywords) ? result.matched_keywords.join(", ") : "";
+                    keywordsCell.textContent = matched;
+                    row.appendChild(keywordsCell);
+
+                    tbody.appendChild(row);
+                });
+                table.appendChild(tbody);
+                tableWrapper.appendChild(table);
+                body.appendChild(tableWrapper);
+
+                collapse.appendChild(body);
+                accordionItem.appendChild(collapse);
+
+                savedSearchesAccordion.appendChild(accordionItem);
+            });
+        savedSearchesSection.style.display = "";
+    }
+
+    if (savedSearchesButton) {
+        savedSearchesButton.addEventListener("click", () => {
+            fetch("/saved-searches")
+                .then(response => response.json())
+                .then(data => {
+                    renderSavedSearches(data.searches || []);
+                })
+                .catch(() => {
+                    savedSearchesEmpty.textContent = "Gespeicherte Suchläufe konnten nicht geladen werden.";
+                    savedSearchesEmpty.style.display = "";
+                    savedSearchesSection.style.display = "";
+                });
+        });
+    }
+</script>
+</body>
+</html>

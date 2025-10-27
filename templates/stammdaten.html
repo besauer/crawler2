@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+    <meta charset="UTF-8">
+    <title>Stammdaten verwalten</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css"
+          integrity="sha384-QWTKZyjpPEjISv5WaRU9OFeRpok6YctnYmDr5pNlyT2bRjXh0JMhjY6hW+ALEwIH"
+          crossorigin="anonymous">
+    <style>
+        body { padding-top: 0; }
+        table tbody tr td { vertical-align: middle; }
+    </style>
+</head>
+<body>
+<nav class="navbar navbar-expand-lg navbar-light bg-light border-bottom">
+    <div class="container">
+        <a class="navbar-brand" href="{{ url_for('index') }}">Schul-Crawler</a>
+        <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#mainNav"
+                aria-controls="mainNav" aria-expanded="false" aria-label="Navigation umschalten">
+            <span class="navbar-toggler-icon"></span>
+        </button>
+        <div class="collapse navbar-collapse" id="mainNav">
+            <ul class="navbar-nav ms-auto mb-2 mb-lg-0">
+                <li class="nav-item">
+                    <a class="nav-link {% if active_page == 'search' %}active{% endif %}"
+                       {% if active_page == 'search' %}aria-current="page"{% endif %}
+                       href="{{ url_for('index') }}">Suche</a>
+                </li>
+                <li class="nav-item">
+                    <a class="nav-link {% if active_page == 'stammdaten' %}active{% endif %}"
+                       {% if active_page == 'stammdaten' %}aria-current="page"{% endif %}
+                       href="{{ url_for('stammdaten') }}">Stammdaten</a>
+                </li>
+            </ul>
+        </div>
+    </div>
+</nav>
+<main class="container py-4">
+    <h1 class="mb-4">Stammdaten verwalten</h1>
+    <p class="text-muted">Importieren Sie eine Excel-Datei mit Stammdaten (eine Zeile pro Schule).
+        Die Daten werden lokal in <code>{{ storage_file }}</code> gespeichert und stehen anschließend in der Suche zur Auswahl.</p>
+
+    {% if message %}
+        <div class="alert alert-{{ message_category or 'info' }}" role="alert">{{ message }}</div>
+    {% endif %}
+
+    <form method="post" enctype="multipart/form-data" class="mb-5">
+        <div class="mb-3">
+            <label for="excel_file" class="form-label">Excel-Datei (.xlsx)</label>
+            <input type="file" class="form-control" id="excel_file" name="excel_file"
+                   accept=".xlsx,.xlsm,.xltx,.xltm" required>
+            <div class="form-text">
+                Erwartete Spalten: Schul ID, Träger, Name, Ort, Anzahl Schüler, Anzahl Klassen, Homepage.
+            </div>
+        </div>
+        <div class="d-flex gap-2 flex-wrap">
+            <button type="submit" class="btn btn-primary">Stammdaten importieren</button>
+            <a href="{{ url_for('index') }}" class="btn btn-outline-secondary">Zur Suche</a>
+        </div>
+    </form>
+
+    <h2 class="h4">Aktuell gespeicherte Stammdaten</h2>
+    {% if records %}
+        <div class="table-responsive">
+            <table class="table table-striped table-hover align-middle">
+                <thead class="table-light">
+                <tr>
+                    {% for field in stammdaten_fields %}
+                        <th scope="col">{{ field.label }}</th>
+                    {% endfor %}
+                </tr>
+                </thead>
+                <tbody>
+                {% for record in records %}
+                    <tr>
+                        <td>{{ record.schul_id or "–" }}</td>
+                        <td>{{ record.traeger or "–" }}</td>
+                        <td>{{ record.name or "–" }}</td>
+                        <td>{{ record.ort or "–" }}</td>
+                        <td>{{ record.anzahl_schueler if record.anzahl_schueler is not none else "–" }}</td>
+                        <td>{{ record.anzahl_klassen if record.anzahl_klassen is not none else "–" }}</td>
+                        <td>
+                            {% if record.homepage %}
+                                <a href="{{ record.homepage }}" target="_blank" rel="noopener">{{ record.homepage }}</a>
+                            {% else %}
+                                –
+                            {% endif %}
+                        </td>
+                    </tr>
+                {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    {% else %}
+        <div class="alert alert-info" role="alert">
+            Es sind noch keine Stammdaten gespeichert.
+        </div>
+    {% endif %}
+</main>
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"
+        integrity="sha384-YvpcrYf0tY3lHB60NNkmXc5s9fDVZLESaAA55NDzOxhy9GkcIdslK1eN7N6jIeHz"
+        crossorigin="anonymous"></script>
+</body>
+</html>
